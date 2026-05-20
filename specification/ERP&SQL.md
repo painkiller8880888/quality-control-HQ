@@ -1,6 +1,7 @@
 # ERPとSQLのテーブル構造
 
 ## 1. ERP上の製品構成
+
 - ERP上では製品は複数ノードから成る構成として表現される。
 - 各ノードはコード、名称、階層レベル、担当部署、数量などを持つ。
 - コード体系は以下を前提とする。
@@ -10,12 +11,14 @@
 - `E`: 原料
 
 ## 2. 構成データ取込ルール
+
 - ERP出力は上から順に処理する。
 - 階層レベル `n` のノードは、直前方向に存在する最も近い階層レベル `n-1` のノードを親とする。
 - 構成取込時は循環参照を検証する。
 - 検証に失敗した場合、当該更新全体を本番反映しない。
 
 ## 3. カテゴリ定義
+
 - 検査対象には7カテゴリがある。
 - `1`: 自動機
 - `2`: 半自動機
@@ -27,6 +30,7 @@
 - 検査書発行対象は `1` と `6` と `7` のみ。
 
 ## 4. データモデル方針
+
 - ERP由来マスタと、日次業務データは分離する。
 - 当日検査対象は `inspection_session` と `inspection_target` に保存する。
 - 検査実績は `history` に保存する。
@@ -35,6 +39,7 @@
 ## 5. テーブル定義
 
 ### 5.1 master
+
 ERP由来の品目マスタ。
 
 | column | type | note |
@@ -48,6 +53,7 @@ ERP由来の品目マスタ。
 | updated_at |  | 最終更新日時 |
 
 ### 5.2 structure
+
 親子構成を保持する。
 
 | column | type | note |
@@ -60,9 +66,11 @@ ERP由来の品目マスタ。
 | quantity |  | 使用数量 |
 
 制約
+
 - `UNIQUE(parent_code, child_code)`
 
 ### 5.3 inspection_file
+
 検査書ファイル索引。既存文書の探索結果を保持する。
 
 | column | type | note |
@@ -74,10 +82,12 @@ ERP由来の品目マスタ。
 | discovered_at |  | 探索日時 |
 
 補足
+
 - 検査書ファイル名には必ずコードを含む前提とする。
 - フォルダ走査時にコード一致したファイルのみ登録する。
 
 ### 5.4 inspection_session
+
 1営業日分の検査業務単位。
 
 | column | type | note |
@@ -89,6 +99,7 @@ ERP由来の品目マスタ。
 | updated_at |  | 更新日時 |
 
 ### 5.5 inspection_target
+
 当日検査対象のスナップショット。
 
 | column | type | note |
@@ -107,9 +118,11 @@ ERP由来の品目マスタ。
 | updated_at |  | 更新日時 |
 
 制約
+
 - `UNIQUE(session_id, normalized_code)`
 
 ### 5.6 inspection_target_warning
+
 当日検査対象に紐づく警告。
 
 | column | type | note |
@@ -122,6 +135,7 @@ ERP由来の品目マスタ。
 | created_at |  | 作成日時 |
 
 ### 5.7 history
+
 検査済み時間帯の履歴。
 
 | column | type | note |
@@ -134,13 +148,16 @@ ERP由来の品目マスタ。
 | updated_at |  | 更新日時 |
 
 制約
+
 - `UNIQUE(date, master_id, time_slot)`
 
 補足
+
 - `history` はチェック済みのみ保持する。
 - 未チェックはレコードなしで表現する。
 
 ### 5.8 machines
+
 見取り図上の機械定義。
 
 | column | type | note |
@@ -156,9 +173,11 @@ ERP由来の品目マスタ。
 | is_active |  | bool |
 
 補足
+
 - MVPでは `polygon` を扱わない。
 
 ### 5.9 machine_assignments
+
 機械と担当コードの対応。
 
 | column | type | note |
@@ -168,9 +187,11 @@ ERP由来の品目マスタ。
 | code | FK -> master.code | 担当コード |
 
 制約
+
 - `UNIQUE(machine_id, code)`
 
 ### 5.10 jobs
+
 非同期ジョブ管理。
 
 | column | type | note |
@@ -185,6 +206,7 @@ ERP由来の品目マスタ。
 | finished_at |  | 終了日時 |
 
 ## 6. チェック時間帯マスタ
+
 - `A = 08:30-10:00`
 - `B = 10:10-12:00`
 - `C = 12:45-14:45`
