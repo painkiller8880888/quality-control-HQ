@@ -4,7 +4,7 @@ from django.db import models
 class Master(models.Model):
     code = models.CharField(max_length=32, unique=True)
     name = models.CharField(max_length=255)
-    node_type = models.CharField(max_length=64, blank=True)
+    node_type = models.CharField(max_length=64, null=True, blank=True)
     department = models.CharField(max_length=128, blank=True)
     category = models.PositiveSmallIntegerField(null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True)

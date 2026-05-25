@@ -45,10 +45,10 @@ ERP由来の品目マスタ。
 | column | type | note |
 |---|---|---|
 | master_id | PK | 主キー |
-| code | UNIQUE | コード |
-| name |  | 名称 |
+| code | UNIQUE | コード, ERPデータにおける10列目 |
+| name |  | 名称, ERPデータにおける11列目 |
 | node_type |  | 作業種類 |
-| department |  | 担当部署 |
+| department |  | 担当部署, ERPデータにおける17列目 |
 | category |  | カテゴリ |
 | updated_at |  | 最終更新日時 |
 
@@ -59,11 +59,11 @@ ERP由来の品目マスタ。
 | column | type | note |
 |---|---|---|
 | structure_id | PK | 主キー |
-| root_code | INDEX | 構成ルートコード |
-| parent_code | INDEX | 親コード |
-| child_code | INDEX | 子コード |
-| level |  | 親ノード階層 |
-| quantity |  | 使用数量 |
+| root_code | INDEX | 構成ルートコード, ERPデータにおける2列目 |
+| parent_code | INDEX | 親コード, ERPデータにおける9列目 |
+| child_code | INDEX | 子コード, ERPデータにおける10列目 |
+| level |  | 親ノード階層, ERPデータにおける12列目 |
+| quantity |  | 使用数量, ERPデータにおける19列目 |
 
 制約
 

@@ -11,6 +11,8 @@ from .serializers import (
     InspectionTargetSerializer,
     JobSerializer,
     ManualTargetsRequestSerializer,
+    MasterImportRequestSerializer,
+    PlanImportRequestSerializer,
     SingleHistoryRequestSerializer,
 )
 from .services import (
@@ -19,6 +21,8 @@ from .services import (
     create_job,
     generate_daily_report,
     history_map_for_date,
+    import_master_csv,
+    import_plan_targets,
     run_job,
     set_check,
 )
@@ -48,23 +52,52 @@ class JobDetailView(APIView):
 
 class MasterUpdateView(APIView):
     def post(self, request):
-        job = create_job(Job.JobType.MASTER_UPDATE, request.data)
-        job.status = Job.Status.QUEUED
-        job.save(update_fields=["status"])
+        serializer = MasterImportRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        master_file = request.FILES.get("master_file")
+        job = create_job(
+            Job.JobType.MASTER_UPDATE,
+            {
+                "force": serializer.validated_data["force"],
+                "master_file": getattr(master_file, "name", None),
+            },
+        )
+        try:
+            run_job(job, lambda: import_master_csv(master_file=master_file))
+        except FileNotFoundError as exc:
+            return error_response("FILE_NOT_FOUND", str(exc), status.HTTP_404_NOT_FOUND)
+        except Exception as exc:
+            return error_response("ERP_AUTOMATION_FAILED", str(exc), status.HTTP_500_INTERNAL_SERVER_ERROR)
         return Response({"status": "accepted", "job_id": job.job_id}, status=status.HTTP_202_ACCEPTED)
 
 
 class PlansImportView(APIView):
     def post(self, request):
-        if not request.FILES.get("scan_file") and not request.FILES.get("excel_file"):
-            return error_response(
-                "INVALID_REQUEST",
-                "scan_file or excel_file is required.",
-            )
+        serializer = PlanImportRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        scan_file = request.FILES.get("scan_file")
+        excel_file = request.FILES.get("excel_file")
         job = create_job(
             Job.JobType.PLANS_IMPORT,
-            {"target_date": request.data.get("target_date")},
+            {
+                "target_date": str(serializer.validated_data["target_date"]),
+                "scan_file": getattr(scan_file, "name", None),
+                "excel_file": getattr(excel_file, "name", None),
+            },
         )
+        try:
+            run_job(
+                job,
+                lambda: import_plan_targets(
+                    serializer.validated_data["target_date"],
+                    scan_file=scan_file,
+                    excel_file=excel_file,
+                ),
+            )
+        except FileNotFoundError as exc:
+            return error_response("FILE_NOT_FOUND", str(exc), status.HTTP_404_NOT_FOUND)
+        except Exception as exc:
+            return error_response("JOB_FAILED", str(exc), status.HTTP_500_INTERNAL_SERVER_ERROR)
         return Response({"status": "accepted", "job_id": job.job_id}, status=status.HTTP_202_ACCEPTED)
 
 

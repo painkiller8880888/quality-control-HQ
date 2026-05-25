@@ -68,3 +68,5 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 DAILY_REPORT_TEMPLATE = REPO_DIR / "excel" / "daily.xlsm"
 DAILY_REPORT_OUTPUT_DIR = REPO_DIR / "reports"
+PRESS_PLAN_DIR = r"\\192.168.1.210\@isk\★部門\④製造管理部\★製造\製造業務\巡回検査依頼表兼報告書"
+TEST_INPUT_DIR = REPO_DIR / "temp"

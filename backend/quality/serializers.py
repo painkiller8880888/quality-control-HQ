@@ -87,6 +87,14 @@ class DailyReportGenerateRequestSerializer(serializers.Serializer):
     date = serializers.DateField()
 
 
+class PlanImportRequestSerializer(serializers.Serializer):
+    target_date = serializers.DateField()
+
+
+class MasterImportRequestSerializer(serializers.Serializer):
+    force = serializers.BooleanField(required=False, default=False)
+
+
 class JobSerializer(serializers.ModelSerializer):
     class Meta:
         model = Job
