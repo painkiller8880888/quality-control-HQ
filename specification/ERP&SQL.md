@@ -165,16 +165,7 @@ ERP由来の品目マスタ。
 | machine_id | PK | 主キー |
 | machine_no | UNIQUE | 機械番号 |
 | machine_name |  | 機械名称 |
-| shape_type |  | `circle / ellipse / rectangle` |
-| map_x |  | 中心X座標 |
-| map_y |  | 中心Y座標 |
-| width |  | 幅 |
-| height |  | 高さ |
 | is_active |  | bool |
-
-補足
-
-- MVPでは `polygon` を扱わない。
 
 ### 5.9 machine_assignments
 
