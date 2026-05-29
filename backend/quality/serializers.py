@@ -1,7 +1,10 @@
 from rest_framework import serializers
 
 from .constants import CHECK_SLOTS
-from .models import History, InspectionTarget, Job
+from .models import History, InspectionTarget, Job, LayoutObject, LayoutObjectType, Machine
+
+
+LAYOUT_OBJECT_TYPES = {"machine", "wall", "path", "area", "stairs", "entrance"}
 
 
 class WarningSerializer(serializers.Serializer):
@@ -107,3 +110,66 @@ class JobSerializer(serializers.ModelSerializer):
             "error_message",
             "result",
         ]
+
+
+class LayoutObjectTypeSerializer(serializers.ModelSerializer):
+    object_type_id = serializers.IntegerField(source="id", read_only=True)
+
+    class Meta:
+        model = LayoutObjectType
+        fields = ["object_type_id", "code", "display_name", "color", "image_path", "selectable"]
+
+
+class LayoutObjectSerializer(serializers.ModelSerializer):
+    layout_object_id = serializers.IntegerField(source="id", read_only=True)
+    type = serializers.CharField(source="object_type.code", read_only=True)
+    machine_id = serializers.IntegerField(source="machine.id", read_only=True, allow_null=True)
+    machine_no = serializers.CharField(source="machine.machine_no", read_only=True, allow_null=True)
+    machine_name = serializers.CharField(source="machine.machine_name", read_only=True, allow_null=True)
+
+    class Meta:
+        model = LayoutObject
+        fields = [
+            "layout_object_id",
+            "type",
+            "machine_id",
+            "machine_no",
+            "machine_name",
+            "object_name",
+            "grid_x",
+            "grid_y",
+            "width",
+            "height",
+            "rotation",
+            "meta_json",
+        ]
+
+
+class LayoutObjectInputSerializer(serializers.Serializer):
+    type = serializers.ChoiceField(choices=sorted(LAYOUT_OBJECT_TYPES))
+    machine_id = serializers.IntegerField(required=False, allow_null=True)
+    object_name = serializers.CharField(max_length=255, required=False, allow_blank=True)
+    grid_x = serializers.IntegerField(min_value=0)
+    grid_y = serializers.IntegerField(min_value=0)
+    width = serializers.IntegerField(min_value=1)
+    height = serializers.IntegerField(min_value=1)
+    rotation = serializers.FloatField(required=False, default=0)
+    meta_json = serializers.JSONField(required=False, default=dict)
+
+    def validate_machine_id(self, value):
+        if value is not None and not Machine.objects.filter(id=value).exists():
+            raise serializers.ValidationError("machine_id does not exist.")
+        return value
+
+    def validate(self, attrs):
+        if attrs["type"] != "machine":
+            attrs["machine_id"] = None
+        return attrs
+
+
+class LayoutSaveRequestSerializer(serializers.Serializer):
+    layout_name = serializers.CharField(max_length=128, required=False, default="default")
+    background_image_path = serializers.CharField(required=False, allow_blank=True, default="")
+    grid_width = serializers.IntegerField(min_value=1, default=50)
+    grid_height = serializers.IntegerField(min_value=1, default=50)
+    objects = LayoutObjectInputSerializer(many=True, required=False, default=list)

@@ -2,6 +2,7 @@ from django.urls import path
 
 from .views import (
     BulkHistoryView,
+    FactoryMapLayoutView,
     DailyReportGenerateView,
     FactoryMapView,
     InspectionSheetIssueView,
@@ -26,6 +27,7 @@ urlpatterns = [
     path("inspection-targets/<int:target_id>/", InspectionTargetDetailView.as_view()),
     path("history/", SingleHistoryView.as_view()),
     path("history/bulk-upsert/", BulkHistoryView.as_view()),
+    path("factory-map/layout/", FactoryMapLayoutView.as_view()),
     path("factory-map/", FactoryMapView.as_view()),
     path("inspection-sheet/issue/", InspectionSheetIssueView.as_view()),
     path("daily-report/generate/", DailyReportGenerateView.as_view()),

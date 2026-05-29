@@ -63,3 +63,65 @@ export interface ApiError {
   message: string;
   details?: Record<string, any>;
 }
+
+export type LayoutObjectTypeCode = 'machine' | 'wall' | 'path' | 'area' | 'stairs' | 'entrance';
+
+export interface LayoutObjectType {
+  object_type_id: number;
+  code: LayoutObjectTypeCode;
+  display_name: string;
+  color: string;
+  image_path: string;
+  selectable: boolean;
+}
+
+export interface LayoutObject {
+  layout_object_id?: number;
+  type: LayoutObjectTypeCode;
+  machine_id: number | null;
+  machine_no?: string | null;
+  machine_name?: string | null;
+  object_name: string;
+  grid_x: number;
+  grid_y: number;
+  width: number;
+  height: number;
+  rotation?: number;
+  meta_json?: Record<string, any>;
+}
+
+export interface FactoryMapMachine {
+  machine_id: number;
+  machine_no: string;
+  machine_name: string;
+  shape_type: 'circle' | 'ellipse' | 'rectangle';
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  status: 'idle' | 'pending';
+  assigned_codes: string[];
+  target_codes: string[];
+}
+
+export interface FactoryMapWarning {
+  code: string;
+  error_code: string;
+}
+
+export interface FactoryMapLayout {
+  layout_id: number;
+  layout_name: string;
+  background_image_path: string;
+  grid_width: number;
+  grid_height: number;
+  object_types: LayoutObjectType[];
+  objects: LayoutObject[];
+}
+
+export interface FactoryMapResponse {
+  image_url: string;
+  layout: FactoryMapLayout;
+  machines: FactoryMapMachine[];
+  warnings: FactoryMapWarning[];
+}

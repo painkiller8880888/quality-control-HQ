@@ -1,15 +1,30 @@
 from django.shortcuts import get_object_or_404
+from django.db import transaction
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import History, InspectionSession, InspectionTarget, Job, Master
+from .models import (
+    History,
+    InspectionSession,
+    InspectionTarget,
+    Job,
+    LayoutMaster,
+    LayoutObject,
+    LayoutObjectType,
+    Machine,
+    MachineAssignment,
+    Master,
+)
 from .serializers import (
     BulkHistoryRequestSerializer,
     DailyReportGenerateRequestSerializer,
     InspectionTargetSerializer,
     JobSerializer,
+    LayoutObjectSerializer,
+    LayoutObjectTypeSerializer,
+    LayoutSaveRequestSerializer,
     ManualTargetsRequestSerializer,
     MasterImportRequestSerializer,
     PlanImportRequestSerializer,
@@ -42,6 +57,51 @@ def error_response(error_code, message, http_status=status.HTTP_400_BAD_REQUEST,
         },
         status=http_status,
     )
+
+
+DEFAULT_LAYOUT_NAME = "default"
+LAYOUT_OBJECT_TYPE_DEFAULTS = {
+    "machine": ("機械", "#6366f1"),
+    "wall": ("壁", "#64748b"),
+    "path": ("通路", "#10b981"),
+    "area": ("エリア", "#f59e0b"),
+    "stairs": ("階段", "#a855f7"),
+    "entrance": ("出入口", "#06b6d4"),
+}
+
+
+def ensure_layout_object_types():
+    for code, (display_name, color) in LAYOUT_OBJECT_TYPE_DEFAULTS.items():
+        LayoutObjectType.objects.get_or_create(
+            code=code,
+            defaults={"display_name": display_name, "color": color, "selectable": True},
+        )
+
+
+def get_default_layout():
+    ensure_layout_object_types()
+    layout, _ = LayoutMaster.objects.get_or_create(
+        layout_name=DEFAULT_LAYOUT_NAME,
+        defaults={"grid_width": 50, "grid_height": 50},
+    )
+    return layout
+
+
+def serialize_layout(layout):
+    objects = (
+        layout.layout_objects.select_related("object_type", "machine")
+        .order_by("id")
+    )
+    object_types = LayoutObjectType.objects.order_by("code")
+    return {
+        "layout_id": layout.id,
+        "layout_name": layout.layout_name,
+        "background_image_path": layout.background_image_path,
+        "grid_width": layout.grid_width,
+        "grid_height": layout.grid_height,
+        "object_types": LayoutObjectTypeSerializer(object_types, many=True).data,
+        "objects": LayoutObjectSerializer(objects, many=True).data,
+    }
 
 
 class JobDetailView(APIView):
@@ -195,13 +255,103 @@ class SingleHistoryView(APIView):
 
 class FactoryMapView(APIView):
     def get(self, request):
+        target_date = request.query_params.get("date")
+        layout = get_default_layout()
+        target_codes = set()
+        target_codes_by_machine = {}
+        warnings = []
+
+        if target_date:
+            session = InspectionSession.objects.filter(target_date=target_date).first()
+            if session:
+                targets = InspectionTarget.objects.filter(session=session).select_related("master")
+                target_codes = {target.normalized_code for target in targets}
+                assigned_codes = set(
+                    MachineAssignment.objects.filter(code__code__in=target_codes).values_list("code__code", flat=True)
+                )
+                for code in sorted(target_codes - assigned_codes):
+                    warnings.append({"code": code, "error_code": "NO_MATCHING_MACHINE"})
+
+                for assignment in (
+                    MachineAssignment.objects.filter(code__code__in=target_codes)
+                    .select_related("machine", "code")
+                    .order_by("machine_id", "code__code")
+                ):
+                    target_codes_by_machine.setdefault(assignment.machine_id, []).append(assignment.code.code)
+
+        machines = []
+        for machine in Machine.objects.filter(is_active=True).prefetch_related("assignments__code").order_by("machine_no"):
+            assigned_codes = [assignment.code.code for assignment in machine.assignments.all()]
+            machine_target_codes = target_codes_by_machine.get(machine.id, [])
+            machines.append(
+                {
+                    "machine_id": machine.id,
+                    "machine_no": machine.machine_no,
+                    "machine_name": machine.machine_name,
+                    "shape_type": machine.shape_type,
+                    "x": machine.map_x,
+                    "y": machine.map_y,
+                    "width": machine.width,
+                    "height": machine.height,
+                    "status": "pending" if machine_target_codes else "idle",
+                    "assigned_codes": assigned_codes,
+                    "target_codes": machine_target_codes,
+                }
+            )
+
         return Response(
             {
-                "image_url": "/media/maps/factory.png",
-                "machines": [],
-                "warnings": [],
+                "image_url": layout.background_image_path or "",
+                "layout": serialize_layout(layout),
+                "machines": machines,
+                "warnings": warnings,
             }
         )
+
+
+class FactoryMapLayoutView(APIView):
+    def get(self, request):
+        return Response(serialize_layout(get_default_layout()))
+
+    @transaction.atomic
+    def put(self, request):
+        serializer = LayoutSaveRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        ensure_layout_object_types()
+        layout, _ = LayoutMaster.objects.get_or_create(layout_name=data["layout_name"])
+        layout.background_image_path = data["background_image_path"]
+        layout.grid_width = data["grid_width"]
+        layout.grid_height = data["grid_height"]
+        layout.save()
+
+        layout.layout_objects.all().delete()
+        object_types = {item.code: item for item in LayoutObjectType.objects.all()}
+        machines = {item.id: item for item in Machine.objects.filter(id__in=[
+            obj["machine_id"] for obj in data["objects"] if obj.get("machine_id") is not None
+        ])}
+
+        for obj in data["objects"]:
+            machine_id = obj.get("machine_id")
+            object_name = obj.get("object_name") or ""
+            machine = machines.get(machine_id) if machine_id is not None else None
+            if machine and not object_name:
+                object_name = machine.machine_name
+            LayoutObject.objects.create(
+                layout=layout,
+                object_type=object_types[obj["type"]],
+                machine=machine,
+                object_name=object_name,
+                grid_x=obj["grid_x"],
+                grid_y=obj["grid_y"],
+                width=obj["width"],
+                height=obj["height"],
+                rotation=obj.get("rotation", 0),
+                meta_json=obj.get("meta_json", {}),
+            )
+
+        return Response(serialize_layout(layout))
 
 
 class InspectionSheetIssueView(APIView):

@@ -165,6 +165,8 @@ ERP由来の品目マスタ。
 | machine_id | PK | 主キー |
 | machine_no | UNIQUE | 機械番号 |
 | machine_name |  | 機械名称 |
+| machine_category |  | 品目カテゴリ |
+| machine_class |  | `full_auto` / `semi_auto` / `jig` |
 | is_active |  | bool |
 
 ### 5.9 machine_assignments
@@ -195,6 +197,70 @@ ERP由来の品目マスタ。
 | error_message |  | 失敗理由 |
 | started_at |  | 開始日時 |
 | finished_at |  | 終了日時 |
+
+### 5.11 layout_master
+
+見取り図定義。
+
+| column | type | note |
+|---|---|---|
+| layout_id  | PK | 主キー |
+| layout_name | UNIQUE | 見取り図名称 |
+| background_image_path |  | 背景画像パス, nullable |
+| grid_width |  | グリッド横数 |
+| grid_height |  | グリッド縦数 |
+| created_at |  | 作成日時 |
+| updated_at |  | 更新日時 |
+
+補足
+
+- 背景画像は位置合わせ用の補助表示として利用する。
+- 実際のレイアウト情報はグリッド座標で保持する。
+
+### 5.12 layout_object_type
+
+見取り図上の要素種別定義。
+
+| column | type | note |
+|---|---|---|
+| object_type_id | PK | 主キー |
+| code | UNIQUE | `machine / wall / path / area / stairs / entrance` |
+| display_name |  | 表示名称  |
+| color |  | 表示色 |
+| image_path |  | 表示画像パス, nullable |
+| selectable |  | bool |
+| created_at |  | 作成日時 |
+
+補足
+
+- MVPでは巡回導線と機械配置に必要な要素のみ扱う。
+- 要素追加はマスタ追加のみで拡張可能とする。
+
+### 5.13 layout_object
+
+見取り図上の配置オブジェクト。
+
+| column | type | note |
+|---|---|---|
+| layout_object_id | PK | 主キー |
+| layout_id | FK -> layout_master.layout_id | 見取り図 |
+| object_type_id | FK -> layout_object_type.object_type_id | 要素種別 |
+| machine_id | FK -> machines.machine_id, nullable | 機械要素時のみ使用 |
+| object_name |  | 表示名 |
+| grid_x |  | グリッドX座標 |
+| grid_y |  | グリッドY座標 |
+| width |  | 横幅 |
+| height |  | 高さ |
+| rotation |  | 回転角度 |
+| meta_json |  | 拡張情報 |
+| created_at |  | 作成日時 |
+| updated_at |  | 更新日時 |
+
+補足
+
+- 座標およびサイズはグリッド単位で保持する。
+- `machine_id` を持つことで当日検査対象との連携を行う。
+- `meta_json` は将来的な拡張情報保持に利用可能とする。
 
 ## 6. チェック時間帯マスタ
 

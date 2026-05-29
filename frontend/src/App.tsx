@@ -3,15 +3,21 @@ import { ImportForm } from './components/ImportForm';
 import { ImportSummary } from './components/ImportSummary';
 import { WarningSummaryCard } from './components/WarningSummaryCard';
 import { TargetsTable } from './components/TargetsTable';
-import type { Job, InspectionTarget, ApiError } from './types';
-import { ShieldAlert, RefreshCw, Layers } from 'lucide-react';
+import { FactoryMapViewer } from './components/FactoryMapViewer';
+import { FactoryMapCreator } from './components/FactoryMapCreator';
+import type { Job, InspectionTarget, ApiError, FactoryMapResponse } from './types';
+import { ShieldAlert, RefreshCw, Layers, Map as MapIcon, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 
 export const App: React.FC = () => {
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'mapCreator'>('dashboard');
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(false);
   const [selectedDate, setSelectedDate] = useState<string>('');
   const [currentJob, setCurrentJob] = useState<Job | null>(null);
   const [targets, setTargets] = useState<InspectionTarget[]>([]);
+  const [factoryMap, setFactoryMap] = useState<FactoryMapResponse | null>(null);
   const [isLoadingJob, setIsLoadingJob] = useState<boolean>(false);
   const [isLoadingTargets, setIsLoadingTargets] = useState<boolean>(false);
+  const [isLoadingFactoryMap, setIsLoadingFactoryMap] = useState<boolean>(false);
   const [globalError, setGlobalError] = useState<string | null>(null);
 
   const pollingTimerRef = useRef<any>(null);
@@ -24,6 +30,12 @@ export const App: React.FC = () => {
       }
     };
   }, []);
+
+  useEffect(() => {
+    if (selectedDate) {
+      fetchFactoryMap(selectedDate);
+    }
+  }, [selectedDate]);
 
   // Fetch targets for selected date
   const fetchTargets = async (date: string) => {
@@ -50,6 +62,25 @@ export const App: React.FC = () => {
       setTargets([]);
     } finally {
       setIsLoadingTargets(false);
+    }
+  };
+
+  const fetchFactoryMap = async (date: string) => {
+    if (!date) return;
+    setIsLoadingFactoryMap(true);
+
+    try {
+      const response = await fetch(`/api/factory-map/?date=${date}`);
+      if (!response.ok) {
+        throw new Error(`見取り図の取得に失敗しました (${response.status})`);
+      }
+      const data: FactoryMapResponse = await response.json();
+      setFactoryMap(data);
+    } catch (err: any) {
+      setGlobalError(err.message || '見取り図の取得に失敗しました。');
+      setFactoryMap(null);
+    } finally {
+      setIsLoadingFactoryMap(false);
     }
   };
 
@@ -162,6 +193,7 @@ export const App: React.FC = () => {
   const handleRefreshTargets = () => {
     if (selectedDate) {
       fetchTargets(selectedDate);
+      fetchFactoryMap(selectedDate);
     }
   };
 
@@ -178,6 +210,25 @@ export const App: React.FC = () => {
       </header>
 
       <main className="app-main">
+        <nav className="app-tabs" aria-label="メイン画面切替">
+          <button
+            type="button"
+            className={`app-tab ${activeTab === 'dashboard' ? 'active' : ''}`}
+            onClick={() => setActiveTab('dashboard')}
+          >
+            <Layers size={16} />
+            巡回ダッシュボード
+          </button>
+          <button
+            type="button"
+            className={`app-tab ${activeTab === 'mapCreator' ? 'active' : ''}`}
+            onClick={() => setActiveTab('mapCreator')}
+          >
+            <MapIcon size={16} />
+            見取り図作成
+          </button>
+        </nav>
+
         {globalError && (
           <div className="card error-card-global animate-shake">
             <ShieldAlert size={20} className="error-icon" />
@@ -189,42 +240,71 @@ export const App: React.FC = () => {
           </div>
         )}
 
-        <div className="dashboard-grid">
-          <div className="dashboard-sidebar">
-            <ImportForm onImportStart={handleImportStart} isLoading={isLoadingJob} />
-            <ImportSummary job={currentJob} />
-          </div>
-
-          <div className="dashboard-content">
-            {selectedDate && (
-              <div className="targets-section-header">
-                <div className="targets-date-display">
-                  <span>対象日:</span>
-                  <strong>{selectedDate}</strong>
+        {activeTab === 'dashboard' ? (
+          <div className={`dashboard-grid ${isSidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
+            <aside className="dashboard-sidebar">
+              <button
+                type="button"
+                className="sidebar-toggle-btn"
+                onClick={() => setIsSidebarCollapsed((current) => !current)}
+                title={isSidebarCollapsed ? 'サイドバーを展開' : 'サイドバーを折りたたむ'}
+              >
+                {isSidebarCollapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}
+              </button>
+              {isSidebarCollapsed ? (
+                <div className="collapsed-sidebar-rail">
+                  <span>取込</span>
+                  {currentJob && <span className={`collapsed-status-dot ${currentJob.status}`}></span>}
                 </div>
-                <button 
-                  className="btn btn-secondary btn-icon-only" 
-                  onClick={handleRefreshTargets}
-                  disabled={isLoadingTargets}
-                  title="再読み込み"
-                >
-                  <RefreshCw size={16} className={isLoadingTargets ? 'animate-spin' : ''} />
-                </button>
-              </div>
-            )}
+              ) : (
+                <>
+                  <ImportForm onImportStart={handleImportStart} isLoading={isLoadingJob} />
+                  <ImportSummary job={currentJob} />
+                </>
+              )}
+            </aside>
 
-            <WarningSummaryCard targets={targets} />
-            
-            {isLoadingTargets ? (
-              <div className="loading-container">
-                <div className="pulse-spinner"></div>
-                <p>検査対象データを読み込んでいます...</p>
+            <div className="dashboard-workspace">
+              <FactoryMapViewer
+                mapData={factoryMap}
+                isLoading={isLoadingFactoryMap}
+                selectedDate={selectedDate}
+              />
+
+              <div className="dashboard-content">
+                {selectedDate && (
+                  <div className="targets-section-header">
+                    <div className="targets-date-display">
+                      <span>対象日:</span>
+                      <strong>{selectedDate}</strong>
+                    </div>
+                    <button 
+                      className="btn btn-secondary btn-icon-only" 
+                      onClick={handleRefreshTargets}
+                      disabled={isLoadingTargets || isLoadingFactoryMap}
+                      title="再読み込み"
+                    >
+                      <RefreshCw size={16} className={isLoadingTargets || isLoadingFactoryMap ? 'animate-spin' : ''} />
+                    </button>
+                  </div>
+                )}
+
+                <WarningSummaryCard targets={targets} />
+                
+                {isLoadingTargets ? (
+                  <div className="loading-container">
+                    <div className="pulse-spinner"></div>
+                    <p>検査対象データを読み込んでいます...</p>
+                  </div>
+                ) : (
+                  <TargetsTable targets={targets} />
+                )}
               </div>
-            ) : (
-              <TargetsTable targets={targets} />
-            )}
+            </div>
           </div>
-        </div>
+        ) : (
+          <FactoryMapCreator />
+        )}
       </main>
 
       <footer className="app-footer">

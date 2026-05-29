@@ -174,6 +174,51 @@ class MachineAssignment(models.Model):
         ]
 
 
+class LayoutMaster(models.Model):
+    layout_name = models.CharField(max_length=128, unique=True)
+    background_image_path = models.TextField(blank=True)
+    grid_width = models.PositiveIntegerField(default=50)
+    grid_height = models.PositiveIntegerField(default=50)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return self.layout_name
+
+
+class LayoutObjectType(models.Model):
+    code = models.CharField(max_length=32, unique=True)
+    display_name = models.CharField(max_length=64)
+    color = models.CharField(max_length=32, blank=True)
+    image_path = models.TextField(blank=True)
+    selectable = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return self.display_name
+
+
+class LayoutObject(models.Model):
+    layout = models.ForeignKey(LayoutMaster, on_delete=models.CASCADE, related_name="layout_objects")
+    object_type = models.ForeignKey(LayoutObjectType, on_delete=models.PROTECT, related_name="layout_objects")
+    machine = models.ForeignKey(Machine, on_delete=models.SET_NULL, null=True, blank=True, related_name="layout_objects")
+    object_name = models.CharField(max_length=255, blank=True)
+    grid_x = models.PositiveIntegerField(default=0)
+    grid_y = models.PositiveIntegerField(default=0)
+    width = models.PositiveIntegerField(default=1)
+    height = models.PositiveIntegerField(default=1)
+    rotation = models.FloatField(default=0)
+    meta_json = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["layout", "object_type"], name="quality_lay_layout__41da4b_idx")]
+
+    def __str__(self):
+        return self.object_name or self.object_type.code
+
+
 class Job(models.Model):
     class JobType(models.TextChoices):
         MASTER_UPDATE = "master_update", "Master update"

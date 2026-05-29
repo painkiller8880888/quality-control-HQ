@@ -7,7 +7,7 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from openpyxl import Workbook, load_workbook
 from rest_framework.test import APIClient
 
-from .models import History, Job, Master
+from .models import History, Job, LayoutMaster, LayoutObject, Machine, MachineAssignment, Master
 
 
 class PhaseOneApiTests(TestCase):
@@ -190,3 +190,103 @@ class PhaseOneApiTests(TestCase):
         codes = {target["code"]: target for target in targets}
         self.assertEqual(codes["CAP0048"]["name"], "OCR参照品名")
         self.assertEqual(codes["ZZZ9999"]["warnings"][0]["error_code"], "UNKNOWN_CODE")
+
+    def test_factory_map_returns_layout_and_target_machine_status(self):
+        master = Master.objects.get(code="C1234")
+        machine = Machine.objects.create(
+            machine_no="M-001",
+            machine_name="検査機",
+            shape_type=Machine.ShapeType.RECTANGLE,
+            map_x=4,
+            map_y=5,
+            width=6,
+            height=3,
+        )
+        MachineAssignment.objects.create(machine=machine, code=master)
+
+        self.client.post(
+            "/api/inspection-targets/manual/",
+            {"date": "2026-05-23", "codes": ["C1234", "ZZZ9999"]},
+            format="json",
+        )
+
+        response = self.client.get("/api/factory-map/?date=2026-05-23")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["layout"]["grid_width"], 50)
+        self.assertEqual(payload["machines"][0]["status"], "pending")
+        self.assertEqual(payload["machines"][0]["target_codes"], ["C1234"])
+        self.assertEqual(payload["warnings"], [{"code": "ZZZ9999", "error_code": "NO_MATCHING_MACHINE"}])
+
+    def test_factory_map_layout_can_be_saved_and_reloaded(self):
+        machine = Machine.objects.create(
+            machine_no="M-002",
+            machine_name="配置機",
+            shape_type=Machine.ShapeType.RECTANGLE,
+            map_x=0,
+            map_y=0,
+            width=1,
+            height=1,
+        )
+
+        response = self.client.put(
+            "/api/factory-map/layout/",
+            {
+                "layout_name": "default",
+                "background_image_path": "/media/maps/factory.png",
+                "grid_width": 40,
+                "grid_height": 30,
+                "objects": [
+                    {
+                        "type": "machine",
+                        "machine_id": machine.id,
+                        "object_name": "",
+                        "grid_x": 2,
+                        "grid_y": 3,
+                        "width": 4,
+                        "height": 5,
+                    },
+                    {
+                        "type": "path",
+                        "object_name": "主通路",
+                        "grid_x": 0,
+                        "grid_y": 8,
+                        "width": 12,
+                        "height": 2,
+                    },
+                ],
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(LayoutMaster.objects.get(layout_name="default").grid_width, 40)
+        self.assertEqual(LayoutObject.objects.count(), 2)
+
+        payload = self.client.get("/api/factory-map/layout/").json()
+        self.assertEqual(payload["background_image_path"], "/media/maps/factory.png")
+        self.assertEqual(payload["objects"][0]["machine_name"], "配置機")
+        self.assertEqual(payload["objects"][1]["type"], "path")
+
+    def test_factory_map_layout_rejects_invalid_object(self):
+        response = self.client.put(
+            "/api/factory-map/layout/",
+            {
+                "layout_name": "default",
+                "grid_width": 50,
+                "grid_height": 50,
+                "objects": [
+                    {
+                        "type": "polygon",
+                        "grid_x": 0,
+                        "grid_y": 0,
+                        "width": 1,
+                        "height": 1,
+                    }
+                ],
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
