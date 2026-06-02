@@ -1,15 +1,16 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { ImportForm } from './components/ImportForm';
 import { ImportSummary } from './components/ImportSummary';
+import { SettingsPanel } from './components/SettingsPanel';
 import { WarningSummaryCard } from './components/WarningSummaryCard';
 import { TargetsTable } from './components/TargetsTable';
 import { FactoryMapViewer } from './components/FactoryMapViewer';
 import { FactoryMapCreator } from './components/FactoryMapCreator';
 import type { Job, InspectionTarget, ApiError, FactoryMapResponse } from './types';
-import { ShieldAlert, RefreshCw, Layers, Map as MapIcon, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
+import { ShieldAlert, RefreshCw, Layers, Map as MapIcon, Settings, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 
 export const App: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'mapCreator'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'mapCreator' | 'settings'>('dashboard');
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(false);
   const [selectedDate, setSelectedDate] = useState<string>('');
   const [currentJob, setCurrentJob] = useState<Job | null>(null);
@@ -227,6 +228,14 @@ export const App: React.FC = () => {
             <MapIcon size={16} />
             見取り図作成
           </button>
+          <button
+            type="button"
+            className={`app-tab ${activeTab === 'settings' ? 'active' : ''}`}
+            onClick={() => setActiveTab('settings')}
+          >
+            <Settings size={16} />
+            設定
+          </button>
         </nav>
 
         {globalError && (
@@ -302,6 +311,8 @@ export const App: React.FC = () => {
               </div>
             </div>
           </div>
+        ) : activeTab === 'settings' ? (
+          <SettingsPanel />
         ) : (
           <FactoryMapCreator />
         )}

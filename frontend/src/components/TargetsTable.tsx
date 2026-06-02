@@ -59,7 +59,8 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({ targets }) => {
               <th style={{ width: '40px' }}></th>
               <th>品目コード</th>
               <th>品目名</th>
-              <th>カテゴリ</th>
+              <th>検査分類</th>
+              <th>商品カテゴリ</th>
               <th>取込元</th>
               <th>検査書</th>
               <th>発行状態</th>
@@ -101,6 +102,9 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({ targets }) => {
                     </td>
                     <td>
                       <span className="text-muted">{target.category ?? '-'}</span>
+                    </td>
+                    <td>
+                      <span className="text-muted">{target.product_category ?? '-'}</span>
                     </td>
                     <td>
                       <div className="source-flags-container">

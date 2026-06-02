@@ -41,6 +41,7 @@ export interface InspectionTarget {
   code: string;
   name: string;
   category: number | null;
+  product_category: string | null;
   source_flags: {
     ocr: boolean;
     excel: boolean;
@@ -55,6 +56,22 @@ export interface InspectionTarget {
     C: boolean;
     D: boolean;
   };
+}
+
+export interface MasterUpdateJobResult {
+  updated_master_count: number;
+  updated_class_count: number;
+  updated_structure_count: number;
+  inspection_file_count: number;
+  source: string;
+  folder_warnings?: string[];
+}
+
+export interface AppSettings {
+  id: number;
+  csv_path: string;
+  inspection_folder_paths: string[];
+  updated_at: string;
 }
 
 export interface ApiError {

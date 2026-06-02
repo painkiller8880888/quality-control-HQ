@@ -1551,3 +1551,34 @@ button.editor-object {
   color: var(--text-muted);
   max-width: 360px;
 }
+
+/* Settings Panel */
+.settings-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  max-width: 720px;
+}
+
+.folder-path-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.folder-path-row .form-control {
+  flex: 1;
+}
+
+.settings-actions {
+  display: flex;
+  gap: 12px;
+}
+
+.settings-actions .btn {
+  flex: 1;
+}
+
+.summary-metrics-grid.four-columns {
+  grid-template-columns: 1fr 1fr 1fr 1fr;
+}

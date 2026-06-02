@@ -6,6 +6,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import (
+    AppSetting,
     History,
     InspectionSession,
     InspectionTarget,
@@ -18,6 +19,7 @@ from .models import (
     Master,
 )
 from .serializers import (
+    AppSettingSerializer,
     BulkHistoryRequestSerializer,
     DailyReportGenerateRequestSerializer,
     InspectionTargetSerializer,
@@ -115,20 +117,55 @@ class MasterUpdateView(APIView):
         serializer = MasterImportRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         master_file = request.FILES.get("master_file")
-        job = create_job(
-            Job.JobType.MASTER_UPDATE,
-            {
-                "force": serializer.validated_data["force"],
-                "master_file": getattr(master_file, "name", None),
-            },
-        )
+
+        csv_path = None
+        if not master_file:
+            setting = AppSetting.objects.first()
+            if setting and setting.csv_path:
+                csv_path = setting.csv_path
+
+        folder_paths = []
+        setting = AppSetting.objects.first()
+        if setting and setting.inspection_folder_paths:
+            folder_paths = setting.inspection_folder_paths
+
+        payload = {
+            "force": serializer.validated_data["force"],
+            "master_file": getattr(master_file, "name", None),
+            "csv_path": csv_path,
+        }
+        job = create_job(Job.JobType.MASTER_UPDATE, payload)
         try:
-            run_job(job, lambda: import_master_csv(master_file=master_file))
+            run_job(
+                job,
+                lambda: import_master_csv(
+                    master_file=master_file,
+                    csv_path=csv_path,
+                    inspection_folder_paths=folder_paths,
+                ),
+            )
         except FileNotFoundError as exc:
             return error_response("FILE_NOT_FOUND", str(exc), status.HTTP_404_NOT_FOUND)
         except Exception as exc:
             return error_response("ERP_AUTOMATION_FAILED", str(exc), status.HTTP_500_INTERNAL_SERVER_ERROR)
         return Response({"status": "accepted", "job_id": job.job_id}, status=status.HTTP_202_ACCEPTED)
+
+
+class SettingsView(APIView):
+    def get(self, request):
+        setting = AppSetting.objects.first()
+        if setting is None:
+            setting = AppSetting.objects.create()
+        return Response(AppSettingSerializer(setting).data)
+
+    def put(self, request):
+        setting = AppSetting.objects.first()
+        if setting is None:
+            setting = AppSetting.objects.create()
+        serializer = AppSettingSerializer(setting, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(AppSettingSerializer(setting).data)
 
 
 class PlansImportView(APIView):
@@ -404,6 +441,9 @@ class SeedMasterView(APIView):
                     "name": name,
                     "category": item.get("category"),
                     "node_type": item.get("node_type", ""),
+                    "node_type_1": item.get("node_type_1", ""),
+                    "node_type_2": item.get("node_type_2", ""),
+                    "product_category": item.get("product_category", ""),
                     "department": item.get("department", ""),
                     "updated_at": timezone.now(),
                 },

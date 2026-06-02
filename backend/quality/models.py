@@ -5,8 +5,11 @@ class Master(models.Model):
     code = models.CharField(max_length=32, unique=True)
     name = models.CharField(max_length=255)
     node_type = models.CharField(max_length=64, null=True, blank=True)
+    node_type_1 = models.CharField(max_length=64, null=True, blank=True)
+    node_type_2 = models.CharField(max_length=64, null=True, blank=True)
     department = models.CharField(max_length=128, blank=True)
     category = models.PositiveSmallIntegerField(null=True, blank=True)
+    product_category = models.CharField(max_length=128, null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
@@ -14,6 +17,33 @@ class Master(models.Model):
 
     def __str__(self):
         return f"{self.code} {self.name}"
+
+
+class MasterClass(models.Model):
+    master = models.ForeignKey(Master, on_delete=models.CASCADE, related_name="master_classes")
+    class_value = models.PositiveSmallIntegerField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["master"],
+                name="unique_master_class",
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.master.code} -> {self.class_value}"
+
+
+class AppSetting(models.Model):
+    csv_path = models.TextField(blank=True, default="")
+    inspection_folder_paths = models.JSONField(default=list, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "App Setting"
+        verbose_name_plural = "App Settings"
 
 
 class Structure(models.Model):

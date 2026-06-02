@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -7,7 +8,63 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from openpyxl import Workbook, load_workbook
 from rest_framework.test import APIClient
 
-from .models import History, Job, LayoutMaster, LayoutObject, Machine, MachineAssignment, Master
+from .models import (
+    AppSetting,
+    History,
+    InspectionFile,
+    Job,
+    LayoutMaster,
+    LayoutObject,
+    Machine,
+    MachineAssignment,
+    Master,
+    MasterClass,
+    Structure,
+)
+
+
+def make_csv_row(root_code, parent_code, child_code, child_name, level, department, quantity):
+    cols = [""] * 36
+    cols[1] = root_code
+    cols[8] = parent_code
+    cols[9] = child_code
+    cols[10] = child_name
+    cols[11] = str(level)
+    cols[16] = department
+    cols[18] = str(quantity)
+    return ",".join(f'"{c}"' for c in cols)
+
+
+CSV_HEADER = ",".join(f'"h{i}"' for i in range(36))
+
+MASTER_CSV_LINES = [
+    # 0: root BA0061 (親は自分自身)
+    make_csv_row("BA0061", "BA0061", "BA0061", "DYL完成品", 1, "生産管理部", 0),
+    # 1: BA0061 の子 CAG0008 (鍍金)
+    make_csv_row("BA0061", "BA0061", "CAG0008", "DYL鍍金 NI", 2, "IFC-カクテル", 0),
+    # 2: CAG0008 の子 CAL0001 (加工タッピング)
+    make_csv_row("BA0061", "CAG0008", "CAL0001", "DYLタッピング", 3, "生産管理部", 0),
+    # 3: CAL0001 の子 DA0045 (ダイカスト)
+    make_csv_row("BA0061", "CAL0001", "DA0045", "DYL鋳物", 4, "IFC-特殊工程", 0),
+    # 4: CAG0008 の子 DC0034 (ネジ) - 同一親に複数子
+    make_csv_row("BA0061", "CAG0008", "DC0034", "ビス 5X10", 3, "IFC-ネジ専門", 0),
+    # 5: 異なるルート BA0099
+    make_csv_row("BA0099", "BA0099", "BA0099", "DCYK-32完成品", 1, "生産管理部", 0),
+    # 6: BA0099 の子 CAG0010 (鍍金)
+    make_csv_row("BA0099", "BA0099", "CAG0010", "DCYK鍍金 NI", 2, "IFC-カクテル", 0),
+    # 7: プレスのコード DK0289 (node_type_1=プレスになる)
+    make_csv_row("BA0080", "CAD0001", "DK0289", "DC100プレス部品", 5, "IFC-本社プレス工場", 1.000),
+]
+
+MASTER_CSV = (CSV_HEADER + "\n" + "\n".join(MASTER_CSV_LINES)).encode("cp932")
+
+
+def csv_with_codes(codes_with_data):
+    """Build a CSV string from a list of (root, parent, child, name, level, dept, qty) tuples."""
+    lines = [CSV_HEADER]
+    for row in codes_with_data:
+        lines.append(make_csv_row(*row))
+    return "\n".join(lines).encode("cp932")
 
 
 class PhaseOneApiTests(TestCase):
@@ -290,3 +347,409 @@ class PhaseOneApiTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 400)
+
+
+class PhaseTwoMasterUpdateTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+
+    def _upload_csv(self, csv_bytes):
+        return self.client.post(
+            "/api/master/update/",
+            {"master_file": SimpleUploadedFile("master.csv", csv_bytes, content_type="text/csv")},
+            format="multipart",
+        )
+
+    def test_csv_import_creates_master_records(self):
+        response = self._upload_csv(MASTER_CSV)
+        self.assertEqual(response.status_code, 202)
+
+        codes = set(Master.objects.values_list("code", flat=True))
+        self.assertIn("BA0061", codes)
+        self.assertIn("CAG0008", codes)
+        self.assertIn("CAL0001", codes)
+        self.assertIn("DA0045", codes)
+        self.assertIn("DC0034", codes)
+        self.assertIn("BA0099", codes)
+        self.assertIn("CAG0010", codes)
+        self.assertIn("DK0289", codes)
+
+    def test_csv_import_creates_structure_records(self):
+        response = self._upload_csv(MASTER_CSV)
+        self.assertEqual(response.status_code, 202)
+
+        self.assertTrue(Structure.objects.filter(parent_code="BA0061", child_code="CAG0008").exists())
+        self.assertTrue(Structure.objects.filter(parent_code="CAG0008", child_code="CAL0001").exists())
+        self.assertTrue(Structure.objects.filter(parent_code="CAL0001", child_code="DA0045").exists())
+        self.assertTrue(Structure.objects.filter(parent_code="CAG0008", child_code="DC0034").exists())
+        self.assertTrue(Structure.objects.filter(parent_code="BA0099", child_code="CAG0010").exists())
+        self.assertTrue(Structure.objects.filter(parent_code="CAD0001", child_code="DK0289").exists())
+
+        # Verify structure details
+        s = Structure.objects.get(parent_code="CAL0001", child_code="DA0045")
+        self.assertEqual(s.root_code, "BA0061")
+        self.assertEqual(s.level, 4)
+        self.assertIsNone(s.quantity)
+
+        s2 = Structure.objects.get(parent_code="CAD0001", child_code="DK0289")
+        self.assertEqual(float(s2.quantity), 1.000)
+
+    def test_csv_import_creates_master_class_records(self):
+        response = self._upload_csv(MASTER_CSV)
+        self.assertEqual(response.status_code, 202)
+
+        class_vals = {
+            mc.master.code: mc.class_value
+            for mc in MasterClass.objects.select_related("master").all()
+        }
+        # Most codes have no inspection files and no specific node_type -> class 8
+        self.assertEqual(class_vals.get("BA0061"), 8)
+        self.assertEqual(class_vals.get("CAG0008"), 8)
+        self.assertEqual(class_vals.get("CAL0001"), 8)
+        self.assertEqual(class_vals.get("DA0045"), 8)
+        self.assertEqual(class_vals.get("DC0034"), 8)
+        self.assertEqual(class_vals.get("BA0099"), 8)
+        self.assertEqual(class_vals.get("CAG0010"), 8)
+
+    def test_csv_import_applies_product_classification(self):
+        response = self._upload_csv(MASTER_CSV)
+        self.assertEqual(response.status_code, 202)
+
+        ba0061 = Master.objects.get(code="BA0061")
+        # BA -> product_category = "スライド丁番", node_type_1 = "", node_type_2 = ""
+        self.assertEqual(ba0061.product_category, "スライド丁番")
+        self.assertIsNone(ba0061.node_type_1)
+        self.assertIsNone(ba0061.node_type_2)
+
+        cag0008 = Master.objects.get(code="CAG0008")
+        # CAG -> 鍍金, スライド丁番
+        self.assertEqual(cag0008.node_type_1, "鍍金")
+        self.assertEqual(cag0008.product_category, "スライド丁番")
+
+        cal0001 = Master.objects.get(code="CAL0001")
+        # CAL -> 加工, タッピング, スライド丁番
+        self.assertEqual(cal0001.node_type_1, "加工")
+        self.assertEqual(cal0001.node_type_2, "タッピング")
+        self.assertEqual(cal0001.product_category, "スライド丁番")
+
+        da0045 = Master.objects.get(code="DA0045")
+        # DA -> ダイカスト
+        self.assertEqual(da0045.node_type_1, "ダイカスト")
+        self.assertIsNone(da0045.product_category)
+
+        dc0034 = Master.objects.get(code="DC0034")
+        # DC -> ネジ
+        self.assertEqual(dc0034.node_type_1, "ネジ")
+
+        dk0289 = Master.objects.get(code="DK0289")
+        # DK -> プレス
+        self.assertEqual(dk0289.node_type_1, "プレス")
+
+    def test_duplicate_code_in_csv_only_creates_one_master(self):
+        csv_lines = [CSV_HEADER]
+        csv_lines.append(make_csv_row("BA0061", "BA0061", "BA0061", "First", 1, "部署A", 0))
+        csv_lines.append(make_csv_row("BA0061", "BA0061", "BA0061", "Duplicate", 1, "部署B", 0))
+        csv_bytes = "\n".join(csv_lines).encode("cp932")
+
+        response = self._upload_csv(csv_bytes)
+        self.assertEqual(response.status_code, 202)
+
+        self.assertEqual(Master.objects.filter(code="BA0061").count(), 1)
+        # 最後の行の値で上書きされる
+        master = Master.objects.get(code="BA0061")
+        self.assertEqual(master.name, "First")
+
+    def test_structure_unique_constraint(self):
+        csv_lines = [CSV_HEADER]
+        csv_lines.append(make_csv_row("BA0061", "BA0061", "CAG0008", "名A", 2, "部署", 0))
+        csv_lines.append(make_csv_row("BA0061", "BA0061", "CAG0008", "名B", 2, "部署", 0))
+        csv_bytes = "\n".join(csv_lines).encode("cp932")
+
+        response = self._upload_csv(csv_bytes)
+        self.assertEqual(response.status_code, 202)
+
+        self.assertEqual(Structure.objects.filter(parent_code="BA0061", child_code="CAG0008").count(), 1)
+
+    def test_inspection_file_scanning_and_registration(self):
+        with TemporaryDirectory() as temp_dir:
+            folder = Path(temp_dir) / "inspection_files"
+            folder.mkdir()
+            (folder / "CAG0008_検査書.pdf").write_text("dummy")
+            (folder / "CAL0001_検査書_ver2.pdf").write_text("dummy")
+            (folder / "DA0045_図面.pdf").write_text("dummy")
+            # 該当コードなし
+            (folder / "other_file.txt").write_text("dummy")
+
+            AppSetting.objects.create(
+                csv_path="",
+                inspection_folder_paths=[str(folder)],
+            )
+
+            response = self._upload_csv(MASTER_CSV)
+            self.assertEqual(response.status_code, 202)
+
+            files = InspectionFile.objects.all()
+            file_names = {f.file_name for f in files}
+            self.assertIn("CAG0008_検査書.pdf", file_names)
+            self.assertIn("CAL0001_検査書_ver2.pdf", file_names)
+            self.assertIn("DA0045_図面.pdf", file_names)
+            self.assertNotIn("other_file.txt", file_names)
+
+    def test_inspection_file_cleared_on_reimport(self):
+        with TemporaryDirectory() as temp_dir:
+            folder = Path(temp_dir) / "inspection_files"
+            folder.mkdir()
+            (folder / "CAG0008_検査書.pdf").write_text("dummy")
+
+            AppSetting.objects.create(
+                csv_path="",
+                inspection_folder_paths=[str(folder)],
+            )
+
+            self._upload_csv(MASTER_CSV)
+            first_count = InspectionFile.objects.count()
+            self.assertGreater(first_count, 0)
+
+            # 再import時に古いファイルは削除される
+            self._upload_csv(MASTER_CSV)
+            self.assertEqual(InspectionFile.objects.count(), first_count)
+
+    def test_master_update_with_settings_csv_path(self):
+        with TemporaryDirectory() as temp_dir:
+            csv_path = Path(temp_dir) / "settings_master.csv"
+            csv_path.write_bytes(MASTER_CSV)
+
+            AppSetting.objects.create(
+                csv_path=str(csv_path),
+                inspection_folder_paths=[],
+            )
+
+            response = self.client.post(
+                "/api/master/update/",
+                {"force": False},
+                format="json",
+            )
+            self.assertEqual(response.status_code, 202)
+
+            self.assertTrue(Master.objects.filter(code="BA0061").exists())
+            self.assertTrue(Master.objects.filter(code="CAG0008").exists())
+
+    def test_master_update_prefers_uploaded_file_over_settings(self):
+        with TemporaryDirectory() as temp_dir:
+            csv_path = Path(temp_dir) / "settings_master.csv"
+            csv_path.write_text("dummy,data\n")
+
+            AppSetting.objects.create(
+                csv_path=str(csv_path),
+                inspection_folder_paths=[],
+            )
+
+            csv_lines = [CSV_HEADER, make_csv_row("BA0061", "BA0061", "BA0061", "UploadedOnly", 1, "部署", 0)]
+            csv_bytes = "\n".join(csv_lines).encode("cp932")
+
+            response = self.client.post(
+                "/api/master/update/",
+                {"master_file": SimpleUploadedFile("upload.csv", csv_bytes, content_type="text/csv")},
+                format="multipart",
+            )
+            self.assertEqual(response.status_code, 202)
+
+            master = Master.objects.get(code="BA0061")
+            self.assertEqual(master.name, "UploadedOnly")
+
+    def test_settings_api_get_and_put(self):
+        # 初期状態: 空の設定
+        response = self.client.get("/api/settings/")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["csv_path"], "")
+        self.assertEqual(data["inspection_folder_paths"], [])
+
+        # PUTで保存
+        put_response = self.client.put(
+            "/api/settings/",
+            {
+                "csv_path": r"temp\master.csv",
+                "inspection_folder_paths": [
+                    r"\\server\share\自動機検査書フォルダ1",
+                    r"\\server\share\製品検査(1)フォルダ",
+                ],
+            },
+            format="json",
+        )
+        self.assertEqual(put_response.status_code, 200)
+
+        get_response = self.client.get("/api/settings/")
+        self.assertEqual(get_response.status_code, 200)
+        data2 = get_response.json()
+        self.assertEqual(data2["csv_path"], r"temp\master.csv")
+        self.assertEqual(len(data2["inspection_folder_paths"]), 2)
+
+    def test_class_4_press_from_node_type_1(self):
+        csv_lines = [CSV_HEADER, make_csv_row("BA0080", "CAD0001", "DK0289", "Press部品", 5, "工場", 1)]
+        csv_bytes = "\n".join(csv_lines).encode("cp932")
+        response = self._upload_csv(csv_bytes)
+        self.assertEqual(response.status_code, 202)
+
+        dk0289 = Master.objects.get(code="DK0289")
+        self.assertEqual(dk0289.node_type_1, "プレス")
+
+        mc = MasterClass.objects.get(master=dk0289)
+        self.assertEqual(mc.class_value, 4)
+
+    def test_class_5_secondary_processing(self):
+        master = Master.objects.create(
+            code="CAZ0001", name="加工品", node_type_1="加工", department="製造管理部"
+        )
+        master2 = Master.objects.create(
+            code="CAZ0002", name="加工品2", node_type_1="加工", department="生残技術部"
+        )
+        master3 = Master.objects.create(
+            code="CAZ0003", name="加工品他部署", node_type_1="加工", department="営業部"
+        )
+
+        from quality.services import determine_inspection_class
+        self.assertEqual(determine_inspection_class(master, {}), 5)
+        self.assertEqual(determine_inspection_class(master2, {}), 5)
+        self.assertEqual(determine_inspection_class(master3, {}), 8)
+
+    def test_class_1_from_inspection_file(self):
+        with TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            auto1_folder = base / "★自動機(工程内検査)"
+            auto1_folder.mkdir(parents=True)
+            (auto1_folder / "CAG0999_検査書.pdf").write_text("dummy")
+
+            master = Master.objects.create(code="CAG0999", name="自動機対象")
+
+            from quality.services import scan_and_classify_files, determine_inspection_class
+            file_map, _ = scan_and_classify_files([str(auto1_folder)])
+            cls = determine_inspection_class(master, file_map)
+            self.assertEqual(cls, 1)
+
+    def test_class_8_fallback(self):
+        master = Master.objects.create(
+            code="ZZZ9999", name="該当なし"
+        )
+        from quality.services import determine_inspection_class
+        self.assertEqual(determine_inspection_class(master, {}), 8)
+
+    def test_import_result_structure(self):
+        response = self._upload_csv(MASTER_CSV)
+        self.assertEqual(response.status_code, 202)
+
+        job_id = response.json()["job_id"]
+        job = Job.objects.get(job_id=job_id)
+        self.assertEqual(job.status, Job.Status.SUCCEEDED)
+
+        result = job.result
+        self.assertIn("updated_master_count", result)
+        self.assertIn("updated_class_count", result)
+        self.assertIn("updated_structure_count", result)
+        self.assertIn("inspection_file_count", result)
+        self.assertIn("source", result)
+
+        self.assertGreater(result["updated_master_count"], 0)
+        self.assertGreater(result["updated_structure_count"], 0)
+        self.assertGreater(result["updated_class_count"], 0)
+
+    def test_classify_master_by_product_code_function(self):
+        from quality.services import classify_master_by_product_code
+
+        # BA prefix -> スライド丁番
+        r1 = classify_master_by_product_code("BA0061")
+        self.assertEqual(r1["category"], "スライド丁番")
+        self.assertEqual(r1["node_type_1"], "")
+        self.assertEqual(r1["node_type_2"], "")
+
+        # CAG -> 鍍金
+        r2 = classify_master_by_product_code("CAG0008")
+        self.assertEqual(r2["node_type_1"], "鍍金")
+        self.assertEqual(r2["category"], "スライド丁番")
+
+        # CAL -> 加工, タッピング
+        r3 = classify_master_by_product_code("CAL0001")
+        self.assertEqual(r3["node_type_1"], "加工")
+        self.assertEqual(r3["node_type_2"], "タッピング")
+
+        # DA -> ダイカスト
+        r4 = classify_master_by_product_code("DA0045")
+        self.assertEqual(r4["node_type_1"], "ダイカスト")
+
+        # 不明なコード
+        r5 = classify_master_by_product_code("XX9999")
+        self.assertEqual(r5["node_type_1"], "")
+        self.assertEqual(r5["node_type_2"], "")
+        self.assertEqual(r5["category"], "")
+
+        # 最長一致: CAD should match CAD, not CA or C
+        r6 = classify_master_by_product_code("CAD0001")
+        self.assertEqual(r6["node_type_1"], "加工")
+        self.assertEqual(r6["node_type_2"], "焼入れ")
+
+    def test_inspection_sheet_required_uses_master_class(self):
+        master = Master.objects.create(code="MCLASS1", name="Class1")
+        MasterClass.objects.create(master=master, class_value=1)
+
+        master6 = Master.objects.create(code="MCLASS6", name="Class6")
+        MasterClass.objects.create(master=master6, class_value=6)
+
+        master7 = Master.objects.create(code="MCLASS7", name="Class7")
+        MasterClass.objects.create(master=master7, class_value=7)
+
+        master2 = Master.objects.create(code="MCLASS2", name="Class2")
+        MasterClass.objects.create(master=master2, class_value=2)
+
+        from quality.services import inspection_sheet_required
+        self.assertTrue(inspection_sheet_required(master))
+        self.assertTrue(inspection_sheet_required(master6))
+        self.assertTrue(inspection_sheet_required(master7))
+        self.assertFalse(inspection_sheet_required(master2))
+        self.assertFalse(inspection_sheet_required(None))
+        self.assertFalse(inspection_sheet_required(Master.objects.create(code="NOCLASS", name="NoClass")))
+
+    def test_targets_include_product_category(self):
+        master = Master.objects.create(
+            code="CAP0048", name="テスト品名",
+            product_category="スライド丁番",
+        )
+        MasterClass.objects.create(master=master, class_value=1)
+
+        self.client.post(
+            "/api/inspection-targets/manual/",
+            {"date": "2026-06-01", "codes": ["CAP0048"]},
+            format="json",
+        )
+        targets = self.client.get("/api/inspection-targets/?date=2026-06-01").json()
+        self.assertEqual(len(targets), 1)
+        t = targets[0]
+        self.assertEqual(t["product_category"], "スライド丁番")
+        self.assertEqual(t["category"], 1)  # MasterClass 由来
+
+    def test_settings_persist_after_save(self):
+        self.client.put(
+            "/api/settings/",
+            {"csv_path": "persist_test.csv", "inspection_folder_paths": ["/path/a", "/path/b"]},
+            format="json",
+        )
+
+        # 別のリクエストとして再取得
+        response = self.client.get("/api/settings/")
+        data = response.json()
+        self.assertEqual(data["csv_path"], "persist_test.csv")
+        self.assertEqual(data["inspection_folder_paths"], ["/path/a", "/path/b"])
+
+    def test_master_update_without_file_and_without_settings_falls_back_to_default(self):
+        response = self.client.post(
+            "/api/master/update/",
+            {"force": False},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 202)
+
+    def test_utf8_sig_csv_import(self):
+        """utf-8-sig BOM付きCSVでも読み込めること"""
+        csv_bytes = ("\ufeff" + CSV_HEADER + "\n" + "\n".join(MASTER_CSV_LINES)).encode("utf-8-sig")
+        response = self._upload_csv(csv_bytes)
+        self.assertEqual(response.status_code, 202)
+        self.assertTrue(Master.objects.filter(code="BA0061").exists())

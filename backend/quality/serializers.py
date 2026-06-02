@@ -1,7 +1,7 @@
 from rest_framework import serializers
 
 from .constants import CHECK_SLOTS
-from .models import History, InspectionTarget, Job, LayoutObject, LayoutObjectType, Machine
+from .models import AppSetting, History, InspectionTarget, Job, LayoutObject, LayoutObjectType, Machine, MasterClass
 
 
 LAYOUT_OBJECT_TYPES = {"machine", "wall", "path", "area", "stairs", "entrance"}
@@ -18,6 +18,7 @@ class InspectionTargetSerializer(serializers.ModelSerializer):
     code = serializers.CharField(source="normalized_code", read_only=True)
     name = serializers.SerializerMethodField()
     category = serializers.SerializerMethodField()
+    product_category = serializers.SerializerMethodField()
     source_flags = serializers.SerializerMethodField()
     checks = serializers.SerializerMethodField()
     warnings = WarningSerializer(many=True, read_only=True)
@@ -29,6 +30,7 @@ class InspectionTargetSerializer(serializers.ModelSerializer):
             "code",
             "name",
             "category",
+            "product_category",
             "source_flags",
             "requires_inspection_sheet",
             "issue_status",
@@ -40,7 +42,13 @@ class InspectionTargetSerializer(serializers.ModelSerializer):
         return obj.master.name if obj.master else obj.normalized_code
 
     def get_category(self, obj):
-        return obj.master.category if obj.master else None
+        if obj.master is None:
+            return None
+        mc = MasterClass.objects.filter(master=obj.master).first()
+        return mc.class_value if mc else None
+
+    def get_product_category(self, obj):
+        return obj.master.product_category if obj.master else None
 
     def get_source_flags(self, obj):
         return {
@@ -173,3 +181,9 @@ class LayoutSaveRequestSerializer(serializers.Serializer):
     grid_width = serializers.IntegerField(min_value=1, default=50)
     grid_height = serializers.IntegerField(min_value=1, default=50)
     objects = LayoutObjectInputSerializer(many=True, required=False, default=list)
+
+
+class AppSettingSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AppSetting
+        fields = ["id", "csv_path", "inspection_folder_paths", "updated_at"]
