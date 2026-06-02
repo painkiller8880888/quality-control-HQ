@@ -18,6 +18,7 @@ export const FactoryMapViewer: React.FC<FactoryMapViewerProps> = ({ mapData, isL
   const layout = mapData?.layout;
   const objects = layout?.objects ?? [];
   const machines = mapData?.machines ?? [];
+  const [bgImageError, setBgImageError] = React.useState(false);
 
   const machineTargets = new window.Map<number, string[]>();
   machines.forEach((machine) => {
@@ -44,7 +45,7 @@ export const FactoryMapViewer: React.FC<FactoryMapViewerProps> = ({ mapData, isL
           <MapPin size={28} className="text-muted" />
           <p>対象日を指定すると見取り図を表示します。</p>
         </div>
-      ) : !layout || objects.length === 0 ? (
+      ) : !layout ? (
         <div className="map-empty-state">
           <MapPin size={28} className="text-muted" />
           <p>見取り図レイアウトがまだ登録されていません。</p>
@@ -52,9 +53,21 @@ export const FactoryMapViewer: React.FC<FactoryMapViewerProps> = ({ mapData, isL
       ) : (
         <div className="factory-map-canvas" style={{ aspectRatio: `${layout.grid_width} / ${layout.grid_height}` }}>
           {layout.background_image_path && (
-            <img className="factory-map-bg" src={layout.background_image_path} alt="" />
+            <img className="factory-map-bg" src={layout.background_image_path} alt=""
+              onError={() => setBgImageError(true)}
+              onLoad={() => setBgImageError(false)}
+            />
           )}
-          {objects.map((object) => {
+          {bgImageError && layout.background_image_path && (
+            <div className="map-bg-error">背景画像を読み込めませんでした</div>
+          )}
+          {objects.length === 0 ? (
+            <div className="map-empty-inset">
+              <MapPin size={28} className="text-muted" />
+              <p>レイアウトにオブジェクトがありません</p>
+            </div>
+          ) : (
+            objects.map((object) => {
             const targetCodes = object.machine_id ? machineTargets.get(object.machine_id) ?? [] : [];
             const isTarget = targetCodes.length > 0;
 
@@ -74,7 +87,7 @@ export const FactoryMapViewer: React.FC<FactoryMapViewerProps> = ({ mapData, isL
                 {isTarget && <strong>{targetCodes.length}</strong>}
               </div>
             );
-          })}
+          }))}
         </div>
       )}
 

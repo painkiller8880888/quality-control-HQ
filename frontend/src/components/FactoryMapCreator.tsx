@@ -22,6 +22,7 @@ export const FactoryMapCreator: React.FC = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [draggingId, setDraggingId] = useState<number | null>(null);
+  const [bgImageError, setBgImageError] = useState(false);
   const canvasRef = useRef<HTMLDivElement | null>(null);
 
   const selectedObject = useMemo(
@@ -200,6 +201,9 @@ export const FactoryMapCreator: React.FC = () => {
             value={layout?.background_image_path ?? ''}
             onChange={(event) => updateLayout((current) => ({ ...current, background_image_path: event.target.value }))}
           />
+          {bgImageError && layout?.background_image_path && (
+            <div className="editor-field-error">画像URLが正しくないか、アクセスできません</div>
+          )}
         </div>
 
         <div className="editor-grid-controls">
@@ -274,7 +278,15 @@ export const FactoryMapCreator: React.FC = () => {
             onPointerUp={() => setDraggingId(null)}
             onPointerLeave={() => setDraggingId(null)}
           >
-            {layout.background_image_path && <img className="factory-map-bg" src={layout.background_image_path} alt="" />}
+            {layout.background_image_path && (
+              <img className="factory-map-bg" src={layout.background_image_path} alt=""
+                onError={() => setBgImageError(true)}
+                onLoad={() => setBgImageError(false)}
+              />
+            )}
+            {bgImageError && layout.background_image_path && (
+              <div className="map-bg-error">背景画像を読み込めませんでした</div>
+            )}
             {layout.objects.map((object) => (
               <button
                 type="button"

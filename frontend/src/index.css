@@ -1452,6 +1452,40 @@ button.editor-object {
   box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.18);
 }
 
+.map-bg-error {
+  position: absolute;
+  bottom: 8px;
+  left: 8px;
+  background: rgba(244, 63, 94, 0.15);
+  border: 1px solid rgba(244, 63, 94, 0.3);
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+  font-size: 0.75rem;
+  color: #fda4af;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.map-empty-inset {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: var(--text-muted);
+  text-align: center;
+  pointer-events: none;
+}
+
+.editor-field-error {
+  color: #fda4af;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  margin-top: 2px;
+}
+
 @media (max-width: 1024px) {
   .map-creator-layout {
     grid-template-columns: 1fr;

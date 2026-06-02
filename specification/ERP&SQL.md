@@ -17,16 +17,20 @@
 - 構成取込時は循環参照を検証する。
 - 検証に失敗した場合、当該更新全体を本番反映しない。
 
-## 3. カテゴリ定義
+## 3. クラス定義
 
-- 検査対象には7カテゴリがある。
-- `1`: 自動機
-- `2`: 半自動機
-- `3`: 手動
-- `4`: プレス
-- `5`: 二次加工
-- `6`: 製品検査(1)
-- `7`: 製品検査(2)
+- 検査対象には7クラスがある。
+- コードのクラスは作業工程に応じて決定されるため、部品、社外加工、梱包など検査のないコードには定義されない。
+- 各コードのクラスはそれぞれ個別の方法で定義される。
+
+- `1`: 自動機。`1`: DBの`machine_assignment`テーブルにおいて、`machine_class`が`1`の機械に割り当てられたコード。また、`自動機検査書フォルダ1`(\\192.168.1.210\@isk\★部門\④製造管理部\★品質保証\改正検査書\改正検査書\工程内検査\★new\★自動機(工程内検査))にファイルが存在するコード。
+- `2`: 半自動機。`2`: DBの`machine_assignment`テーブルにおいて、`machine_class`が`2`の機械に割り当てられたコード。また、`自動機検査書フォルダ2`\\192.168.1.210\@isk\★部門\④製造管理部\★品質保証\改正検査書\改正検査書\工程内検査\巡回検査\自動機\)にファイルが存在し、かつ`自動機検査書フォルダ1`にファイルが存在しないコード。
+- `3`: セッター。`セッターフォルダ`\\192.168.1.210\@isk\★部門\④製造管理部\★品質保証\改正検査書\改正検査書\工程内検査\巡回検査\セッター\)にファイルが存在するコード。
+- `4`: プレス。DBの`master`において、`node_type_1`が`プレス`のコード。
+- `5`: 二次加工。DBの`master`において、`node_type_1`が`加工`となって、かつ`department`が`製造管理部`または`生残技術部`のコード。
+- `6`: 製品検査(1)。`製品検査(1)フォルダ`(\\192.168.1.210\@isk\★部門\④製造管理部\★品質保証\改正検査書\改正検査書\工程内検査\★new\製品検査 (1))にファイルが存在するコード。
+- `7`: 製品検査(2)。`製品検査(2)フォルダ`(\\192.168.1.210\@isk\★部門\④製造管理部\★品質保証\改正検査書\改正検査書\工程内検査\★new\製品検査 (2))にファイルが存在するコード。
+- `8`: 手動。上記のいずれにも該当しないコード。
 - 検査書発行対象は `1` と `6` と `7` のみ。
 
 ## 4. データモデル方針
@@ -47,12 +51,24 @@ ERP由来の品目マスタ。
 | master_id | PK | 主キー |
 | code | UNIQUE | コード, ERPデータにおける10列目 |
 | name |  | 名称, ERPデータにおける11列目 |
-| node_type |  | 作業種類 |
+| node_type_1 |  | 作業種類1, PRODUCT.md参照 |
+| node_type_2 |  | 作業種類2, PRODUCT.md参照 |
+| category |  | 商品カテゴリ, PRODUCT.md参照 |
 | department |  | 担当部署, ERPデータにおける17列目 |
-| category |  | カテゴリ |
 | updated_at |  | 最終更新日時 |
 
-### 5.2 structure
+### 5.2 class
+
+コードのクラスを定義する。
+
+| column | type | note |
+|---|---|---|
+| class_id | PK | 主キー |
+| master_id | FK -> master.master_id | 対応品目 |
+| class |  | `1 / 2 / 3 / 4 / 5 / 6 / 7 / 8`, PRODUCT.md参照 |
+| updated_at |  | 最終更新日時 |
+
+### 5.3 structure
 
 親子構成を保持する。
 
@@ -69,7 +85,7 @@ ERP由来の品目マスタ。
 
 - `UNIQUE(parent_code, child_code)`
 
-### 5.3 inspection_file
+### 5.4 inspection_file
 
 検査書ファイル索引。既存文書の探索結果を保持する。
 
@@ -85,8 +101,9 @@ ERP由来の品目マスタ。
 
 - 検査書ファイル名には必ずコードを含む前提とする。
 - フォルダ走査時にコード一致したファイルのみ登録する。
+- ファイル名には複数のコードが記入されている場合がある。
 
-### 5.4 inspection_session
+### 5.5 inspection_session
 
 1営業日分の検査業務単位。
 
@@ -98,7 +115,7 @@ ERP由来の品目マスタ。
 | created_at |  | 作成日時 |
 | updated_at |  | 更新日時 |
 
-### 5.5 inspection_target
+### 5.6 inspection_target
 
 当日検査対象のスナップショット。
 
@@ -121,7 +138,7 @@ ERP由来の品目マスタ。
 
 - `UNIQUE(session_id, normalized_code)`
 
-### 5.6 inspection_target_warning
+### 5.7 inspection_target_warning
 
 当日検査対象に紐づく警告。
 
@@ -134,7 +151,7 @@ ERP由来の品目マスタ。
 | details_json |  | 詳細 |
 | created_at |  | 作成日時 |
 
-### 5.7 history
+### 5.8 history
 
 検査済み時間帯の履歴。
 
@@ -156,7 +173,7 @@ ERP由来の品目マスタ。
 - `history` はチェック済みのみ保持する。
 - 未チェックはレコードなしで表現する。
 
-### 5.8 machines
+### 5.9 machines
 
 見取り図上の機械定義。
 
@@ -166,10 +183,13 @@ ERP由来の品目マスタ。
 | machine_no | UNIQUE | 機械番号 |
 | machine_name |  | 機械名称 |
 | machine_category |  | 品目カテゴリ |
-| machine_class |  | `full_auto` / `semi_auto` / `jig` |
+| machine_class |  | `1`, `2` |
 | is_active |  | bool |
+| created_at |  | 作成日時 |
+| updated_at |  | 更新日時 |
 
-### 5.9 machine_assignments
+
+### 5.10 machine_assignments
 
 機械と担当コードの対応。
 
@@ -177,13 +197,15 @@ ERP由来の品目マスタ。
 |---|---|---|
 | machine_assignment_id | PK | 主キー |
 | machine_id | FK -> machines.machine_id | 機械 |
-| code | FK -> master.code | 担当コード |
+| master_id | FK -> master.master_id | 対応品目 |
+| created_at |  | 作成日時 |
+| updated_at |  | 更新日時 |
 
 制約
 
 - `UNIQUE(machine_id, code)`
 
-### 5.10 jobs
+### 5.11 jobs
 
 非同期ジョブ管理。
 
@@ -198,7 +220,7 @@ ERP由来の品目マスタ。
 | started_at |  | 開始日時 |
 | finished_at |  | 終了日時 |
 
-### 5.11 layout_master
+### 5.12 layout_master
 
 見取り図定義。
 
@@ -217,7 +239,7 @@ ERP由来の品目マスタ。
 - 背景画像は位置合わせ用の補助表示として利用する。
 - 実際のレイアウト情報はグリッド座標で保持する。
 
-### 5.12 layout_object_type
+### 5.13 layout_object_type
 
 見取り図上の要素種別定義。
 
@@ -236,7 +258,7 @@ ERP由来の品目マスタ。
 - MVPでは巡回導線と機械配置に必要な要素のみ扱う。
 - 要素追加はマスタ追加のみで拡張可能とする。
 
-### 5.13 layout_object
+### 5.14 layout_object
 
 見取り図上の配置オブジェクト。
 
