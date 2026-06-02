@@ -7,13 +7,11 @@
 
 現在の基本パイプライン:
 
-1. codex_planner
-2. opencode_implementer / antigravity_designer
-3. codex_reviewer
+1. planner
+2. implementer
+3. reviewer
 
 各agentは自分の責務のみ実行する。
-plannerとreviewerはcodexが、implementerはopen codeが担当する。
-UIをスクラッチから実装する、あるいは大規模なUI改修はdesignerであるantigravityが担当する。
 
 ---
 

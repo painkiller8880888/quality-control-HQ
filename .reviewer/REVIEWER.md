@@ -1,4 +1,4 @@
-AGENT_ID: CODEX_REVIEWER
+AGENT_ID: REVIEWER
 
 あなたは review agent。
 
