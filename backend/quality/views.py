@@ -1,7 +1,12 @@
+import os
+import uuid
+
+from django.conf import settings
 from django.shortcuts import get_object_or_404
 from django.db import transaction
 from django.utils import timezone
 from rest_framework import status
+from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -21,17 +26,21 @@ from .models import (
 from .serializers import (
     AppSettingSerializer,
     BulkHistoryRequestSerializer,
+    CreateLayoutSerializer,
     DailyReportGenerateRequestSerializer,
     InspectionTargetSerializer,
     JobSerializer,
+    LayoutMasterListSerializer,
     LayoutObjectSerializer,
     LayoutObjectTypeSerializer,
     LayoutSaveRequestSerializer,
+    MachineSerializer,
     ManualTargetsRequestSerializer,
     MasterImportRequestSerializer,
     PlanImportRequestSerializer,
     SingleHistoryRequestSerializer,
 )
+from rest_framework import serializers
 from .services import (
     add_manual_targets,
     bulk_upsert_history,
@@ -293,7 +302,11 @@ class SingleHistoryView(APIView):
 class FactoryMapView(APIView):
     def get(self, request):
         target_date = request.query_params.get("date")
-        layout = get_default_layout()
+        layout_id = request.query_params.get("layout_id")
+        if layout_id:
+            layout = get_object_or_404(LayoutMaster, id=layout_id)
+        else:
+            layout = get_default_layout()
         target_codes = set()
         target_codes_by_machine = {}
         warnings = []
@@ -347,8 +360,16 @@ class FactoryMapView(APIView):
 
 
 class FactoryMapLayoutView(APIView):
-    def get(self, request):
-        return Response(serialize_layout(get_default_layout()))
+    def get(self, request, layout_id=None):
+        if layout_id:
+            layout = get_object_or_404(LayoutMaster, id=layout_id)
+        else:
+            layout_id_param = request.query_params.get("layout_id")
+            if layout_id_param:
+                layout = get_object_or_404(LayoutMaster, id=layout_id_param)
+            else:
+                layout = get_default_layout()
+        return Response(serialize_layout(layout))
 
     @transaction.atomic
     def put(self, request):
@@ -357,7 +378,13 @@ class FactoryMapLayoutView(APIView):
         data = serializer.validated_data
 
         ensure_layout_object_types()
-        layout, _ = LayoutMaster.objects.get_or_create(layout_name=data["layout_name"])
+
+        layout_id = request.query_params.get("layout_id")
+        if layout_id:
+            layout = get_object_or_404(LayoutMaster, id=layout_id)
+        else:
+            layout, _ = LayoutMaster.objects.get_or_create(layout_name=data["layout_name"])
+
         layout.background_image_path = data["background_image_path"]
         layout.grid_width = data["grid_width"]
         layout.grid_height = data["grid_height"]
@@ -390,6 +417,60 @@ class FactoryMapLayoutView(APIView):
 
         return Response(serialize_layout(layout))
 
+    def delete(self, request, layout_id=None):
+        if layout_id is None:
+            layout_id = request.query_params.get("layout_id")
+        if not layout_id:
+            return error_response("INVALID_REQUEST", "layout_id is required.")
+        layout = get_object_or_404(LayoutMaster, id=layout_id)
+        if layout.layout_name == "default":
+            return error_response("FORBIDDEN", "デフォルトレイアウトは削除できません。")
+        layout.delete()
+        return Response({"status": "deleted"})
+
+
+class FactoryMapLayoutsView(APIView):
+    def get(self, request):
+        layouts = LayoutMaster.objects.all().order_by("id")
+        serializer = LayoutMasterListSerializer(layouts, many=True)
+        return Response(serializer.data)
+
+    def post(self, request):
+        serializer = CreateLayoutSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        name = serializer.validated_data["layout_name"]
+        if LayoutMaster.objects.filter(layout_name=name).exists():
+            return error_response("DUPLICATE_NAME", f"レイアウト名 '{name}' は既に存在します。")
+        layout = LayoutMaster.objects.create(layout_name=name)
+        return Response(LayoutMasterListSerializer(layout).data, status=status.HTTP_201_CREATED)
+
+
+class UploadBackgroundImageView(APIView):
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request):
+        file = request.FILES.get("image")
+        if not file:
+            return error_response("NO_FILE", "画像ファイルが指定されていません。")
+        ext = os.path.splitext(file.name)[1] or ".png"
+        filename = f"bg_{uuid.uuid4().hex}{ext}"
+        subdir = "uploads"
+        upload_dir = settings.MEDIA_ROOT / subdir
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        filepath = upload_dir / filename
+        with open(filepath, "wb") as f:
+            for chunk in file.chunks():
+                f.write(chunk)
+        url = f"{settings.MEDIA_URL}{subdir}/{filename}"
+        return Response({"url": url, "filename": filename})
+
+
+class MachineListView(APIView):
+    def get(self, request):
+        machines = Machine.objects.filter(is_active=True).order_by("machine_no")
+        serializer = MachineSerializer(machines, many=True)
+        return Response(serializer.data)
+
 
 class InspectionSheetIssueView(APIView):
     def post(self, request):
@@ -421,6 +502,24 @@ class DailyReportGenerateView(APIView):
             )
 
         return Response({"status": "accepted", "job_id": job.job_id}, status=status.HTTP_202_ACCEPTED)
+
+
+class LayoutObjectTypeColorUpdateSerializer(serializers.Serializer):
+    color = serializers.CharField(max_length=32)
+
+
+class LayoutObjectTypeColorUpdateView(APIView):
+    def patch(self, request, code):
+        try:
+            obj_type = LayoutObjectType.objects.get(code=code)
+        except LayoutObjectType.DoesNotExist:
+            return error_response("NOT_FOUND", "Object type not found.", status.HTTP_404_NOT_FOUND)
+
+        serializer = LayoutObjectTypeColorUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        obj_type.color = serializer.validated_data["color"]
+        obj_type.save()
+        return Response(LayoutObjectTypeSerializer(obj_type).data)
 
 
 class SeedMasterView(APIView):

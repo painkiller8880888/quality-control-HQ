@@ -42,6 +42,7 @@ export interface InspectionTarget {
   name: string;
   category: number | null;
   product_category: string | null;
+  class: number | null;
   source_flags: {
     ocr: boolean;
     excel: boolean;
@@ -134,6 +135,16 @@ export interface FactoryMapLayout {
   grid_height: number;
   object_types: LayoutObjectType[];
   objects: LayoutObject[];
+}
+
+export interface LayoutSummary {
+  id: number;
+  layout_name: string;
+  background_image_path: string;
+  grid_width: number;
+  grid_height: number;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface FactoryMapResponse {

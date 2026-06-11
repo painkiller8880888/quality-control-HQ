@@ -2,12 +2,28 @@ import React, { useState, useEffect, useRef } from 'react';
 import { ImportForm } from './components/ImportForm';
 import { ImportSummary } from './components/ImportSummary';
 import { SettingsPanel } from './components/SettingsPanel';
-import { WarningSummaryCard } from './components/WarningSummaryCard';
+
 import { TargetsTable } from './components/TargetsTable';
-import { FactoryMapViewer } from './components/FactoryMapViewer';
+import { LayoutList } from './components/LayoutList';
 import { FactoryMapCreator } from './components/FactoryMapCreator';
-import type { Job, InspectionTarget, ApiError, FactoryMapResponse } from './types';
-import { ShieldAlert, RefreshCw, Layers, Map as MapIcon, Settings, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
+import type { Job, InspectionTarget, ApiError, LayoutSummary } from './types';
+import { ShieldAlert, RefreshCw, Layers, Map as MapIcon, Settings, PanelLeftClose, PanelLeftOpen, Sun, Moon, Palette } from 'lucide-react';
+
+type ThemeMode = 'normal' | 'dark' | 'solarized-light' | 'solarized-dark';
+
+const THEME_CYCLE: ThemeMode[] = ['normal', 'dark', 'solarized-light', 'solarized-dark'];
+
+const THEME_LABELS: Record<ThemeMode, string> = {
+  'normal': 'Normal',
+  'dark': 'Dark',
+  'solarized-light': 'Solarized Light',
+  'solarized-dark': 'Solarized Dark',
+};
+
+const getNextTheme = (current: ThemeMode): ThemeMode => {
+  const idx = THEME_CYCLE.indexOf(current);
+  return THEME_CYCLE[(idx + 1) % THEME_CYCLE.length];
+};
 
 export const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'dashboard' | 'mapCreator' | 'settings'>('dashboard');
@@ -15,15 +31,25 @@ export const App: React.FC = () => {
   const [selectedDate, setSelectedDate] = useState<string>('');
   const [currentJob, setCurrentJob] = useState<Job | null>(null);
   const [targets, setTargets] = useState<InspectionTarget[]>([]);
-  const [factoryMap, setFactoryMap] = useState<FactoryMapResponse | null>(null);
   const [isLoadingJob, setIsLoadingJob] = useState<boolean>(false);
   const [isLoadingTargets, setIsLoadingTargets] = useState<boolean>(false);
-  const [isLoadingFactoryMap, setIsLoadingFactoryMap] = useState<boolean>(false);
   const [globalError, setGlobalError] = useState<string | null>(null);
+  const [theme, setTheme] = useState<ThemeMode>(() => {
+    if (typeof window !== 'undefined') {
+      return (localStorage.getItem('theme') as ThemeMode) || 'normal';
+    }
+    return 'normal';
+  });
+  const [layouts, setLayouts] = useState<LayoutSummary[]>([]);
+  const [activeLayoutId, setActiveLayoutId] = useState<number | null>(null);
 
   const pollingTimerRef = useRef<any>(null);
 
-  // Clear timers on unmount
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+    localStorage.setItem('theme', theme);
+  }, [theme]);
+
   useEffect(() => {
     return () => {
       if (pollingTimerRef.current) {
@@ -33,12 +59,24 @@ export const App: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    if (selectedDate) {
-      fetchFactoryMap(selectedDate);
-    }
-  }, [selectedDate]);
+    fetchLayouts();
+  }, []);
 
-  // Fetch targets for selected date
+  const fetchLayouts = async () => {
+    try {
+      const response = await fetch('/api/factory-map/layouts/');
+      if (response.ok) {
+        const data: LayoutSummary[] = await response.json();
+        setLayouts(data);
+        if (data.length > 0 && activeLayoutId === null) {
+          setActiveLayoutId(data[0].id);
+        }
+      }
+    } catch {
+      // ignore
+    }
+  };
+
   const fetchTargets = async (date: string) => {
     if (!date) return;
     setIsLoadingTargets(true);
@@ -66,25 +104,6 @@ export const App: React.FC = () => {
     }
   };
 
-  const fetchFactoryMap = async (date: string) => {
-    if (!date) return;
-    setIsLoadingFactoryMap(true);
-
-    try {
-      const response = await fetch(`/api/factory-map/?date=${date}`);
-      if (!response.ok) {
-        throw new Error(`見取り図の取得に失敗しました (${response.status})`);
-      }
-      const data: FactoryMapResponse = await response.json();
-      setFactoryMap(data);
-    } catch (err: any) {
-      setGlobalError(err.message || '見取り図の取得に失敗しました。');
-      setFactoryMap(null);
-    } finally {
-      setIsLoadingFactoryMap(false);
-    }
-  };
-
   const getJapaneseErrorLabel = (code: string) => {
     const labels: Record<string, string> = {
       UNKNOWN_CODE: '未登録コード',
@@ -95,7 +114,6 @@ export const App: React.FC = () => {
     return labels[code] || code;
   };
 
-  // Poll job status
   const startPolling = (jobId: string, date: string) => {
     if (pollingTimerRef.current) {
       clearInterval(pollingTimerRef.current);
@@ -113,7 +131,6 @@ export const App: React.FC = () => {
         setCurrentJob(jobData);
 
         if (jobData.status === 'succeeded' || jobData.status === 'failed') {
-          // Stop polling when job is done
           if (pollingTimerRef.current) {
             clearInterval(pollingTimerRef.current);
             pollingTimerRef.current = null;
@@ -121,7 +138,6 @@ export const App: React.FC = () => {
           setIsLoadingJob(false);
 
           if (jobData.status === 'succeeded') {
-            // Load new targets
             fetchTargets(date);
           }
         }
@@ -134,7 +150,7 @@ export const App: React.FC = () => {
         }
         setIsLoadingJob(false);
       }
-    }, 2500); // Poll every 2.5 seconds
+    }, 2500);
   };
 
   const handleImportStart = async (targetDate: string, scanFile: File | null, excelFile: File | null) => {
@@ -172,7 +188,6 @@ export const App: React.FC = () => {
       const resData = await response.json();
       const jobId = resData.job_id;
 
-      // Set initial job state
       setCurrentJob({
         job_id: jobId,
         job_type: 'PLANS_IMPORT',
@@ -183,7 +198,6 @@ export const App: React.FC = () => {
         result: null,
       });
 
-      // Start polling status
       startPolling(jobId, targetDate);
     } catch (err: any) {
       setGlobalError(err.message || '取込処理の開始に失敗しました。');
@@ -194,9 +208,10 @@ export const App: React.FC = () => {
   const handleRefreshTargets = () => {
     if (selectedDate) {
       fetchTargets(selectedDate);
-      fetchFactoryMap(selectedDate);
     }
   };
+
+  const themeIcon = theme === 'normal' ? <Palette size={16} /> : theme === 'dark' ? <Moon size={16} /> : theme === 'solarized-light' ? <Sun size={16} /> : <Moon size={16} />;
 
   return (
     <div className="app-container">
@@ -207,7 +222,18 @@ export const App: React.FC = () => {
           </div>
           <h1>品質管理 HQ (Quality Control HQ)</h1>
         </div>
-        <div className="header-tagline">巡回検査計画・OCR取込ダッシュボード</div>
+        <div className="header-right">
+          <span className="header-tagline">巡回検査計画・OCR取込ダッシュボード</span>
+          <button
+            type="button"
+            className="theme-toggle-btn"
+            onClick={() => setTheme(getNextTheme)}
+            title={`テーマ切替: ${THEME_LABELS[getNextTheme(theme)]}`}
+          >
+            {themeIcon}
+            {THEME_LABELS[theme]}
+          </button>
+        </div>
       </header>
 
       <main className="app-main">
@@ -274,11 +300,7 @@ export const App: React.FC = () => {
             </aside>
 
             <div className="dashboard-workspace">
-              <FactoryMapViewer
-                mapData={factoryMap}
-                isLoading={isLoadingFactoryMap}
-                selectedDate={selectedDate}
-              />
+              <LayoutList layouts={layouts} selectedDate={selectedDate} />
 
               <div className="dashboard-content">
                 {selectedDate && (
@@ -290,16 +312,14 @@ export const App: React.FC = () => {
                     <button 
                       className="btn btn-secondary btn-icon-only" 
                       onClick={handleRefreshTargets}
-                      disabled={isLoadingTargets || isLoadingFactoryMap}
+                      disabled={isLoadingTargets}
                       title="再読み込み"
                     >
-                      <RefreshCw size={16} className={isLoadingTargets || isLoadingFactoryMap ? 'animate-spin' : ''} />
+                      <RefreshCw size={16} className={isLoadingTargets ? 'animate-spin' : ''} />
                     </button>
                   </div>
                 )}
 
-                <WarningSummaryCard targets={targets} />
-                
                 {isLoadingTargets ? (
                   <div className="loading-container">
                     <div className="pulse-spinner"></div>

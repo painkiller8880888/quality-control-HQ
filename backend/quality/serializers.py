@@ -1,7 +1,7 @@
 from rest_framework import serializers
 
 from .constants import CHECK_SLOTS
-from .models import AppSetting, History, InspectionTarget, Job, LayoutObject, LayoutObjectType, Machine, MasterClass
+from .models import AppSetting, History, InspectionTarget, Job, LayoutMaster, LayoutObject, LayoutObjectType, Machine, MasterClass
 
 
 LAYOUT_OBJECT_TYPES = {"machine", "wall", "path", "area", "stairs", "entrance"}
@@ -181,6 +181,22 @@ class LayoutSaveRequestSerializer(serializers.Serializer):
     grid_width = serializers.IntegerField(min_value=1, default=50)
     grid_height = serializers.IntegerField(min_value=1, default=50)
     objects = LayoutObjectInputSerializer(many=True, required=False, default=list)
+
+
+class LayoutMasterListSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = LayoutMaster
+        fields = ["id", "layout_name", "background_image_path", "grid_width", "grid_height", "created_at", "updated_at"]
+
+
+class CreateLayoutSerializer(serializers.Serializer):
+    layout_name = serializers.CharField(max_length=128)
+
+
+class MachineSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Machine
+        fields = ["id", "machine_no", "machine_name"]
 
 
 class AppSettingSerializer(serializers.ModelSerializer):

@@ -3,7 +3,6 @@ import type { AppSettings, Job, ApiError } from '../types';
 import { Save, Upload, FolderOpen, Loader2, Database, Plus, Trash2, CheckCircle2, AlertTriangle } from 'lucide-react';
 
 export const SettingsPanel: React.FC = () => {
-  const [settings, setSettings] = useState<AppSettings | null>(null);
   const [csvPath, setCsvPath] = useState('');
   const [folderPaths, setFolderPaths] = useState<string[]>(['']);
   const [isLoading, setIsLoading] = useState(true);
@@ -28,7 +27,6 @@ export const SettingsPanel: React.FC = () => {
       const response = await fetch('/api/settings/');
       if (!response.ok) throw new Error('設定の取得に失敗しました');
       const data: AppSettings = await response.json();
-      setSettings(data);
       setCsvPath(data.csv_path || '');
       setFolderPaths(data.inspection_folder_paths?.length ? data.inspection_folder_paths : ['']);
     } catch (err: any) {

@@ -181,7 +181,7 @@ ERP由来の品目マスタ。
 
 ### 5.9 machines
 
-見取り図上の機械定義。
+機械の定義。
 
 | column | type | note |
 |---|---|---|
@@ -189,7 +189,7 @@ ERP由来の品目マスタ。
 | machine_no | UNIQUE | 機械番号 |
 | machine_name |  | 機械名称 |
 | machine_category |  | 品目カテゴリ |
-| machine_class |  | `1`, `2` |
+| machine_class |  | `1`, `2`, `3`, `4`, `5` |
 | is_active |  | bool |
 | created_at |  | 作成日時 |
 | updated_at |  | 更新日時 |

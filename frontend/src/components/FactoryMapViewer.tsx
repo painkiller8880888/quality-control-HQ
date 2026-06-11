@@ -1,6 +1,6 @@
 import React from 'react';
-import { AlertTriangle, Map as MapIcon, MapPin } from 'lucide-react';
-import type { FactoryMapResponse, LayoutObject } from '../types';
+import { Map as MapIcon, MapPin } from 'lucide-react';
+import type { FactoryMapResponse, LayoutObject, LayoutObjectType } from '../types';
 
 interface FactoryMapViewerProps {
   mapData: FactoryMapResponse | null;
@@ -8,15 +8,39 @@ interface FactoryMapViewerProps {
   selectedDate: string;
 }
 
+const FALLBACK_COLORS: Record<string, string> = {
+  machine: '#6366f1',
+  wall: '#64748b',
+  path: '#10b981',
+  area: '#f59e0b',
+  stairs: '#a855f7',
+  entrance: '#06b6d4',
+};
+
 const objectLabel = (object: LayoutObject) => {
-  if (object.machine_name) return object.machine_name;
+  if (object.machine_no) return object.machine_no;
   if (object.object_name) return object.object_name;
   return object.type;
+};
+
+const objectFillColor = (object: LayoutObject, types: LayoutObjectType[]): string => {
+  if (object.meta_json?.fill_color) return object.meta_json.fill_color;
+  const typeDef = types.find((t) => t.code === object.type);
+  if (typeDef?.color) return typeDef.color;
+  return FALLBACK_COLORS[object.type] || '#6366f1';
+};
+
+const hexToRgba = (hex: string, alpha: number): string => {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 };
 
 export const FactoryMapViewer: React.FC<FactoryMapViewerProps> = ({ mapData, isLoading, selectedDate }) => {
   const layout = mapData?.layout;
   const objects = layout?.objects ?? [];
+  const objectTypes = layout?.object_types ?? [];
   const machines = mapData?.machines ?? [];
   const [bgImageError, setBgImageError] = React.useState(false);
 
@@ -70,6 +94,7 @@ export const FactoryMapViewer: React.FC<FactoryMapViewerProps> = ({ mapData, isL
             objects.map((object) => {
             const targetCodes = object.machine_id ? machineTargets.get(object.machine_id) ?? [] : [];
             const isTarget = targetCodes.length > 0;
+            const color = objectFillColor(object, objectTypes);
 
             return (
               <div
@@ -80,6 +105,8 @@ export const FactoryMapViewer: React.FC<FactoryMapViewerProps> = ({ mapData, isL
                   top: `${(object.grid_y / layout.grid_height) * 100}%`,
                   width: `${(object.width / layout.grid_width) * 100}%`,
                   height: `${(object.height / layout.grid_height) * 100}%`,
+                  background: hexToRgba(color, 0.35),
+                  borderColor: color,
                 }}
                 title={`${objectLabel(object)}${isTarget ? ` / 対象 ${targetCodes.length}件` : ''}`}
               >
@@ -91,12 +118,7 @@ export const FactoryMapViewer: React.FC<FactoryMapViewerProps> = ({ mapData, isL
         </div>
       )}
 
-      {mapData && mapData.warnings.length > 0 && (
-        <div className="map-warning-strip">
-          <AlertTriangle size={15} />
-          <span>機械割当なし: {mapData.warnings.map((warning) => warning.code).join(', ')}</span>
-        </div>
-      )}
+
     </div>
   );
 };
