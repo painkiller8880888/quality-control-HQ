@@ -28,6 +28,7 @@ const getNextTheme = (current: ThemeMode): ThemeMode => {
 export const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'dashboard' | 'mapCreator' | 'settings'>('dashboard');
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(false);
+  const [sidebarSegment, setSidebarSegment] = useState<'import' | 'status'>('import');
   const [selectedDate, setSelectedDate] = useState<string>('');
   const [currentJob, setCurrentJob] = useState<Job | null>(null);
   const [targets, setTargets] = useState<InspectionTarget[]>([]);
@@ -42,6 +43,14 @@ export const App: React.FC = () => {
   });
   const [layouts, setLayouts] = useState<LayoutSummary[]>([]);
   const [activeLayoutId, setActiveLayoutId] = useState<number | null>(null);
+  const [highlightedTargetCode, setHighlightedTargetCode] = useState<string | null>(null);
+  const [highlightedTargetId, setHighlightedTargetId] = useState<number | null>(null);
+  const [fontSize, setFontSize] = useState<number>(() => {
+    if (typeof window !== 'undefined') {
+      return parseFloat(localStorage.getItem('fontSize') || '17.33');
+    }
+    return 17.33;
+  });
 
   const pollingTimerRef = useRef<any>(null);
 
@@ -49,6 +58,11 @@ export const App: React.FC = () => {
     document.documentElement.setAttribute('data-theme', theme);
     localStorage.setItem('theme', theme);
   }, [theme]);
+
+  useEffect(() => {
+    document.documentElement.style.setProperty('--font-size-base', `${fontSize}px`);
+    localStorage.setItem('fontSize', String(fontSize));
+  }, [fontSize]);
 
   useEffect(() => {
     return () => {
@@ -211,32 +225,70 @@ export const App: React.FC = () => {
     }
   };
 
+  const handleScrollToTarget = (targetId: number) => {
+    setHighlightedTargetId(targetId);
+    const matched = targets.find((t) => t.target_id === targetId);
+    if (matched) {
+      setHighlightedTargetCode(matched.code);
+    }
+    setTimeout(() => {
+      setHighlightedTargetId((prev) => (prev === targetId ? null : prev));
+      setHighlightedTargetCode((prev) => (prev === (targets.find((t) => t.target_id === targetId)?.code ?? null) ? null : prev));
+    }, 2500);
+  };
+
+  const handleRegisterTarget = async (code: string) => {
+    if (!selectedDate) return;
+    try {
+      const response = await fetch('/api/inspection-targets/manual/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ date: selectedDate, codes: [code] }),
+      });
+      if (!response.ok) {
+        console.error('手動追加に失敗しました');
+        return;
+      }
+      await fetchTargets(selectedDate);
+    } catch (err) {
+      console.error('手動追加エラー:', err);
+    }
+  };
+
+  const handleTargetClick = (target: InspectionTarget) => {
+    setHighlightedTargetId(target.target_id);
+    setHighlightedTargetCode(target.code);
+    setTimeout(() => {
+      setHighlightedTargetId((prev) => (prev === target.target_id ? null : prev));
+      setHighlightedTargetCode((prev) => (prev === target.code ? null : prev));
+    }, 2500);
+  };
+
   const themeIcon = theme === 'normal' ? <Palette size={16} /> : theme === 'dark' ? <Moon size={16} /> : theme === 'solarized-light' ? <Sun size={16} /> : <Moon size={16} />;
 
   return (
     <div className="app-container">
       <header className="app-header">
-        <div className="header-logo-section">
-          <div className="header-logo">
-            <Layers size={24} className="text-primary" />
+        <div className="header-top-row">
+          <div className="header-logo-section">
+            <div className="header-logo">
+              <Layers size={24} className="text-primary" />
+            </div>
+            <h1>品質管理 HQ (Quality Control HQ)</h1>
           </div>
-          <h1>品質管理 HQ (Quality Control HQ)</h1>
+          <div className="header-right">
+            <span className="header-tagline">巡回検査計画・OCR取込ダッシュボード</span>
+            <button
+              type="button"
+              className="theme-toggle-btn"
+              onClick={() => setTheme(getNextTheme)}
+              title={`テーマ切替: ${THEME_LABELS[getNextTheme(theme)]}`}
+            >
+              {themeIcon}
+              {THEME_LABELS[theme]}
+            </button>
+          </div>
         </div>
-        <div className="header-right">
-          <span className="header-tagline">巡回検査計画・OCR取込ダッシュボード</span>
-          <button
-            type="button"
-            className="theme-toggle-btn"
-            onClick={() => setTheme(getNextTheme)}
-            title={`テーマ切替: ${THEME_LABELS[getNextTheme(theme)]}`}
-          >
-            {themeIcon}
-            {THEME_LABELS[theme]}
-          </button>
-        </div>
-      </header>
-
-      <main className="app-main">
         <nav className="app-tabs" aria-label="メイン画面切替">
           <button
             type="button"
@@ -263,6 +315,9 @@ export const App: React.FC = () => {
             設定
           </button>
         </nav>
+      </header>
+
+      <main className={`app-main ${activeTab === 'mapCreator' || activeTab === 'settings' ? 'scrollable' : ''}`}>
 
         {globalError && (
           <div className="card error-card-global animate-shake">
@@ -293,14 +348,42 @@ export const App: React.FC = () => {
                 </div>
               ) : (
                 <>
-                  <ImportForm onImportStart={handleImportStart} isLoading={isLoadingJob} />
-                  <ImportSummary job={currentJob} />
+                  <div className="sidebar-segment-control">
+                    <button
+                      type="button"
+                      className={`sidebar-segment-btn ${sidebarSegment === 'import' ? 'active' : ''}`}
+                      onClick={() => setSidebarSegment('import')}
+                    >
+                      取込
+                    </button>
+                    <button
+                      type="button"
+                      className={`sidebar-segment-btn ${sidebarSegment === 'status' ? 'active' : ''}`}
+                      onClick={() => setSidebarSegment('status')}
+                    >
+                      ジョブステータス
+                    </button>
+                  </div>
+                  {sidebarSegment === 'import' ? (
+                    <ImportForm onImportStart={handleImportStart} isLoading={isLoadingJob} />
+                  ) : (
+                    <ImportSummary job={currentJob} />
+                  )}
                 </>
               )}
             </aside>
 
             <div className="dashboard-workspace">
-              <LayoutList layouts={layouts} selectedDate={selectedDate} />
+              <LayoutList
+                layouts={layouts}
+                selectedDate={selectedDate}
+                activeLayoutId={activeLayoutId}
+                setActiveLayoutId={setActiveLayoutId}
+                highlightedTargetCode={highlightedTargetCode}
+                targets={targets}
+                onScrollToTarget={handleScrollToTarget}
+                onRegisterTarget={handleRegisterTarget}
+              />
 
               <div className="dashboard-content">
                 {selectedDate && (
@@ -326,13 +409,17 @@ export const App: React.FC = () => {
                     <p>検査対象データを読み込んでいます...</p>
                   </div>
                 ) : (
-                  <TargetsTable targets={targets} />
+                  <TargetsTable
+                    targets={targets}
+                    highlightedTargetId={highlightedTargetId}
+                    onTargetClick={handleTargetClick}
+                  />
                 )}
               </div>
             </div>
           </div>
         ) : activeTab === 'settings' ? (
-          <SettingsPanel />
+          <SettingsPanel fontSize={fontSize} onFontSizeChange={setFontSize} />
         ) : (
           <FactoryMapCreator />
         )}

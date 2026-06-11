@@ -108,6 +108,11 @@ export interface LayoutObject {
   meta_json?: Record<string, any>;
 }
 
+export interface AssignedItem {
+  code: string;
+  name: string;
+}
+
 export interface FactoryMapMachine {
   machine_id: number;
   machine_no: string;
@@ -118,7 +123,7 @@ export interface FactoryMapMachine {
   width: number;
   height: number;
   status: 'idle' | 'pending';
-  assigned_codes: string[];
+  assigned_items: AssignedItem[];
   target_codes: string[];
 }
 

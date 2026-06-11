@@ -1,8 +1,13 @@
 import React, { useState, useEffect, useRef } from 'react';
 import type { AppSettings, Job, ApiError } from '../types';
-import { Save, Upload, FolderOpen, Loader2, Database, Plus, Trash2, CheckCircle2, AlertTriangle } from 'lucide-react';
+import { Save, Upload, FolderOpen, Loader2, Database, Plus, Trash2, CheckCircle2, AlertTriangle, Type } from 'lucide-react';
 
-export const SettingsPanel: React.FC = () => {
+interface SettingsPanelProps {
+  fontSize: number;
+  onFontSizeChange: (size: number) => void;
+}
+
+export const SettingsPanel: React.FC<SettingsPanelProps> = ({ fontSize, onFontSizeChange }) => {
   const [csvPath, setCsvPath] = useState('');
   const [folderPaths, setFolderPaths] = useState<string[]>(['']);
   const [isLoading, setIsLoading] = useState(true);
@@ -177,6 +182,31 @@ export const SettingsPanel: React.FC = () => {
             <Plus size={16} />
             フォルダを追加
           </button>
+        </div>
+      </div>
+
+      <div className="card">
+        <h2 className="card-title">
+          <Type className="icon-title" size={20} />
+          表示設定
+        </h2>
+        <div className="form-group">
+          <label className="form-label">
+            フォントサイズ ({fontSize}px)
+          </label>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>小</span>
+            <input
+              type="range"
+              min="13"
+              max="22"
+              step="0.5"
+              value={fontSize}
+              onChange={(e) => onFontSizeChange(parseFloat(e.target.value))}
+              style={{ flex: 1, accentColor: 'var(--color-primary)' }}
+            />
+            <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>大</span>
+          </div>
         </div>
       </div>
 

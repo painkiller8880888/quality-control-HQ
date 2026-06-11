@@ -1,9 +1,11 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import type { InspectionTarget } from '../types';
 import { AlertTriangle, ChevronDown, ChevronUp, FileCheck, CheckCircle2, Package, Database, ArrowUpDown, ArrowUp, ArrowDown } from 'lucide-react';
 
 interface TargetsTableProps {
   targets: InspectionTarget[];
+  highlightedTargetId: number | null;
+  onTargetClick: (target: InspectionTarget) => void;
 }
 
 const CLASS_LABELS: Record<number, string> = {
@@ -17,8 +19,23 @@ const CLASS_LABELS: Record<number, string> = {
   8: '手動',
 };
 
-export const TargetsTable: React.FC<TargetsTableProps> = ({ targets }) => {
+export const TargetsTable: React.FC<TargetsTableProps> = ({
+  targets,
+  highlightedTargetId,
+  onTargetClick,
+}) => {
   const [expandedRows, setExpandedRows] = useState<Record<number, boolean>>({});
+
+  useEffect(() => {
+    if (highlightedTargetId === null) return;
+    const el = document.getElementById(`target-row-${highlightedTargetId}`);
+    if (el) {
+      el.scrollIntoView({
+        behavior: 'smooth',
+        block: 'center',
+      });
+    }
+  }, [highlightedTargetId]);
   const [sortConfig, setSortConfig] = useState<{ key: keyof InspectionTarget | 'classLabel'; direction: 'asc' | 'desc' }>({ key: 'code', direction: 'asc' });
 
   const toggleRow = (targetId: number) => {
@@ -149,17 +166,19 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({ targets }) => {
             {sortedTargets.map((target) => {
               const hasWarnings = target.warnings && target.warnings.length > 0;
               const isExpanded = !!expandedRows[target.target_id];
+              const isHighlighted = target.target_id === highlightedTargetId;
 
               return (
                 <React.Fragment key={target.target_id}>
                   <tr
+                    id={`target-row-${target.target_id}`}
                     className={`target-row ${hasWarnings ? 'row-has-warning' : ''} ${
                       isExpanded ? 'row-expanded' : ''
-                    }`}
-                    onClick={() => toggleRow(target.target_id)}
+                    } ${isHighlighted ? 'row-highlight' : ''}`}
+                    onClick={() => onTargetClick(target)}
                     style={{ cursor: 'pointer' }}
                   >
-                    <td>
+                    <td onClick={(e) => { e.stopPropagation(); toggleRow(target.target_id); }}>
                       {isExpanded ? (
                         <ChevronUp size={16} className="text-muted" />
                       ) : (

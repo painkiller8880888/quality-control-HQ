@@ -331,7 +331,11 @@ class FactoryMapView(APIView):
 
         machines = []
         for machine in Machine.objects.filter(is_active=True).prefetch_related("assignments__code").order_by("machine_no"):
-            assigned_codes = [assignment.code.code for assignment in machine.assignments.all()]
+            assigned_items = [
+                {"code": assignment.code.code, "name": assignment.code.name}
+                for assignment in machine.assignments.all()
+            ]
+            assigned_codes = [item["code"] for item in assigned_items]
             machine_target_codes = target_codes_by_machine.get(machine.id, [])
             machines.append(
                 {
@@ -344,7 +348,7 @@ class FactoryMapView(APIView):
                     "width": machine.width,
                     "height": machine.height,
                     "status": "pending" if machine_target_codes else "idle",
-                    "assigned_codes": assigned_codes,
+                    "assigned_items": assigned_items,
                     "target_codes": machine_target_codes,
                 }
             )

@@ -1,9 +1,7 @@
-import React, { useEffect, useState, useCallback } from 'react';
-import { MapPin, ChevronDown, ChevronUp, GripVertical } from 'lucide-react';
-import { DndContext, closestCenter, KeyboardSensor, PointerSensor, useSensor, useSensors, type DragEndEvent } from '@dnd-kit/core';
-import { arrayMove, SortableContext, sortableKeyboardCoordinates, verticalListSortingStrategy, useSortable } from '@dnd-kit/sortable';
-import { CSS } from '@dnd-kit/utilities';
-import type { FactoryMapResponse, LayoutSummary, LayoutObject, LayoutObjectType } from '../types';
+import React, { useEffect, useState } from 'react';
+import { MapPin } from 'lucide-react';
+import type { FactoryMapResponse, FactoryMapMachine, InspectionTarget, LayoutSummary, LayoutObject, LayoutObjectType } from '../types';
+import { MachinePopup } from './MachinePopup';
 
 const FALLBACK_COLORS: Record<string, string> = {
   machine: '#6366f1',
@@ -34,50 +32,36 @@ const hexToRgba = (hex: string, alpha: number): string => {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 };
 
-const STORAGE_KEY = 'layout-list-order';
-
 interface LayoutMapData {
   layout: LayoutSummary;
   mapData: FactoryMapResponse | null;
   isLoading: boolean;
   error: string | null;
-  isExpanded: boolean;
 }
 
 interface LayoutListProps {
   layouts: LayoutSummary[];
   selectedDate: string;
+  activeLayoutId: number | null;
+  setActiveLayoutId: (id: number) => void;
+  highlightedTargetCode: string | null;
+  targets: InspectionTarget[];
+  onScrollToTarget: (targetId: number) => void;
+  onRegisterTarget: (code: string) => void;
 }
 
-export const LayoutList: React.FC<LayoutListProps> = ({ layouts, selectedDate }) => {
+export const LayoutList: React.FC<LayoutListProps> = ({
+  layouts,
+  selectedDate,
+  activeLayoutId,
+  setActiveLayoutId,
+  highlightedTargetCode,
+  targets,
+  onScrollToTarget,
+  onRegisterTarget,
+}) => {
   const [layoutMaps, setLayoutMaps] = useState<LayoutMapData[]>([]);
-
-  const sensors = useSensors(
-    useSensor(PointerSensor),
-    useSensor(KeyboardSensor, {
-      coordinateGetter: sortableKeyboardCoordinates,
-    })
-  );
-
-  const loadSavedOrder = useCallback(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved) {
-        return JSON.parse(saved) as number[];
-      }
-    } catch {
-      // ignore
-    }
-    return null;
-  }, []);
-
-  const saveOrder = useCallback((order: number[]) => {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(order));
-    } catch {
-      // ignore
-    }
-  }, []);
+  const [selectedMachine, setSelectedMachine] = useState<FactoryMapMachine | null>(null);
 
   useEffect(() => {
     if (!selectedDate) {
@@ -91,31 +75,17 @@ export const LayoutList: React.FC<LayoutListProps> = ({ layouts, selectedDate })
       return;
     }
 
-    const savedOrder = loadSavedOrder();
-    let orderedLayouts = nonDefaultLayouts;
-    if (savedOrder) {
-      orderedLayouts = [...nonDefaultLayouts].sort((a, b) => {
-        const aIndex = savedOrder.indexOf(a.id);
-        const bIndex = savedOrder.indexOf(b.id);
-        if (aIndex === -1 && bIndex === -1) return 0;
-        if (aIndex === -1) return 1;
-        if (bIndex === -1) return -1;
-        return aIndex - bIndex;
-      });
-    }
-
-    const initialMaps: LayoutMapData[] = orderedLayouts.map((layout) => ({
+    const initialMaps: LayoutMapData[] = nonDefaultLayouts.map((layout) => ({
       layout,
       mapData: null,
       isLoading: true,
       error: null,
-      isExpanded: true,
     }));
     setLayoutMaps(initialMaps);
 
     const fetchAll = async () => {
       await Promise.all(
-        orderedLayouts.map(async (layout, index) => {
+        nonDefaultLayouts.map(async (layout) => {
           try {
             const response = await fetch(`/api/factory-map/?date=${selectedDate}&layout_id=${layout.id}`);
             if (!response.ok) {
@@ -124,13 +94,19 @@ export const LayoutList: React.FC<LayoutListProps> = ({ layouts, selectedDate })
             const data: FactoryMapResponse = await response.json();
             setLayoutMaps((prev) => {
               const next = [...prev];
-              next[index] = { ...next[index], mapData: data, isLoading: false };
+              const targetIdx = next.findIndex(item => item.layout.id === layout.id);
+              if (targetIdx !== -1) {
+                next[targetIdx] = { ...next[targetIdx], mapData: data, isLoading: false };
+              }
               return next;
             });
           } catch (err: any) {
             setLayoutMaps((prev) => {
               const next = [...prev];
-              next[index] = { ...next[index], isLoading: false, error: err.message || '見取り図の取得に失敗しました。' };
+              const targetIdx = next.findIndex(item => item.layout.id === layout.id);
+              if (targetIdx !== -1) {
+                next[targetIdx] = { ...next[targetIdx], isLoading: false, error: err.message || '見取り図の取得に失敗しました。' };
+              }
               return next;
             });
           }
@@ -139,28 +115,20 @@ export const LayoutList: React.FC<LayoutListProps> = ({ layouts, selectedDate })
     };
 
     fetchAll();
-  }, [layouts, selectedDate, loadSavedOrder]);
+  }, [layouts, selectedDate, targets]);
 
-  const handleDragEnd = (event: DragEndEvent) => {
-    const { active, over } = event;
-    if (active.id !== over?.id) {
-      setLayoutMaps((items) => {
-        const oldIndex = items.findIndex((item) => item.layout.id === active.id);
-        const newIndex = items.findIndex((item) => item.layout.id === over?.id);
-        const newItems = arrayMove(items, oldIndex, newIndex);
-        saveOrder(newItems.map((item) => item.layout.id));
-        return newItems;
-      });
-    }
-  };
-
-  const toggleExpanded = (layoutId: number) => {
-    setLayoutMaps((prev) =>
-      prev.map((item) =>
-        item.layout.id === layoutId ? { ...item, isExpanded: !item.isExpanded } : item
-      )
+  // Synchronize layout switching when a target code is clicked in the list
+  useEffect(() => {
+    if (!highlightedTargetCode || layoutMaps.length === 0) return;
+    
+    // Find which layout map has this code
+    const foundLayoutMap = layoutMaps.find(lm => 
+      lm.mapData?.machines?.some(m => m.target_codes?.includes(highlightedTargetCode))
     );
-  };
+    if (foundLayoutMap && foundLayoutMap.layout.id !== activeLayoutId) {
+      setActiveLayoutId(foundLayoutMap.layout.id);
+    }
+  }, [highlightedTargetCode, layoutMaps, activeLayoutId, setActiveLayoutId]);
 
   if (layoutMaps.length === 0) {
     return (
@@ -173,146 +141,89 @@ export const LayoutList: React.FC<LayoutListProps> = ({ layouts, selectedDate })
     );
   }
 
-  return (
-    <DndContext
-      sensors={sensors}
-      collisionDetection={closestCenter}
-      onDragEnd={handleDragEnd}
-    >
-      <SortableContext items={layoutMaps.map((item) => item.layout.id)} strategy={verticalListSortingStrategy}>
-        <div className="layout-list-container">
-          {layoutMaps.map(({ layout, mapData, isLoading, error, isExpanded }) => (
-            <SortableLayoutItem
-              key={layout.id}
-              id={layout.id}
-              layout={layout}
-              mapData={mapData}
-              isLoading={isLoading}
-              error={error}
-              isExpanded={isExpanded}
-              onToggleExpanded={toggleExpanded}
-            />
-          ))}
-        </div>
-      </SortableContext>
-    </DndContext>
-  );
-};
-
-interface SortableLayoutItemProps {
-  id: number;
-  layout: LayoutSummary;
-  mapData: FactoryMapResponse | null;
-  isLoading: boolean;
-  error: string | null;
-  isExpanded: boolean;
-  onToggleExpanded: (id: number) => void;
-}
-
-const SortableLayoutItem: React.FC<SortableLayoutItemProps> = ({
-  id,
-  layout,
-  mapData,
-  isLoading,
-  error,
-  isExpanded,
-  onToggleExpanded,
-}) => {
-  const {
-    attributes,
-    listeners,
-    setNodeRef,
-    transform,
-    transition,
-    isDragging,
-  } = useSortable({ id });
-
-  const style = {
-    transform: CSS.Transform.toString(transform),
-    transition,
-    opacity: isDragging ? 0.5 : 1,
-  };
-
-  const handleHeaderClick = (e: React.MouseEvent) => {
-    if ((e.target as HTMLElement).closest('[data-drag-handle]')) return;
-    onToggleExpanded(id);
-  };
+  const activeMap = layoutMaps.find((item) => item.layout.id === activeLayoutId) || layoutMaps[0];
 
   return (
-    <div ref={setNodeRef} style={style} className="layout-list-item card">
-      <div
-        className="layout-list-header"
-        onClick={handleHeaderClick}
-        style={{ cursor: 'pointer' }}
-      >
-        <button
-          type="button"
-          className="drag-handle"
-          data-drag-handle
-          {...attributes}
-          {...listeners}
-          aria-label="並び替え"
-          title="ドラッグして並び替え"
-        >
-          <GripVertical size={18} className="text-muted" />
-        </button>
-        <h3 className="layout-list-title">{layout.layout_name}</h3>
-        {isLoading && <div className="pulse-spinner small" />}
-        {error && <span className="layout-list-error">{error}</span>}
-        <button
-          type="button"
-          className="expand-toggle"
-          onClick={(e) => {
-            e.stopPropagation();
-            onToggleExpanded(id);
-          }}
-          aria-label={isExpanded ? '折りたたむ' : '展開'}
-        >
-          {isExpanded ? <ChevronUp size={18} className="text-muted" /> : <ChevronDown size={18} className="text-muted" />}
-        </button>
+    <div className="layout-list-container" style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+      <div className="map-segment-control">
+        {layoutMaps.map(({ layout }) => (
+          <button
+            key={layout.id}
+            type="button"
+            className={`map-segment-button ${activeLayoutId === layout.id ? 'active' : ''}`}
+            onClick={() => setActiveLayoutId(layout.id)}
+          >
+            {layout.layout_name}
+          </button>
+        ))}
       </div>
 
-      {isExpanded && (
-        <>
-          {isLoading ? (
+      <div className="layout-list-item card" style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+        <div className="layout-list-header">
+          <h3 className="layout-list-title">{activeMap.layout.layout_name}</h3>
+          {activeMap.isLoading && <div className="pulse-spinner small" />}
+          {activeMap.error && <span className="layout-list-error">{activeMap.error}</span>}
+        </div>
+
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'center', minHeight: 0, overflow: 'hidden', padding: '10px 0' }}>
+          {activeMap.isLoading ? (
             <div className="map-empty-state">
               <div className="pulse-spinner"></div>
               <p>見取り図を読み込んでいます...</p>
             </div>
-          ) : error ? null : !mapData?.layout ? (
+          ) : activeMap.error ? (
+            <div className="map-empty-state">
+              <p className="layout-list-error">{activeMap.error}</p>
+            </div>
+          ) : !activeMap.mapData?.layout ? (
             <div className="map-empty-state">
               <MapPin size={28} className="text-muted" />
               <p>見取り図レイアウトがありません。</p>
             </div>
           ) : (
-            <div className="factory-map-canvas" style={{ aspectRatio: `${mapData.layout.grid_width} / ${mapData.layout.grid_height}` }}>
-              {mapData.layout.background_image_path && (
-                <img className="factory-map-bg" src={mapData.layout.background_image_path} alt="" />
+            <div 
+              className="factory-map-canvas" 
+              style={{ 
+                aspectRatio: `${activeMap.mapData.layout.grid_width} / ${activeMap.mapData.layout.grid_height}`,
+                maxHeight: '100%',
+                maxWidth: '100%',
+                margin: '0 auto',
+              }}
+            >
+              {activeMap.mapData.layout.background_image_path && (
+                <img className="factory-map-bg" src={activeMap.mapData.layout.background_image_path} alt="" />
               )}
-              {mapData.layout.objects.length === 0 ? (
+              {activeMap.mapData.layout.objects.length === 0 ? (
                 <div className="map-empty-inset">
                   <MapPin size={28} className="text-muted" />
                   <p>レイアウトにオブジェクトがありません</p>
                 </div>
               ) : (
-                mapData.layout.objects.map((object) => {
-                  const targetCodes = object.machine_id ? (mapData.machines?.find((m) => m.machine_id === object.machine_id)?.target_codes ?? []) : [];
+                activeMap.mapData.layout.objects.map((object) => {
+                  const targetCodes = object.machine_id ? (activeMap.mapData?.machines?.find((m) => m.machine_id === object.machine_id)?.target_codes ?? []) : [];
                   const isTarget = targetCodes.length > 0;
-                  const color = objectFillColor(object, mapData.layout.object_types);
+                  const color = objectFillColor(object, activeMap.mapData!.layout.object_types);
+                  const isHighlighted = isTarget && highlightedTargetCode && targetCodes.includes(highlightedTargetCode);
 
                   return (
                     <div
                       key={object.layout_object_id ?? `${object.type}-${object.grid_x}-${object.grid_y}`}
-                      className={`map-object map-object-${object.type} ${isTarget ? 'is-target' : ''}`}
+                      className={`map-object map-object-${object.type} ${isTarget ? 'is-target' : ''} ${isHighlighted ? 'highlighted' : ''}`}
                       style={{
-                        left: `${(object.grid_x / mapData.layout.grid_width) * 100}%`,
-                        top: `${(object.grid_y / mapData.layout.grid_height) * 100}%`,
-                        width: `${(object.width / mapData.layout.grid_width) * 100}%`,
-                        height: `${(object.height / mapData.layout.grid_height) * 100}%`,
+                        left: `${(object.grid_x / activeMap.mapData!.layout.grid_width) * 100}%`,
+                        top: `${(object.grid_y / activeMap.mapData!.layout.grid_height) * 100}%`,
+                        width: `${(object.width / activeMap.mapData!.layout.grid_width) * 100}%`,
+                        height: `${(object.height / activeMap.mapData!.layout.grid_height) * 100}%`,
                         background: hexToRgba(color, 0.35),
                         borderColor: color,
                       }}
                       title={`${objectLabel(object)}${isTarget ? ` / 対象 ${targetCodes.length}件` : ''}`}
+                      onClick={() => {
+                        if (object.machine_id) {
+                          const machine = activeMap.mapData?.machines?.find((m) => m.machine_id === object.machine_id);
+                          if (machine) setSelectedMachine(machine);
+                        }
+                      }}
                     >
                       <span>{objectLabel(object)}</span>
                       {isTarget && <strong>{targetCodes.length}</strong>}
@@ -322,7 +233,20 @@ const SortableLayoutItem: React.FC<SortableLayoutItemProps> = ({
               )}
             </div>
           )}
-        </>
+        </div>
+      </div>
+
+      {selectedMachine && (
+        <MachinePopup
+          machineNo={selectedMachine.machine_no}
+          machineName={selectedMachine.machine_name}
+          assignedItems={selectedMachine.assigned_items}
+          targetCodes={selectedMachine.target_codes}
+          targets={targets}
+          onClose={() => setSelectedMachine(null)}
+          onScrollToTarget={onScrollToTarget}
+          onRegisterTarget={onRegisterTarget}
+        />
       )}
     </div>
   );
