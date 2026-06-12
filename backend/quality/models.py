@@ -39,6 +39,7 @@ class MasterClass(models.Model):
 class AppSetting(models.Model):
     csv_path = models.TextField(blank=True, default="")
     inspection_folder_paths = models.JSONField(default=list, blank=True)
+    erp_path = models.TextField(blank=True, default="")
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:

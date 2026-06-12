@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import type { AppSettings, Job, ApiError } from '../types';
-import { Save, Upload, FolderOpen, Loader2, Database, Plus, Trash2, CheckCircle2, AlertTriangle, Type } from 'lucide-react';
+import { Save, Upload, FolderOpen, Loader2, Database, Plus, Trash2, CheckCircle2, AlertTriangle, Type, Play, Monitor } from 'lucide-react';
 
 interface SettingsPanelProps {
   fontSize: number;
@@ -10,10 +10,13 @@ interface SettingsPanelProps {
 export const SettingsPanel: React.FC<SettingsPanelProps> = ({ fontSize, onFontSizeChange }) => {
   const [csvPath, setCsvPath] = useState('');
   const [folderPaths, setFolderPaths] = useState<string[]>(['']);
+  const [erpPath, setErpPath] = useState('');
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
+  const [isErpRunning, setIsErpRunning] = useState(false);
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
+  const [erpResult, setErpResult] = useState<string | null>(null);
   const [jobResult, setJobResult] = useState<any>(null);
   const pollingTimerRef = useRef<any>(null);
 
@@ -34,6 +37,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ fontSize, onFontSi
       const data: AppSettings = await response.json();
       setCsvPath(data.csv_path || '');
       setFolderPaths(data.inspection_folder_paths?.length ? data.inspection_folder_paths : ['']);
+      setErpPath(data.erp_path || '');
     } catch (err: any) {
       setSaveMessage('エラー: ' + err.message);
     } finally {
@@ -52,6 +56,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ fontSize, onFontSi
         body: JSON.stringify({
           csv_path: csvPath,
           inspection_folder_paths: validFolders,
+          erp_path: erpPath,
         }),
       });
       if (!response.ok) throw new Error('保存に失敗しました');
@@ -106,6 +111,46 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ fontSize, onFontSi
         }
         setIsRunning(false);
         setJobResult({ status: 'failed', error_message: err.message });
+      }
+    }, 2500);
+  };
+
+  const handleRunErp = async () => {
+    setErpResult(null);
+    setIsErpRunning(true);
+    try {
+      const response = await fetch('/api/erp/automate/', { method: 'POST' });
+      if (!response.ok) {
+        const errData: ApiError = await response.json();
+        throw new Error(errData.message || 'ERP自動化の実行に失敗しました');
+      }
+      const { job_id } = await response.json();
+      startErpPolling(job_id);
+    } catch (err: any) {
+      setErpResult('エラー: ' + err.message);
+      setIsErpRunning(false);
+    }
+  };
+
+  const startErpPolling = (jobId: string) => {
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/jobs/${jobId}/`);
+        if (!res.ok) throw new Error('ジョブ状態の取得に失敗しました');
+        const jobData: Job = await res.json();
+        if (jobData.status === 'succeeded' || jobData.status === 'failed') {
+          clearInterval(interval);
+          setIsErpRunning(false);
+          if (jobData.status === 'succeeded') {
+            setErpResult('ERP自動化が完了しました');
+          } else {
+            setErpResult('エラー: ' + (jobData.error_message || 'ERP自動化に失敗しました'));
+          }
+        }
+      } catch (err: any) {
+        clearInterval(interval);
+        setIsErpRunning(false);
+        setErpResult('エラー: ' + err.message);
       }
     }, 2500);
   };
@@ -183,6 +228,38 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ fontSize, onFontSi
             フォルダを追加
           </button>
         </div>
+      </div>
+
+      <div className="card">
+        <h2 className="card-title">
+          <Monitor className="icon-title" size={20} />
+          ERP自動操作
+        </h2>
+        <div className="form-group">
+          <label className="form-label">
+            <FolderOpen size={14} className="label-icon" />
+            ERP実行ファイルパス
+          </label>
+          <input
+            type="text"
+            className="form-control"
+            value={erpPath}
+            onChange={(e) => setErpPath(e.target.value)}
+            placeholder="例: C:\Program Files\ERP\erp.exe"
+          />
+        </div>
+        <div className="form-actions">
+          <button type="button" className="btn btn-primary" onClick={handleRunErp} disabled={isErpRunning}>
+            {isErpRunning ? <Loader2 size={16} className="animate-spin" /> : <Play size={16} />}
+            ERP自動化を実行
+          </button>
+        </div>
+        {erpResult && (
+          <div className={`card-body-flex ${erpResult.startsWith('エラー') ? 'text-rose' : 'text-emerald'}`}>
+            {erpResult.startsWith('エラー') ? <AlertTriangle size={16} /> : <CheckCircle2 size={16} />}
+            <span>{erpResult}</span>
+          </div>
+        )}
       </div>
 
       <div className="card">

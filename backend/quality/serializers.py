@@ -202,4 +202,4 @@ class MachineSerializer(serializers.ModelSerializer):
 class AppSettingSerializer(serializers.ModelSerializer):
     class Meta:
         model = AppSetting
-        fields = ["id", "csv_path", "inspection_folder_paths", "updated_at"]
+        fields = ["id", "csv_path", "inspection_folder_paths", "erp_path", "updated_at"]

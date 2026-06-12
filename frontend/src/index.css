@@ -1145,6 +1145,19 @@ body {
   opacity: 0.4;
 }
 
+.check-cell {
+  cursor: pointer;
+  user-select: none;
+  min-width: 32px;
+  min-height: 32px;
+  touch-action: none;
+}
+
+.check-cell:hover .check-dot-unchecked {
+  opacity: 0.8;
+  background-color: var(--color-primary, #6366f1);
+}
+
 .warning-count-badge {
   background: var(--color-danger-bg);
   color: #f87171;

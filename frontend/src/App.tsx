@@ -264,6 +264,26 @@ export const App: React.FC = () => {
     }, 2500);
   };
 
+  const handleCheckUpdate = (date: string, items: { code: string; checks: Record<string, boolean> }[]) => {
+    setTargets(prev => prev.map(t => {
+      const item = items.find(i => i.code === t.code);
+      if (!item) return t;
+      const newChecks = { ...t.checks };
+      for (const [slot, checked] of Object.entries(item.checks)) {
+        newChecks[slot as keyof typeof newChecks] = checked;
+      }
+      return { ...t, checks: newChecks };
+    }));
+
+    fetch('/api/history/bulk-upsert/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ date, items }),
+    }).then(res => {
+      if (!res.ok) fetchTargets(date);
+    }).catch(() => fetchTargets(date));
+  };
+
   const themeIcon = theme === 'normal' ? <Palette size={16} /> : theme === 'dark' ? <Moon size={16} /> : theme === 'solarized-light' ? <Sun size={16} /> : <Moon size={16} />;
 
   return (
@@ -413,6 +433,8 @@ export const App: React.FC = () => {
                     targets={targets}
                     highlightedTargetId={highlightedTargetId}
                     onTargetClick={handleTargetClick}
+                    selectedDate={selectedDate}
+                    onCheckUpdate={handleCheckUpdate}
                   />
                 )}
               </div>

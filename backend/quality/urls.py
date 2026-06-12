@@ -3,6 +3,7 @@ from django.urls import path
 from .views import (
     BulkHistoryView,
     DailyReportGenerateView,
+    ErpAutomationView,
     FactoryMapLayoutView,
     FactoryMapLayoutsView,
     FactoryMapView,
@@ -27,6 +28,7 @@ urlpatterns = [
     path("master/update/", MasterUpdateView.as_view()),
     path("master/seed/", SeedMasterView.as_view()),
     path("settings/", SettingsView.as_view()),
+    path("erp/automate/", ErpAutomationView.as_view()),
     path("plans/import/", PlansImportView.as_view()),
     path("inspection-targets/", InspectionTargetsView.as_view()),
     path("inspection-targets/manual/", ManualTargetsView.as_view()),

@@ -72,6 +72,7 @@ export interface AppSettings {
   id: number;
   csv_path: string;
   inspection_folder_paths: string[];
+  erp_path: string;
   updated_at: string;
 }
 

@@ -1,4 +1,5 @@
 import os
+import sys
 import uuid
 
 from django.conf import settings
@@ -40,6 +41,9 @@ from .serializers import (
     PlanImportRequestSerializer,
     SingleHistoryRequestSerializer,
 )
+import subprocess
+from pathlib import Path
+
 from rest_framework import serializers
 from .services import (
     add_manual_targets,
@@ -175,6 +179,45 @@ class SettingsView(APIView):
         serializer.is_valid(raise_exception=True)
         serializer.save()
         return Response(AppSettingSerializer(setting).data)
+
+
+class ErpAutomationView(APIView):
+    def post(self, request):
+        setting = AppSetting.objects.first()
+        if not setting or not setting.erp_path:
+            return error_response("ERP_PATH_NOT_CONFIGURED", "ERPのパスが設定されていません。", status.HTTP_400_BAD_REQUEST)
+
+        csv_path = str(Path(setting.csv_path).resolve()) if setting.csv_path else ""
+        if not csv_path:
+            return error_response("CSV_PATH_NOT_CONFIGURED", "構成CSVのパスが設定されていません。", status.HTTP_400_BAD_REQUEST)
+
+        erp_path = setting.erp_path
+        module_dir = Path(__file__).resolve().parent.parent.parent / "erp_automation"
+        script = module_dir / "erp.py"
+
+        if not script.exists():
+            return error_response("SCRIPT_NOT_FOUND", f"スクリプトが見つかりません: {script}", status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        job = create_job(Job.JobType.MASTER_UPDATE, {"erp_path": erp_path, "csv_path": csv_path})
+
+        def run():
+            try:
+                result = subprocess.run(
+                    [sys.executable, str(script), erp_path, csv_path],
+                    capture_output=True, text=True, timeout=300,
+                )
+                if result.returncode != 0:
+                    raise RuntimeError(f"ERP automation failed: {result.stderr.strip()}")
+                return {"status": "succeeded", "output": result.stdout.strip()}
+            except subprocess.TimeoutExpired:
+                raise RuntimeError("ERP automation timed out (300s)")
+
+        try:
+            run_job(job, run)
+        except Exception as exc:
+            return error_response("ERP_AUTOMATION_FAILED", str(exc), status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        return Response({"status": "accepted", "job_id": job.job_id}, status=status.HTTP_202_ACCEPTED)
 
 
 class PlansImportView(APIView):
