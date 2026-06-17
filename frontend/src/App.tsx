@@ -289,25 +289,11 @@ export const App: React.FC = () => {
   return (
     <div className="app-container">
       <header className="app-header">
-        <div className="header-top-row">
-          <div className="header-logo-section">
-            <div className="header-logo">
-              <Layers size={24} className="text-primary" />
-            </div>
-            <h1>品質管理 HQ (Quality Control HQ)</h1>
+        <div className="header-logo-section">
+          <div className="header-logo">
+            <Layers size={24} className="text-primary" />
           </div>
-          <div className="header-right">
-            <span className="header-tagline">巡回検査計画・OCR取込ダッシュボード</span>
-            <button
-              type="button"
-              className="theme-toggle-btn"
-              onClick={() => setTheme(getNextTheme)}
-              title={`テーマ切替: ${THEME_LABELS[getNextTheme(theme)]}`}
-            >
-              {themeIcon}
-              {THEME_LABELS[theme]}
-            </button>
-          </div>
+          <h1>品質管理 HQ (Quality Control HQ)</h1>
         </div>
         <nav className="app-tabs" aria-label="メイン画面切替">
           <button
@@ -335,6 +321,18 @@ export const App: React.FC = () => {
             設定
           </button>
         </nav>
+        <div className="header-right">
+          <span className="header-tagline">巡回検査計画・OCR取込ダッシュボード</span>
+          <button
+            type="button"
+            className="theme-toggle-btn"
+            onClick={() => setTheme(getNextTheme)}
+            title={`テーマ切替: ${THEME_LABELS[getNextTheme(theme)]}`}
+          >
+            {themeIcon}
+            {THEME_LABELS[theme]}
+          </button>
+        </div>
       </header>
 
       <main className={`app-main ${activeTab === 'mapCreator' || activeTab === 'settings' ? 'scrollable' : ''}`}>

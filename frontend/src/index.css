@@ -196,22 +196,18 @@ body {
 
 .app-header {
   display: flex;
-  flex-direction: column;
-  padding-bottom: 0;
-  margin-bottom: 24px;
-}
-
-.header-top-row {
-  display: flex;
+  flex-direction: row;
   align-items: center;
-  justify-content: space-between;
   padding-bottom: 12px;
+  margin-bottom: 24px;
+  border-bottom: 1px solid var(--card-border);
 }
 
 .header-logo-section {
   display: flex;
   align-items: center;
   gap: 12px;
+  flex-shrink: 0;
 }
 
 .header-logo {
@@ -244,6 +240,8 @@ body {
   display: flex;
   align-items: center;
   gap: 12px;
+  margin-left: auto;
+  flex-shrink: 0;
 }
 
 .app-main {
@@ -257,8 +255,11 @@ body {
 .app-tabs {
   display: flex;
   gap: 8px;
-  border-bottom: 1px solid var(--card-border);
+  margin-left: 48px;
+  margin-right: 0;
   flex-shrink: 0;
+  align-self: flex-end;
+  margin-bottom: -13px;
 }
 
 .app-tab {
@@ -269,7 +270,7 @@ body {
   border: none;
   border-bottom: 2px solid transparent;
   color: var(--text-muted);
-  padding: 8px 14px 10px;
+  padding: 8px 14px 12px;
   font-family: var(--font-sans);
   font-weight: 600;
   cursor: pointer;

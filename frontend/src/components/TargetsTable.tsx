@@ -10,7 +10,7 @@ interface TargetsTableProps {
   onCheckUpdate: (date: string, items: { code: string; checks: Record<string, boolean> }[]) => void;
 }
 
-const CHECK_SLOTS = ['A', 'B', 'C', 'D'] as const;
+// const CHECK_SLOTS = ['A', 'B', 'C', 'D'] as const;
 
 const CLASS_LABELS: Record<number, string> = {
   1: '自動機',
@@ -112,7 +112,7 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
     }
   }, []);
 
-  const checkAutoScroll = useCallback((clientX: number, clientY: number) => {
+  const checkAutoScroll = useCallback((_clientX: number, clientY: number) => {
     const container = containerRef.current;
     if (!container) return;
     const rect = container.getBoundingClientRect();
