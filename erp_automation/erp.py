@@ -34,19 +34,24 @@ def main():
     click_button(toolbar, found_index=3) #出力ボタンを押下
 
     # ファイル出力対象選択フォームが表示されるまで待機
-    wnd2 = wait_control(wnd1, auto_id="pnlBottom")
-    click_button(wnd2, auto_id="btnCsv") #CSV出力ボタンを押下
+    wnd2 = wait_control(wnd1, auto_id="frmMain")
+    wnd3 = wait_control(wnd2, auto_id="pnlBottom")
+    click_button(wnd3, auto_id="btnCsv") #CSV出力ボタンを押下
 
     #ファイル選択ダイアログが表示されるまで待機
-    wnd3 = wnd1.child_window(title="ファイル出力対象項目選択", auto_id="frmMain", control_type="Window")
-    wnd3 = wnd3.child_window(title="名前を付けて保存", control_type="Window")
+    wnd4 = wait_control(wnd2, title="名前を付けて保存")
 
     #ファイル名入力欄が表示されるまで待機
-    wnd4 = wnd3.child_window(control_type="Pane")
-    wnd4 = wnd3.child_window(title="ファイル名:", auto_id="FileNameControlHost", control_type="ComboBox")
-    set_edit(wnd4, auto_id='1001', text=csv_path) #ファイル名入力
-    click_button(wnd3, auto_id="1") #保存ボタン押下
+    wnd5 = wait_control(wnd4, class_name='DUIViewWndClassName')
+    wnd5 = wait_control(wnd5, auto_id="FileNameControlHost")
+    set_edit(wnd5, auto_id='1001', text=csv_path) #ファイル名入力
+    click_button(wnd4, auto_id="1") #保存ボタン押下
     
+    #完了ダイアログが現れるまで待機
+    dlg = wait_control(wnd1, timeout=1200, class_id="#32770")
+    click_button(dlg, auto_id="2")
+
+    app1.close()
 #    print(f"ERP Path: {args.erp_path}")
 #    print(f"CSV Path: {args.csv_path}")
 
