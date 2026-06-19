@@ -2,7 +2,7 @@ from pywinauto import Desktop
 
 def main():
 
-    dump_parent_chain(auto_id="1001")
+    dump_parent_chain(auto_id="2")
 
 def dump_parent_chain(auto_id=None, title=None, process=None):
     """

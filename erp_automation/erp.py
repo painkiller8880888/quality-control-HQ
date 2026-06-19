@@ -5,15 +5,15 @@ import time
 import psutil
 from pywinauto.application import Application
 from dotenv import load_dotenv
+from pathlib import Path
 
 def main():
-#    parser = argparse.ArgumentParser(description="ERP自動操作モジュール")
-#    parser.add_argument("erp_path", help="ERP実行ファイルのパス")
-#    parser.add_argument("csv_path", help="出力する構成CSVのパス")
-#    args = parser.parse_args()
+    parser = argparse.ArgumentParser(description="ERP自動操作モジュール")
+    parser.add_argument("csv_path", help="出力する構成CSVのパス")
+    args = parser.parse_args()
 
     app = erp_login()
-    csv_path = "C:\\Users\\P1569\\Desktop\\20260617.csv"
+    csv_path = args.csv_path
 
     # メインウィンドウが表示されるまで待機
     main = wait_window(app, auto_id="Frm_RrrMen")
@@ -27,7 +27,6 @@ def main():
     before_pids=before,
     auto_id="FR_SSSMAIN"
     )
-    print(pid)
 
     # フォームのツールバーが表示されるまで待機
     toolbar = wait_control(wnd1, auto_id="TOOLBAR")
@@ -48,19 +47,31 @@ def main():
     click_button(wnd4, auto_id="1") #保存ボタン押下
     
     #完了ダイアログが現れるまで待機
-    dlg = wait_control(wnd1, timeout=1200, class_id="#32770")
-    click_button(dlg, auto_id="2")
+    if wait_csv_complete(csv_path):
+        dlg = wait_control(wnd1, title="レベル別部品構成マスタリスト（正展開）")
+        click_button(dlg, auto_id="2") #OKボタン押下
+    else:
+        time.sleep(5)
 
-    app1.close()
+    wnd1.close()
+    click_button(dlg, auto_id="6") #OKボタン押下
+
+    if wait_for_process_exit(pid):
+        main.close()
+    else:
+        print("timeout")
 #    print(f"ERP Path: {args.erp_path}")
 #    print(f"CSV Path: {args.csv_path}")
 
 def erp_login():
+
     load_dotenv()
+    parser = argparse.ArgumentParser(description="ERP自動操作モジュール")
+    parser.add_argument("erp_path", help="ERP実行ファイルのパス")
 
     ERP_PASS = os.getenv("ERP_PASS")
     ERP_ID = os.getenv("ERP_ID")
-    erp_path = "C:\\ISKW01\\ClientPack\\RrrMen.exe"
+    erp_path = args.erp_path
 
     # ERP起動
     app = Application(backend="uia").start(erp_path)
@@ -188,6 +199,89 @@ def wait_control(parent, timeout=60, deep=False, index=0, **kwargs):
         time.sleep(0.2)
 
     raise TimeoutError()
+
+def wait_csv_complete(
+    csv_path: str | Path,
+    timeout: int = 600,
+    check_interval: float = 2.0,
+    stable_count: int = 3,
+) -> bool:
+    """
+    CSVファイルの書き込み完了を待つ。
+
+    Parameters
+    ----------
+    csv_path : str | Path
+        CSVファイルのパス
+    timeout : int
+        最大待機時間（秒）
+    check_interval : float
+        サイズ確認間隔（秒）
+    stable_count : int
+        サイズが連続一致する回数
+
+    Returns
+    -------
+    bool
+        True: 出力完了
+        False: タイムアウト
+    """
+
+    csv_path = Path(csv_path)
+
+    start = time.time()
+    prev_size = -1
+    stable = 0
+
+    while time.time() - start < timeout:
+
+        if not csv_path.exists():
+            time.sleep(check_interval)
+            continue
+
+        current_size = csv_path.stat().st_size
+
+        if current_size == prev_size:
+            stable += 1
+            if stable >= stable_count:
+                return True
+        else:
+            stable = 0
+            prev_size = current_size
+
+        time.sleep(check_interval)
+
+    return False
+
+def wait_for_process_exit(pid: int, timeout: float = 60.0, interval: float = 0.5) -> bool:
+    """
+    指定PIDのプロセス終了を待機する。
+
+    Parameters
+    ----------
+    pid : int
+        待機対象のPID
+    timeout : float
+        タイムアウト秒数
+    interval : float
+        ポーリング間隔
+
+    Returns
+    -------
+    bool
+        True: プロセス終了
+        False: タイムアウト
+    """
+
+    start = time.time()
+
+    while time.time() - start < timeout:
+        if not psutil.pid_exists(pid):
+            return True
+
+        time.sleep(interval)
+
+    return False
 
 if __name__ == "__main__":
     main()
