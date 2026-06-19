@@ -183,15 +183,15 @@ class SettingsView(APIView):
 
 class ErpAutomationView(APIView):
     def post(self, request):
-        setting = AppSetting.objects.first()
-        if not setting or not setting.erp_path:
-            return error_response("ERP_PATH_NOT_CONFIGURED", "ERPのパスが設定されていません。", status.HTTP_400_BAD_REQUEST)
+        csv_path = request.data.get("csv_path") or ""
+        erp_path = request.data.get("erp_path") or ""
 
-        csv_path = str(Path(setting.csv_path).resolve()) if setting.csv_path else ""
         if not csv_path:
             return error_response("CSV_PATH_NOT_CONFIGURED", "構成CSVのパスが設定されていません。", status.HTTP_400_BAD_REQUEST)
+        if not erp_path:
+            return error_response("ERP_PATH_NOT_CONFIGURED", "ERPのパスが設定されていません。", status.HTTP_400_BAD_REQUEST)
 
-        erp_path = setting.erp_path
+        csv_path = str(Path(csv_path).resolve())
         module_dir = Path(__file__).resolve().parent.parent.parent / "erp_automation"
         script = module_dir / "erp.py"
 

@@ -9,10 +9,11 @@ from pathlib import Path
 
 def main():
     parser = argparse.ArgumentParser(description="ERP自動操作モジュール")
+    parser.add_argument("erp_path", help="ERP実行ファイルのパス")
     parser.add_argument("csv_path", help="出力する構成CSVのパス")
     args = parser.parse_args()
 
-    app = erp_login()
+    app = erp_login(args.erp_path)
     csv_path = args.csv_path
 
     # メインウィンドウが表示されるまで待機
@@ -63,15 +64,12 @@ def main():
 #    print(f"ERP Path: {args.erp_path}")
 #    print(f"CSV Path: {args.csv_path}")
 
-def erp_login():
+def erp_login(erp_path: str):
 
     load_dotenv()
-    parser = argparse.ArgumentParser(description="ERP自動操作モジュール")
-    parser.add_argument("erp_path", help="ERP実行ファイルのパス")
 
     ERP_PASS = os.getenv("ERP_PASS")
     ERP_ID = os.getenv("ERP_ID")
-    erp_path = args.erp_path
 
     # ERP起動
     app = Application(backend="uia").start(erp_path)

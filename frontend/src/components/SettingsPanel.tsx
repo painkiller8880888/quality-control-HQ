@@ -119,7 +119,11 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ fontSize, onFontSi
     setErpResult(null);
     setIsErpRunning(true);
     try {
-      const response = await fetch('/api/erp/automate/', { method: 'POST' });
+      const response = await fetch('/api/erp/automate/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ csv_path: csvPath, erp_path: erpPath }),
+      });
       if (!response.ok) {
         const errData: ApiError = await response.json();
         throw new Error(errData.message || 'ERP自動化の実行に失敗しました');
