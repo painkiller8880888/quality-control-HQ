@@ -264,6 +264,19 @@ export const App: React.FC = () => {
     }, 2500);
   };
 
+  const handleDeleteTargets = async (date: string, targetIds: number[]) => {
+    const response = await fetch('/api/inspection-targets/bulk-delete/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ date, target_ids: targetIds }),
+    });
+    if (!response.ok) {
+      const errData = await response.json().catch(() => ({}));
+      throw new Error(errData.message || '削除に失敗しました');
+    }
+    setTargets(prev => prev.filter(t => !targetIds.includes(t.target_id)));
+  };
+
   const handleCheckUpdate = (date: string, items: { code: string; checks: Record<string, boolean> }[]) => {
     setTargets(prev => prev.map(t => {
       const item = items.find(i => i.code === t.code);
@@ -433,6 +446,7 @@ export const App: React.FC = () => {
                     onTargetClick={handleTargetClick}
                     selectedDate={selectedDate}
                     onCheckUpdate={handleCheckUpdate}
+                    onDeleteTargets={handleDeleteTargets}
                   />
                 )}
               </div>

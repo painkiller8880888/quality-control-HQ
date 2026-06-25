@@ -19,9 +19,17 @@ class Master(models.Model):
         return f"{self.code} {self.name}"
 
 
+class ClassMaster(models.Model):
+    class_no = models.PositiveSmallIntegerField(unique=True)
+    class_name = models.CharField(max_length=64)
+
+    def __str__(self):
+        return f"{self.class_no}: {self.class_name}"
+
+
 class MasterClass(models.Model):
     master = models.ForeignKey(Master, on_delete=models.CASCADE, related_name="master_classes")
-    class_value = models.PositiveSmallIntegerField(null=True, blank=True)
+    class_master = models.ForeignKey(ClassMaster, on_delete=models.PROTECT, null=True, blank=True, related_name="master_classes")
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
@@ -33,7 +41,7 @@ class MasterClass(models.Model):
         ]
 
     def __str__(self):
-        return f"{self.master.code} -> {self.class_value}"
+        return f"{self.master.code} -> {self.class_master.class_no if self.class_master else '-'}"
 
 
 class AppSetting(models.Model):

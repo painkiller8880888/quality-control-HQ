@@ -965,6 +965,89 @@ body {
   color: var(--text-muted);
 }
 
+/* Delete checkbox column */
+.table-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.table-card-header .card-title {
+  margin-bottom: 0;
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.table-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.delete-count-label {
+  font-size: 0.8125rem;
+  color: var(--color-danger);
+  font-weight: 600;
+}
+
+.btn-danger {
+  background: linear-gradient(135deg, var(--color-danger), #e11d48);
+  color: #ffffff;
+  box-shadow: 0 4px 14px rgba(244, 63, 94, 0.3);
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: linear-gradient(135deg, #e11d48, #be123c);
+  box-shadow: 0 6px 20px rgba(244, 63, 94, 0.4);
+  transform: translateY(-1px);
+}
+
+.btn-danger:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+.btn-sm {
+  padding: 6px 12px;
+  font-size: 0.8125rem;
+}
+
+.delete-check-cell {
+  cursor: pointer;
+  user-select: none;
+  min-width: 36px;
+  min-height: 32px;
+  touch-action: none;
+  text-align: center;
+  vertical-align: middle;
+}
+
+.delete-checkbox {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border: 1.5px solid var(--text-muted);
+  border-radius: 3px;
+  font-size: 9px;
+  font-weight: 700;
+  color: transparent;
+  transition: var(--transition-smooth);
+}
+
+.delete-checkbox.checked {
+  background: var(--color-danger);
+  border-color: var(--color-danger);
+  color: #ffffff;
+}
+
+.delete-check-cell:hover .delete-checkbox {
+  border-color: var(--color-danger);
+}
+
 /* Targets Table Card */
 .targets-section-header {
   display: flex;

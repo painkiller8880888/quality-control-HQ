@@ -26,6 +26,7 @@ from .models import (
 )
 from .serializers import (
     AppSettingSerializer,
+    BulkDeleteTargetsRequestSerializer,
     BulkHistoryRequestSerializer,
     CreateLayoutSerializer,
     DailyReportGenerateRequestSerializer,
@@ -290,6 +291,19 @@ class InspectionTargetDetailView(APIView):
         target = get_object_or_404(InspectionTarget, id=target_id)
         target.delete()
         return success_response()
+
+
+class BulkDeleteTargetsView(APIView):
+    def post(self, request):
+        serializer = BulkDeleteTargetsRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        date = serializer.validated_data["date"]
+        session = InspectionSession.objects.filter(target_date=date).first()
+        if session is None:
+            return success_response(deleted_count=0)
+        ids = serializer.validated_data["target_ids"]
+        deleted, _ = InspectionTarget.objects.filter(session=session, id__in=ids).delete()
+        return success_response(deleted_count=deleted)
 
 
 class BulkHistoryView(APIView):

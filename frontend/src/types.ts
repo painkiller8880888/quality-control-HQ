@@ -41,6 +41,7 @@ export interface InspectionTarget {
   code: string;
   name: string;
   category: number | null;
+  class_name: string | null;
   product_category: string | null;
   class: number | null;
   source_flags: {

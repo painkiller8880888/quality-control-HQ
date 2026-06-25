@@ -15,6 +15,7 @@ import xlrd
 
 from .constants import CHECK_SLOTS
 from .models import (
+    ClassMaster,
     History,
     InspectionFile,
     InspectionSession,
@@ -42,7 +43,7 @@ def inspection_sheet_required(master):
     if master is None:
         return False
     mc = MasterClass.objects.filter(master=master).first()
-    return mc is not None and mc.class_value in (1, 6, 7)
+    return mc is not None and mc.class_master is not None and mc.class_master.class_no in (1, 6, 7)
 
 
 # PRODUCT.md classification table
@@ -758,9 +759,10 @@ def import_master_csv(master_file=None, csv_path=None, inspection_folder_paths=N
 
         insp_class = determine_inspection_class(master, code_file_map)
         if insp_class is not None:
+            cm = ClassMaster.objects.filter(class_no=insp_class).first()
             MasterClass.objects.update_or_create(
                 master=master,
-                defaults={"class_value": insp_class},
+                defaults={"class_master": cm},
             )
             class_count += 1
 
@@ -990,10 +992,9 @@ def generate_daily_report(target_date):
     )
 
     master_ids = list(histories.values_list("master_id", flat=True).distinct())
-    master_classes = {
-        mc.master_id: mc.class_value
-        for mc in MasterClass.objects.filter(master_id__in=master_ids)
-    }
+    master_classes = {}
+    for mc in MasterClass.objects.filter(master_id__in=master_ids).select_related("class_master"):
+        master_classes[mc.master_id] = mc.class_master.class_no if mc.class_master else None
 
     for history in histories:
         slot = history.time_slot

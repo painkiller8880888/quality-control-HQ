@@ -1,6 +1,7 @@
 from django.urls import path
 
 from .views import (
+    BulkDeleteTargetsView,
     BulkHistoryView,
     DailyReportGenerateView,
     ErpAutomationView,
@@ -32,6 +33,7 @@ urlpatterns = [
     path("plans/import/", PlansImportView.as_view()),
     path("inspection-targets/", InspectionTargetsView.as_view()),
     path("inspection-targets/manual/", ManualTargetsView.as_view()),
+    path("inspection-targets/bulk-delete/", BulkDeleteTargetsView.as_view()),
     path("inspection-targets/<int:target_id>/", InspectionTargetDetailView.as_view()),
     path("history/", SingleHistoryView.as_view()),
     path("history/bulk-upsert/", BulkHistoryView.as_view()),

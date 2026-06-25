@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import type { InspectionTarget } from '../types';
-import { AlertTriangle, ChevronDown, ChevronUp, FileCheck, CheckCircle2, Package, Database, ArrowUpDown, ArrowUp, ArrowDown } from 'lucide-react';
+import { AlertTriangle, ChevronDown, ChevronUp, FileCheck, CheckCircle2, Package, Database, ArrowUpDown, ArrowUp, ArrowDown, Trash2 } from 'lucide-react';
 
 interface TargetsTableProps {
   targets: InspectionTarget[];
@@ -8,9 +8,8 @@ interface TargetsTableProps {
   onTargetClick: (target: InspectionTarget) => void;
   selectedDate: string;
   onCheckUpdate: (date: string, items: { code: string; checks: Record<string, boolean> }[]) => void;
+  onDeleteTargets: (date: string, targetIds: number[]) => void;
 }
-
-// const CHECK_SLOTS = ['A', 'B', 'C', 'D'] as const;
 
 const CLASS_LABELS: Record<number, string> = {
   1: '自動機',
@@ -29,8 +28,11 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
   onTargetClick,
   selectedDate,
   onCheckUpdate,
+  onDeleteTargets,
 }) => {
   const [expandedRows, setExpandedRows] = useState<Record<number, boolean>>({});
+  const [deleteChecked, setDeleteChecked] = useState<Set<number>>(new Set());
+  const [isDeleting, setIsDeleting] = useState(false);
 
   useEffect(() => {
     if (highlightedTargetId === null) return;
@@ -44,7 +46,7 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
   }, [highlightedTargetId]);
   const [sortConfig, setSortConfig] = useState<{ key: keyof InspectionTarget | 'classLabel'; direction: 'asc' | 'desc' }>({ key: 'code', direction: 'asc' });
 
-  // Drag-to-check state
+  // Drag-to-check state (A/B/C/D slots)
   const containerRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{
     isDragging: boolean; startX: number; startY: number; slot: string;
@@ -58,6 +60,13 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
   const AUTO_SCROLL_MARGIN = 40;
   const AUTO_SCROLL_SPEED = 8;
 
+  // Delete drag-select state
+  const deleteDragRef = useRef<{
+    isDragging: boolean; startX: number; startY: number;
+    direction: 'check' | 'uncheck' | null;
+    processed: Set<number>;
+  }>({ isDragging: false, startX: 0, startY: 0, direction: null, processed: new Set() });
+
   const getCheckKey = (code: string, slot: string) => `${code}:${slot}`;
 
   const getCellData = (el: HTMLElement | null) => {
@@ -67,6 +76,13 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
     const slot = cell.getAttribute('data-check-slot');
     if (code && slot) return { code, slot, element: cell };
     return null;
+  };
+
+  const getDeleteCellTargetId = (el: HTMLElement | null): number | null => {
+    const cell = el?.closest('[data-delete-target-id]') as HTMLElement | null;
+    if (!cell) return null;
+    const id = cell.getAttribute('data-delete-target-id');
+    return id ? parseInt(id, 10) : null;
   };
 
   const isCellChecked = (target: InspectionTarget, slot: string) =>
@@ -91,6 +107,25 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
     setPendingChecks(prev => new Set(prev).add(key));
   }, [targets]);
 
+  const processDeleteCell = useCallback((clientX: number, clientY: number) => {
+    const drag = deleteDragRef.current;
+    if (!drag.isDragging || drag.direction === null) return;
+
+    const targetId = getDeleteCellTargetId(document.elementFromPoint(clientX, clientY) as HTMLElement);
+    if (targetId === null) return;
+    if (drag.processed.has(targetId)) return;
+    drag.processed.add(targetId);
+
+    const target = targets.find(t => t.target_id === targetId);
+    if (!target) return;
+
+    if (drag.direction === 'check') {
+      setDeleteChecked(prev => new Set(prev).add(targetId));
+    } else if (drag.direction === 'uncheck') {
+      setDeleteChecked(prev => { const s = new Set(prev); s.delete(targetId); return s; });
+    }
+  }, [targets, deleteChecked]);
+
   const lastPointerRef = useRef({ x: 0, y: 0 });
 
   const startAutoScroll = useCallback((speed: number) => {
@@ -99,11 +134,13 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
     const step = () => {
       if (autoScrollRafRef.current === null) return;
       container.scrollTop += speed;
-      processCell(lastPointerRef.current.x, lastPointerRef.current.y);
+      const { x, y } = lastPointerRef.current;
+      processCell(x, y);
+      processDeleteCell(x, y);
       autoScrollRafRef.current = requestAnimationFrame(step);
     };
     autoScrollRafRef.current = requestAnimationFrame(step);
-  }, [processCell]);
+  }, [processCell, processDeleteCell]);
 
   const stopAutoScroll = useCallback(() => {
     if (autoScrollRafRef.current !== null) {
@@ -142,6 +179,14 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
     drag.processed = new Set();
     drag.accumulated = new Map();
   }, [selectedDate, onCheckUpdate, stopAutoScroll]);
+
+  const endDeleteDrag = useCallback(() => {
+    const drag = deleteDragRef.current;
+    drag.isDragging = false;
+    drag.direction = null;
+    drag.processed = new Set();
+    stopAutoScroll();
+  }, [stopAutoScroll]);
 
   const handleCellPointerDown = useCallback((e: React.PointerEvent) => {
     const cellData = getCellData(e.currentTarget as HTMLElement);
@@ -189,7 +234,6 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
     const wasDrag = drag.isDragging;
 
     if (!wasDrag) {
-      // Click (no drag) — toggle
       const cellData = getCellData((_e.currentTarget as HTMLElement).closest('[data-check-code]') as HTMLElement);
       if (cellData && selectedDate) {
         const target = targets.find(t => t.code === cellData.code);
@@ -212,10 +256,71 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
     endDrag();
   }, [endDrag, targets, selectedDate, onCheckUpdate]);
 
+  // Delete checkbox pointer handlers
+  const handleDeletePointerDown = useCallback((e: React.PointerEvent) => {
+    const targetId = getDeleteCellTargetId(e.currentTarget as HTMLElement);
+    if (targetId === null) return;
+    e.stopPropagation();
+
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+
+    const isChecked = deleteChecked.has(targetId);
+    deleteDragRef.current = {
+      isDragging: false,
+      startX: e.clientX,
+      startY: e.clientY,
+      direction: isChecked ? 'uncheck' : 'check',
+      processed: new Set([targetId]),
+    };
+  }, [deleteChecked]);
+
+  const handleDeletePointerMove = useCallback((e: React.PointerEvent) => {
+    const drag = deleteDragRef.current;
+    if (!drag.isDragging && drag.direction === null) return;
+
+    const dx = Math.abs(e.clientX - drag.startX);
+    const dy = Math.abs(e.clientY - drag.startY);
+
+    if (!drag.isDragging) {
+      if (dx < DRAG_THRESHOLD && dy < DRAG_THRESHOLD) return;
+      drag.isDragging = true;
+      processDeleteCell(e.clientX, e.clientY);
+      return;
+    }
+
+    lastPointerRef.current = { x: e.clientX, y: e.clientY };
+
+    const now = performance.now();
+    if (now - lastMoveTimeRef.current < THROTTLE_MS) return;
+    lastMoveTimeRef.current = now;
+
+    processDeleteCell(e.clientX, e.clientY);
+    checkAutoScroll(e.clientX, e.clientY);
+  }, [processDeleteCell, checkAutoScroll]);
+
+  const handleDeletePointerUp = useCallback((_e: React.PointerEvent) => {
+    const drag = deleteDragRef.current;
+    const wasDrag = drag.isDragging;
+
+    if (!wasDrag) {
+      const targetId = getDeleteCellTargetId((_e.currentTarget as HTMLElement).closest('[data-delete-target-id]') as HTMLElement);
+      if (targetId !== null) {
+        setDeleteChecked(prev => {
+          const s = new Set(prev);
+          if (s.has(targetId)) s.delete(targetId); else s.add(targetId);
+          return s;
+        });
+      }
+    }
+
+    endDeleteDrag();
+  }, [endDeleteDrag]);
+
   // Window-level pointerup as backup
   useEffect(() => {
     const handleWindowUp = () => {
       if (dragRef.current.slot) endDrag();
+      if (deleteDragRef.current.direction !== null) endDeleteDrag();
     };
     window.addEventListener('pointerup', handleWindowUp);
     window.addEventListener('pointercancel', handleWindowUp);
@@ -223,7 +328,7 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
       window.removeEventListener('pointerup', handleWindowUp);
       window.removeEventListener('pointercancel', handleWindowUp);
     };
-  }, [endDrag]);
+  }, [endDrag, endDeleteDrag]);
 
   // Cleanup auto-scroll on unmount
   useEffect(() => { return () => stopAutoScroll(); }, [stopAutoScroll]);
@@ -271,8 +376,8 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
       let bVal: string | number;
 
       if (sortConfig.key === 'classLabel') {
-        aVal = getClassLabel(a.class);
-        bVal = getClassLabel(b.class);
+        aVal = a.class_name ?? getClassLabel(a.class);
+        bVal = b.class_name ?? getClassLabel(b.class);
       } else {
         const key = sortConfig.key;
         const aRaw = a[key];
@@ -294,6 +399,17 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
       return 0;
     });
   }, [targets, sortConfig]);
+
+  const handleExecuteDelete = async () => {
+    if (deleteChecked.size === 0 || !selectedDate) return;
+    setIsDeleting(true);
+    try {
+      await onDeleteTargets(selectedDate, Array.from(deleteChecked));
+      setDeleteChecked(new Set());
+    } finally {
+      setIsDeleting(false);
+    }
+  };
 
   if (targets.length === 0) {
     return (
@@ -319,10 +435,25 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
 
   return (
     <div className="card table-card">
-      <h2 className="card-title">
-        <FileCheck className="icon-title" size={20} />
-        検査対象一覧 (全 {targets.length} 件)
-      </h2>
+      <div className="table-card-header">
+        <h2 className="card-title">
+          <FileCheck className="icon-title" size={20} />
+          検査対象一覧 (全 {targets.length} 件)
+        </h2>
+        <div className="table-card-actions">
+          {deleteChecked.size > 0 && (
+            <span className="delete-count-label">{deleteChecked.size}件選択中</span>
+          )}
+          <button
+            className="btn btn-danger btn-sm"
+            onClick={handleExecuteDelete}
+            disabled={deleteChecked.size === 0 || isDeleting}
+          >
+            <Trash2 size={14} />
+            {isDeleting ? '削除中...' : '削除実行'}
+          </button>
+        </div>
+      </div>
       <div className="table-responsive" ref={containerRef}>
         <table className="targets-table">
           <thead>
@@ -336,6 +467,7 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
               <th className="text-center" style={{ width: '48px' }}>B</th>
               <th className="text-center" style={{ width: '48px' }}>C</th>
               <th className="text-center" style={{ width: '48px' }}>D</th>
+              <th className="text-center" style={{ width: '48px' }}>削除</th>
             </tr>
           </thead>
           <tbody>
@@ -343,6 +475,7 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
               const hasWarnings = target.warnings && target.warnings.length > 0;
               const isExpanded = !!expandedRows[target.target_id];
               const isHighlighted = target.target_id === highlightedTargetId;
+              const isDeleteChecked = deleteChecked.has(target.target_id);
 
               return (
                 <React.Fragment key={target.target_id}>
@@ -368,7 +501,7 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
                       <span className="target-name">{target.name}</span>
                     </td>
                     <td>
-                      <span className="text-muted">{getClassLabel(target.class)}</span>
+                      <span className="text-muted">{target.class_name ?? getClassLabel(target.class)}</span>
                     </td>
                     <td>
                       {target.requires_inspection_sheet ? (
@@ -429,10 +562,21 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
                         <span className="check-dot-unchecked"></span>
                       )}
                     </td>
+                    <td className="text-center delete-check-cell"
+                      data-delete-target-id={target.target_id}
+                      onPointerDown={handleDeletePointerDown}
+                      onPointerMove={handleDeletePointerMove}
+                      onPointerUp={handleDeletePointerUp}
+                      onPointerCancel={handleDeletePointerUp}
+                      onClick={(e) => e.stopPropagation()}>
+                      <span className={`delete-checkbox ${isDeleteChecked ? 'checked' : ''}`}>
+                        {isDeleteChecked ? '✓' : ''}
+                      </span>
+                    </td>
                   </tr>
 
                   <tr className="target-detail-row">
-                    <td colSpan={9}>
+                    <td colSpan={10}>
                       <div className={`target-detail-container ${isExpanded ? 'expanded' : ''}`}>
                         <div className="target-detail-grid">
                           <div className="target-detail-item">

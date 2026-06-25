@@ -18,6 +18,7 @@ class InspectionTargetSerializer(serializers.ModelSerializer):
     code = serializers.CharField(source="normalized_code", read_only=True)
     name = serializers.SerializerMethodField()
     category = serializers.SerializerMethodField()
+    class_name = serializers.SerializerMethodField()
     product_category = serializers.SerializerMethodField()
     source_flags = serializers.SerializerMethodField()
     checks = serializers.SerializerMethodField()
@@ -30,6 +31,7 @@ class InspectionTargetSerializer(serializers.ModelSerializer):
             "code",
             "name",
             "category",
+            "class_name",
             "product_category",
             "source_flags",
             "requires_inspection_sheet",
@@ -45,7 +47,13 @@ class InspectionTargetSerializer(serializers.ModelSerializer):
         if obj.master is None:
             return None
         mc = MasterClass.objects.filter(master=obj.master).first()
-        return mc.class_value if mc else None
+        return mc.class_master.class_no if mc and mc.class_master else None
+
+    def get_class_name(self, obj):
+        if obj.master is None:
+            return None
+        mc = MasterClass.objects.filter(master=obj.master).first()
+        return mc.class_master.class_name if mc and mc.class_master else None
 
     def get_product_category(self, obj):
         return obj.master.product_category if obj.master else None
@@ -92,6 +100,11 @@ class SingleHistoryRequestSerializer(serializers.Serializer):
     code = serializers.CharField(max_length=64)
     time = serializers.ChoiceField(choices=History.TimeSlot.choices)
     checked = serializers.BooleanField()
+
+
+class BulkDeleteTargetsRequestSerializer(serializers.Serializer):
+    date = serializers.DateField()
+    target_ids = serializers.ListField(child=serializers.IntegerField(), allow_empty=False)
 
 
 class DailyReportGenerateRequestSerializer(serializers.Serializer):

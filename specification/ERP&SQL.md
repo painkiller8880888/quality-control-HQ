@@ -65,8 +65,29 @@ ERP由来の品目マスタ。
 |---|---|---|
 | class_id | PK | 主キー |
 | master_id | FK -> master.master_id | 対応品目 |
-| class |  | `1 / 2 / 3 / 4 / 5 / 6 / 7 / 8`, PRODUCT.md参照 |
+| class_no | FK -> class_master.class_no, integer | クラス番号 |
 | updated_at |  | 最終更新日時 |
+
+### 5.2.1 class_master
+
+コードのクラスのマスタ情報
+
+| column | type | note |
+|---|---|---|
+| class_master_id | PK | 主キー |
+| class_no |  || `1 / 2 / 3 / 4 / 5 / 6 / 7 / 8`, ###3参照 |
+| class_name|  | クラスの名称。###3参照 |
+
+補足
+- class_no : class_name
+- `1`: 自動機
+- `2`: 半自動機
+- `3`: セッター
+- `4`: プレス
+- `5`: 二次加工
+- `6`: 製品検査(1)
+- `7`: 製品検査(2)
+- `8`: 手動
 
 ### 5.3 structure
 
@@ -167,6 +188,7 @@ ERP由来の品目マスタ。
 | date |  | 日付 |
 | master_id | FK -> master.master_id | 対象品目 |
 | time_slot |  | `A / B / C / D` |
+| is_sheet_issued | bool | 検査書印刷済みフラグ。デフォルトは `False` |
 | created_at |  | 作成日時 |
 | updated_at |  | 更新日時 |
 
@@ -289,6 +311,7 @@ ERP由来の品目マスタ。
 - 座標およびサイズはグリッド単位で保持する。
 - `machine_id` を持つことで当日検査対象との連携を行う。
 - `meta_json` は将来的な拡張情報保持に利用可能とする。
+
 
 ## 6. チェック時間帯マスタ
 
