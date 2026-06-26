@@ -13,6 +13,7 @@ from pypdf import PdfReader
 from rapidocr_onnxruntime import RapidOCR
 import xlrd
 
+from datetime import date as date_type
 from .constants import CHECK_SLOTS
 from .models import (
     ClassMaster,
@@ -960,6 +961,99 @@ def run_job(job, fn):
     job.finished_at = timezone.now()
     job.save(update_fields=["status", "result", "finished_at"])
     return result
+
+
+def _excel_serial_date(d: date_type) -> int:
+    delta = d - date_type(1899, 12, 30)
+    return delta.days
+
+
+def issue_inspection_sheets(target_date: date_type | None = None):
+    template_path = Path(settings.DAILY_REPORT_TEMPLATE)
+    if not template_path.exists():
+        raise FileNotFoundError(f"Excel template not found: {template_path}")
+
+    qs = History.objects.filter(is_sheet_issued=False)
+    if target_date:
+        qs = qs.filter(date=target_date)
+    qs = qs.select_related("master").order_by("date", "master__code", "time_slot")
+
+    if not qs.exists():
+        return {"issued_count": 0, "message": "No unissued entries found."}
+
+    master_ids = list(qs.values_list("master_id", flat=True).distinct())
+    class_map: dict[int, int | None] = {}
+    for mc in MasterClass.objects.filter(master_id__in=master_ids).select_related("class_master"):
+        class_map[mc.master_id] = mc.class_master.class_no if mc.class_master else None
+
+    file_map: dict[int, str] = {}
+    for fi in InspectionFile.objects.filter(master_id__in=master_ids):
+        if fi.master_id not in file_map:
+            file_map[fi.master_id] = fi.file_path
+
+    rows = []
+    for h in qs:
+        class_no = class_map.get(h.master_id)
+        file_path = file_map.get(h.master_id, "")
+        serial_date = _excel_serial_date(h.date)
+        rows.append([
+            file_path,
+            h.time_slot,
+            class_no if class_no is not None else "",
+            serial_date,
+            "1-6",
+            "前田 賢一",
+        ])
+
+    try:
+        import win32com.client
+        import pythoncom
+    except ImportError:
+        raise RuntimeError("pywin32 is required for COM Excel automation")
+
+    pythoncom.CoInitialize()
+    xl = None
+    try:
+        xl = win32com.client.DispatchEx("Excel.Application")
+        xl.DisplayAlerts = False
+        xl.EnableEvents = False
+        xl.Visible = False
+        xl.AskToUpdateLinks = False
+        try:
+            xl.Calculation = -4135  # xlManual
+        except pythoncom.com_error:
+            logger.warning("Excel Calculation property could not be set")
+        xl.ScreenUpdating = False
+
+        wb = xl.Workbooks.Open(str(template_path.resolve()), UpdateLinks=False)
+        ws_data = wb.Sheets("data") if "data" in [s.Name for s in wb.Sheets] else wb.Sheets[0]
+
+        ws_data.Cells.ClearContents()
+
+        for i, row_data in enumerate(rows, start=2):
+            for j, val in enumerate(row_data, start=1):
+                ws_data.Cells(i, j).Value = val
+
+        wb.Application.Run("RunBatch")
+
+        wb.Save()
+    finally:
+        if xl is not None:
+            xl.ScreenUpdating = True
+            xl.DisplayAlerts = True
+            xl.EnableEvents = True
+            try:
+                xl.Calculation = -4105  # xlAutomatic
+            except pythoncom.com_error:
+                pass
+            wb.Close(False)
+            xl.Quit()
+        pythoncom.CoUninitialize()
+
+    history_ids = [h.history_id for h in qs]
+    History.objects.filter(history_id__in=history_ids).update(is_sheet_issued=True)
+
+    return {"issued_count": len(rows), "date": str(target_date) if target_date else "all"}
 
 
 def generate_daily_report(target_date):

@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import type { InspectionTarget } from '../types';
-import { AlertTriangle, ChevronDown, ChevronUp, FileCheck, CheckCircle2, Package, Database, ArrowUpDown, ArrowUp, ArrowDown, EyeOff, Plus } from 'lucide-react';
+import { AlertTriangle, ChevronDown, ChevronUp, FileCheck, CheckCircle2, Package, Database, ArrowUpDown, ArrowUp, ArrowDown, EyeOff, Plus, Printer } from 'lucide-react';
 import { ManualAddModal } from './ManualAddModal';
 
 interface TargetsTableProps {
@@ -10,6 +10,7 @@ interface TargetsTableProps {
   selectedDate: string;
   onCheckUpdate: (date: string, items: { code: string; checks: Record<string, boolean> }[]) => void;
   onHideTargets: (date: string, targetIds: number[]) => void;
+  onIssueSheet: (date: string) => Promise<void>;
   onRefresh: () => void;
   isLoading?: boolean;
 }
@@ -48,6 +49,7 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
   selectedDate,
   onCheckUpdate,
   onHideTargets,
+  onIssueSheet,
   onRefresh,
   isLoading,
 }) => {
@@ -55,6 +57,7 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
   const [hideChecked, setHideChecked] = useState<Set<number>>(new Set());
   const [isHiding, setIsHiding] = useState(false);
   const [showManualAddModal, setShowManualAddModal] = useState(false);
+  const [isIssuing, setIsIssuing] = useState(false);
 
   useEffect(() => {
     if (highlightedTargetId === null) return;
@@ -72,8 +75,9 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
   const containerRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{
     isDragging: boolean; startX: number; startY: number; slot: string;
+    setChecked: boolean;
     processed: Set<string>; accumulated: Map<string, Record<string, boolean>>;
-  }>({ isDragging: false, startX: 0, startY: 0, slot: '', processed: new Set(), accumulated: new Map() });
+  }>({ isDragging: false, startX: 0, startY: 0, slot: '', setChecked: true, processed: new Set(), accumulated: new Map() });
   const [pendingChecks, setPendingChecks] = useState<Set<string>>(new Set());
   const autoScrollRafRef = useRef<number | null>(null);
   const lastMoveTimeRef = useRef(0);
@@ -120,13 +124,17 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
     drag.processed.add(key);
 
     const target = targets.find(t => t.code === cellData.code);
-    if (target?.checks?.[cellData.slot as keyof typeof target.checks]) return;
+    if (target?.checks?.[cellData.slot as keyof typeof target.checks] === drag.setChecked) return;
 
     const existing = drag.accumulated.get(cellData.code) || {};
-    existing[cellData.slot] = true;
+    existing[cellData.slot] = drag.setChecked;
     drag.accumulated.set(cellData.code, existing);
 
-    setPendingChecks(prev => new Set(prev).add(key));
+    if (drag.setChecked) {
+      setPendingChecks(prev => new Set(prev).add(key));
+    } else {
+      setPendingChecks(prev => { const s = new Set(prev); s.delete(key); return s; });
+    }
   }, [targets]);
 
   const processHideCell = useCallback((clientX: number, clientY: number) => {
@@ -217,15 +225,19 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
 
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
 
+    const target = targets.find(t => t.code === cellData.code);
+    const isChecked = !!target?.checks?.[cellData.slot as keyof typeof target.checks];
+
     dragRef.current = {
       isDragging: false,
       startX: e.clientX,
       startY: e.clientY,
       slot: cellData.slot,
+      setChecked: !isChecked,
       processed: new Set(),
       accumulated: new Map(),
     };
-  }, []);
+  }, [targets]);
 
   const handleCellPointerMove = useCallback((e: React.PointerEvent) => {
     const drag = dragRef.current;
@@ -422,6 +434,16 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
     });
   }, [targets, sortConfig]);
 
+  const handleIssueSheet = async () => {
+    if (!selectedDate) return;
+    setIsIssuing(true);
+    try {
+      await onIssueSheet(selectedDate);
+    } finally {
+      setIsIssuing(false);
+    }
+  };
+
   const handleExecuteHide = async () => {
     if (hideChecked.size === 0 || !selectedDate) return;
     setIsHiding(true);
@@ -480,6 +502,14 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
           >
             <Plus size={14} />
             手動追加
+          </button>
+          <button
+            className="btn btn-outline btn-sm"
+            onClick={handleIssueSheet}
+            disabled={isIssuing}
+          >
+            <Printer size={14} />
+            {isIssuing ? '印刷中...' : '検査書印刷'}
           </button>
           <button
             className="btn btn-danger btn-sm"

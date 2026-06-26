@@ -88,7 +88,7 @@ class CheckItemSerializer(serializers.Serializer):
         invalid = set(value) - set(CHECK_SLOTS)
         if invalid:
             raise serializers.ValidationError(f"Invalid time slots: {sorted(invalid)}")
-        return {slot: bool(value.get(slot, False)) for slot in CHECK_SLOTS}
+        return {slot: bool(value[slot]) for slot in value}
 
 
 class BulkHistoryRequestSerializer(serializers.Serializer):

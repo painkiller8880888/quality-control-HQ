@@ -10,6 +10,7 @@ from rest_framework.test import APIClient
 
 from .models import (
     AppSetting,
+    ClassMaster,
     History,
     InspectionFile,
     Job,
@@ -746,6 +747,95 @@ class PhaseTwoMasterUpdateTests(TestCase):
             format="json",
         )
         self.assertEqual(response.status_code, 202)
+
+    def test_excel_serial_date(self):
+        from quality.services import _excel_serial_date
+        from datetime import date
+        self.assertEqual(_excel_serial_date(date(1900, 1, 1)), 2)
+        self.assertEqual(_excel_serial_date(date(2026, 6, 26)), 46199)
+
+    def test_issue_inspection_sheets_raises_on_missing_template(self):
+        from quality.services import issue_inspection_sheets
+        from django.test import override_settings
+        from pathlib import Path
+        with self.settings(DAILY_REPORT_TEMPLATE=Path("C:/nonexistent_template_path.xlsm")):
+            with self.assertRaises(FileNotFoundError):
+                issue_inspection_sheets()
+
+    def test_issue_inspection_sheets_builds_correct_rows(self):
+        from quality.services import issue_inspection_sheets, _excel_serial_date
+        from datetime import date
+        from unittest.mock import MagicMock, patch, PropertyMock
+
+        cm = ClassMaster.objects.get_or_create(class_no=99, class_name="TestClass")[0]
+        master = Master.objects.create(code="CDP0028", name="TestItem")
+        MasterClass.objects.create(master=master, class_master=cm)
+        h = History.objects.create(date=date(2026, 6, 26), master=master, time_slot="A")
+
+        cells_data = {}
+
+        def make_cell():
+            cell = MagicMock()
+            cell_mock_value = MagicMock()
+            def set_value(val):
+                cell_mock_value.Value = val
+            cell.Value = cell_mock_value
+            type(cell).Value = PropertyMock(side_effect=lambda: cell_mock_value.Value)
+            return cell
+
+        cell_map = {}
+
+        def track_cells(row, col):
+            key = (row, col)
+            if key not in cell_map:
+                cell = MagicMock()
+                cell_mock = MagicMock()
+                def set_val(v):
+                    cell_mock.Value = v
+                def get_val():
+                    if hasattr(cell_mock, '_value'):
+                        return cell_mock._value
+                    return None
+                cell_mock._value = None
+                cell_mock.Value = None
+                cell_mock.configure_mock(**{'Value': cell_mock.Value})
+                # Use a different approach
+                cell.Value = None
+                cell_map[key] = cell
+            return cell_map[key]
+
+        with TemporaryDirectory() as tmp:
+            template_path = Path(tmp) / "daily.xlsm"
+            workbook = Workbook()
+            workbook.save(template_path)
+
+            mock_ws = MagicMock()
+            mock_ws.Name = "data"
+            mock_ws.Cells.side_effect = track_cells
+
+            mock_wb = MagicMock()
+            mock_wb.Sheets.return_value = mock_ws
+            mock_wb.Sheets.__iter__.return_value = iter([mock_ws])
+
+            mock_xl = MagicMock()
+            mock_xl.Workbooks.Open.return_value = mock_wb
+
+            with patch("win32com.client.Dispatch", return_value=mock_xl):
+                with override_settings(DAILY_REPORT_TEMPLATE=template_path):
+                    result = issue_inspection_sheets(target_date=date(2026, 6, 26))
+
+            self.assertEqual(result["issued_count"], 1)
+
+            cells_calls = mock_ws.Cells.call_args_list
+            row_col_calls = [ca[0] for ca in cells_calls]
+            self.assertIn((2, 1), row_col_calls)
+            self.assertIn((2, 3), row_col_calls)
+            self.assertIn((2, 4), row_col_calls)
+            self.assertIn((2, 5), row_col_calls)
+            self.assertIn((2, 6), row_col_calls)
+
+            h.refresh_from_db()
+            self.assertTrue(h.is_sheet_issued)
 
     def test_utf8_sig_csv_import(self):
         """utf-8-sig BOM付きCSVでも読み込めること"""

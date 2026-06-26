@@ -57,6 +57,7 @@ from .services import (
     history_map_for_date,
     import_master_csv,
     import_plan_targets,
+    issue_inspection_sheets,
     run_job,
     set_check,
 )
@@ -629,7 +630,20 @@ class MachineMasterView(APIView):
 
 class InspectionSheetIssueView(APIView):
     def post(self, request):
+        target_date = request.data.get("date")
         job = create_job(Job.JobType.INSPECTION_SHEET_ISSUE, request.data)
+        try:
+            run_job(job, lambda: issue_inspection_sheets(target_date=target_date))
+        except FileNotFoundError as exc:
+            return error_response("FILE_NOT_FOUND", str(exc), status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except RuntimeError as exc:
+            return error_response("COM_FAILED", str(exc), status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception as exc:
+            return error_response(
+                "INSPECTION_SHEET_ISSUE_FAILED",
+                str(exc),
+                status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
         return Response({"status": "accepted", "job_id": job.job_id}, status=status.HTTP_202_ACCEPTED)
 
 

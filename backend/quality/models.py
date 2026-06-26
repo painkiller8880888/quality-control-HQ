@@ -166,9 +166,11 @@ class History(models.Model):
         C = "C", "12:45-14:45"
         D = "D", "15:00-17:15"
 
+    history_id = models.BigAutoField(primary_key=True, db_column='history_id')
     date = models.DateField()
     master = models.ForeignKey(Master, on_delete=models.CASCADE, related_name="histories")
     time_slot = models.CharField(max_length=1, choices=TimeSlot.choices)
+    is_sheet_issued = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

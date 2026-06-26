@@ -278,6 +278,44 @@ export const App: React.FC = () => {
     await fetchTargets(date);
   };
 
+  const handleIssueSheet = async (date: string) => {
+    setGlobalError(null);
+    try {
+      const response = await fetch('/api/inspection-sheet/issue/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ date }),
+      });
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        throw new Error(errData.message || '検査書印刷の開始に失敗しました');
+      }
+      const { job_id } = await response.json();
+      await new Promise<void>((resolve, reject) => {
+        const poll = setInterval(async () => {
+          try {
+            const res = await fetch(`/api/jobs/${job_id}/`);
+            const jobData: Job = await res.json();
+            setCurrentJob(jobData);
+            if (jobData.status === 'succeeded') {
+              clearInterval(poll);
+              fetchTargets(date);
+              resolve();
+            } else if (jobData.status === 'failed') {
+              clearInterval(poll);
+              reject(new Error(jobData.error_message || '印刷ジョブが失敗しました'));
+            }
+          } catch {
+            // continue polling
+          }
+        }, 2000);
+      });
+    } catch (err: any) {
+      setGlobalError(err.message || '検査書印刷の開始に失敗しました');
+      throw err;
+    }
+  };
+
   const handleCheckUpdate = (date: string, items: { code: string; checks: Record<string, boolean> }[]) => {
     setTargets(prev => prev.map(t => {
       const item = items.find(i => i.code === t.code);
@@ -475,6 +513,7 @@ export const App: React.FC = () => {
                   selectedDate={selectedDate}
                   onCheckUpdate={handleCheckUpdate}
                   onHideTargets={handleHideTargets}
+                  onIssueSheet={handleIssueSheet}
                   onRefresh={handleRefreshTargets}
                   isLoading={isLoadingTargets}
                 />
