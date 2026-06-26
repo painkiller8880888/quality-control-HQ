@@ -126,6 +126,7 @@ class InspectionTarget(models.Model):
         choices=IssueStatus.choices,
         default=IssueStatus.NOT_REQUIRED,
     )
+    visible = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

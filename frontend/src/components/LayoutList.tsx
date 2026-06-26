@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { MapPin } from 'lucide-react';
 import type { FactoryMapResponse, FactoryMapMachine, InspectionTarget, LayoutSummary, LayoutObject, LayoutObjectType } from '../types';
 import { MachinePopup } from './MachinePopup';
@@ -62,6 +62,7 @@ export const LayoutList: React.FC<LayoutListProps> = ({
 }) => {
   const [layoutMaps, setLayoutMaps] = useState<LayoutMapData[]>([]);
   const [selectedMachine, setSelectedMachine] = useState<FactoryMapMachine | null>(null);
+  const lastAutoSwitchCode = useRef<string | null>(null);
 
   useEffect(() => {
     if (!selectedDate) {
@@ -118,17 +119,20 @@ export const LayoutList: React.FC<LayoutListProps> = ({
   }, [layouts, selectedDate, targets]);
 
   // Synchronize layout switching when a target code is clicked in the list
+  // Only auto-switch when highlightedTargetCode changes to a NEW code,
+  // so manual segment button clicks are never overridden.
   useEffect(() => {
     if (!highlightedTargetCode || layoutMaps.length === 0) return;
-    
-    // Find which layout map has this code
+    if (highlightedTargetCode === lastAutoSwitchCode.current) return;
+
     const foundLayoutMap = layoutMaps.find(lm => 
       lm.mapData?.machines?.some(m => m.target_codes?.includes(highlightedTargetCode))
     );
     if (foundLayoutMap && foundLayoutMap.layout.id !== activeLayoutId) {
       setActiveLayoutId(foundLayoutMap.layout.id);
+      lastAutoSwitchCode.current = highlightedTargetCode;
     }
-  }, [highlightedTargetCode, layoutMaps, activeLayoutId, setActiveLayoutId]);
+  }, [highlightedTargetCode, layoutMaps]);
 
   if (layoutMaps.length === 0) {
     return (
@@ -146,16 +150,27 @@ export const LayoutList: React.FC<LayoutListProps> = ({
   return (
     <div className="layout-list-container" style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
       <div className="map-segment-control">
-        {layoutMaps.map(({ layout }) => (
-          <button
-            key={layout.id}
-            type="button"
-            className={`map-segment-button ${activeLayoutId === layout.id ? 'active' : ''}`}
-            onClick={() => setActiveLayoutId(layout.id)}
-          >
-            {layout.layout_name}
-          </button>
-        ))}
+        {layoutMaps.map(({ layout, mapData }) => {
+          const machineIdsOnLayout = new Set(
+            mapData?.layout?.objects
+              ?.filter((obj) => obj.type === 'machine' && obj.machine_id != null)
+              ?.map((obj) => obj.machine_id) ?? []
+          );
+          const targetCount = mapData?.machines
+            ?.filter((m) => machineIdsOnLayout.has(m.machine_id))
+            ?.reduce((sum, m) => sum + m.target_codes.length, 0) ?? 0;
+          return (
+            <button
+              key={layout.id}
+              type="button"
+              className={`map-segment-button ${activeLayoutId === layout.id ? 'active' : ''}`}
+              onClick={() => setActiveLayoutId(layout.id)}
+            >
+              {layout.layout_name}
+              {targetCount > 0 && <span className="map-segment-badge">{targetCount}</span>}
+            </button>
+          );
+        })}
       </div>
 
       <div className="layout-list-item card" style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>

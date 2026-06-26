@@ -160,3 +160,16 @@ export interface FactoryMapResponse {
   machines: FactoryMapMachine[];
   warnings: FactoryMapWarning[];
 }
+
+export interface MachineDetail {
+  id: number;
+  machine_no: string;
+  machine_name: string;
+  shape_type: 'circle' | 'ellipse' | 'rectangle';
+  map_x: number;
+  map_y: number;
+  width: number;
+  height: number;
+  is_active: boolean;
+  assignments: { code: string; name: string }[];
+}

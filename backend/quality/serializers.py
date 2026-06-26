@@ -36,6 +36,7 @@ class InspectionTargetSerializer(serializers.ModelSerializer):
             "source_flags",
             "requires_inspection_sheet",
             "issue_status",
+            "visible",
             "warnings",
             "checks",
         ]
@@ -102,7 +103,7 @@ class SingleHistoryRequestSerializer(serializers.Serializer):
     checked = serializers.BooleanField()
 
 
-class BulkDeleteTargetsRequestSerializer(serializers.Serializer):
+class BulkHideTargetsRequestSerializer(serializers.Serializer):
     date = serializers.DateField()
     target_ids = serializers.ListField(child=serializers.IntegerField(), allow_empty=False)
 
@@ -210,6 +211,30 @@ class MachineSerializer(serializers.ModelSerializer):
     class Meta:
         model = Machine
         fields = ["id", "machine_no", "machine_name"]
+
+
+class MachineDetailSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Machine
+        fields = ["id", "machine_no", "machine_name", "shape_type", "map_x", "map_y", "width", "height", "is_active"]
+
+
+class MachineAssignmentSerializer(serializers.Serializer):
+    code = serializers.CharField()
+    name = serializers.CharField()
+
+
+class MachineMasterSaveSerializer(serializers.Serializer):
+    id = serializers.IntegerField(required=False, allow_null=True)
+    machine_no = serializers.CharField(max_length=64)
+    machine_name = serializers.CharField(max_length=255)
+    shape_type = serializers.ChoiceField(choices=["circle", "ellipse", "rectangle"])
+    map_x = serializers.FloatField()
+    map_y = serializers.FloatField()
+    width = serializers.FloatField()
+    height = serializers.FloatField()
+    is_active = serializers.BooleanField(default=True)
+    assignments = serializers.ListField(child=serializers.CharField(), default=list)
 
 
 class AppSettingSerializer(serializers.ModelSerializer):

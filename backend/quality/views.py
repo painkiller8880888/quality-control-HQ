@@ -5,6 +5,7 @@ import uuid
 from django.conf import settings
 from django.shortcuts import get_object_or_404
 from django.db import transaction
+from django.db import models as db_models
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.parsers import FormParser, MultiPartParser
@@ -26,7 +27,7 @@ from .models import (
 )
 from .serializers import (
     AppSettingSerializer,
-    BulkDeleteTargetsRequestSerializer,
+    BulkHideTargetsRequestSerializer,
     BulkHistoryRequestSerializer,
     CreateLayoutSerializer,
     DailyReportGenerateRequestSerializer,
@@ -36,6 +37,8 @@ from .serializers import (
     LayoutObjectSerializer,
     LayoutObjectTypeSerializer,
     LayoutSaveRequestSerializer,
+    MachineDetailSerializer,
+    MachineMasterSaveSerializer,
     MachineSerializer,
     ManualTargetsRequestSerializer,
     MasterImportRequestSerializer,
@@ -165,6 +168,20 @@ class MasterUpdateView(APIView):
         return Response({"status": "accepted", "job_id": job.job_id}, status=status.HTTP_202_ACCEPTED)
 
 
+class MasterSearchView(APIView):
+    def get(self, request):
+        q = request.query_params.get("q", "").strip()
+        if not q:
+            return Response([])
+        masters = Master.objects.filter(
+            db_models.Q(code__icontains=q) | db_models.Q(name__icontains=q)
+        ).order_by("code")[:20]
+        return Response([
+            {"code": m.code, "name": m.name, "product_category": m.product_category}
+            for m in masters
+        ])
+
+
 class SettingsView(APIView):
     def get(self, request):
         setting = AppSetting.objects.first()
@@ -273,7 +290,7 @@ class InspectionTargetsView(APIView):
             return Response([])
 
         targets = (
-            InspectionTarget.objects.filter(session=session)
+            InspectionTarget.objects.filter(session=session, visible=True)
             .select_related("master")
             .prefetch_related("warnings")
             .order_by("normalized_code")
@@ -289,21 +306,22 @@ class InspectionTargetsView(APIView):
 class InspectionTargetDetailView(APIView):
     def delete(self, request, target_id):
         target = get_object_or_404(InspectionTarget, id=target_id)
-        target.delete()
+        target.visible = False
+        target.save()
         return success_response()
 
 
-class BulkDeleteTargetsView(APIView):
+class BulkHideTargetsView(APIView):
     def post(self, request):
-        serializer = BulkDeleteTargetsRequestSerializer(data=request.data)
+        serializer = BulkHideTargetsRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         date = serializer.validated_data["date"]
         session = InspectionSession.objects.filter(target_date=date).first()
         if session is None:
-            return success_response(deleted_count=0)
+            return success_response(hidden_count=0)
         ids = serializer.validated_data["target_ids"]
-        deleted, _ = InspectionTarget.objects.filter(session=session, id__in=ids).delete()
-        return success_response(deleted_count=deleted)
+        hidden = InspectionTarget.objects.filter(session=session, id__in=ids).update(visible=False)
+        return success_response(hidden_count=hidden)
 
 
 class BulkHistoryView(APIView):
@@ -371,7 +389,7 @@ class FactoryMapView(APIView):
         if target_date:
             session = InspectionSession.objects.filter(target_date=target_date).first()
             if session:
-                targets = InspectionTarget.objects.filter(session=session).select_related("master")
+                targets = InspectionTarget.objects.filter(session=session, visible=True).select_related("master")
                 target_codes = {target.normalized_code for target in targets}
                 assigned_codes = set(
                     MachineAssignment.objects.filter(code__code__in=target_codes).values_list("code__code", flat=True)
@@ -531,6 +549,82 @@ class MachineListView(APIView):
         machines = Machine.objects.filter(is_active=True).order_by("machine_no")
         serializer = MachineSerializer(machines, many=True)
         return Response(serializer.data)
+
+
+class MachineMasterView(APIView):
+    def get(self, request):
+        machines = Machine.objects.all().order_by("machine_no").prefetch_related("assignments__code")
+        result = []
+        for m in machines:
+            assignments = [
+                {"code": a.code.code, "name": a.code.name}
+                for a in m.assignments.all()
+            ]
+            result.append({
+                "id": m.id,
+                "machine_no": m.machine_no,
+                "machine_name": m.machine_name,
+                "shape_type": m.shape_type,
+                "map_x": m.map_x,
+                "map_y": m.map_y,
+                "width": m.width,
+                "height": m.height,
+                "is_active": m.is_active,
+                "assignments": assignments,
+            })
+        return Response(result)
+
+    @transaction.atomic
+    def put(self, request):
+        serializer = MachineMasterSaveSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        if data.get("id"):
+            machine = get_object_or_404(Machine, id=data["id"])
+            machine.machine_no = data["machine_no"]
+            machine.machine_name = data["machine_name"]
+            machine.shape_type = data["shape_type"]
+            machine.map_x = data["map_x"]
+            machine.map_y = data["map_y"]
+            machine.width = data["width"]
+            machine.height = data["height"]
+            machine.is_active = data["is_active"]
+            machine.save()
+        else:
+            machine = Machine.objects.create(
+                machine_no=data["machine_no"],
+                machine_name=data["machine_name"],
+                shape_type=data["shape_type"],
+                map_x=data["map_x"],
+                map_y=data["map_y"],
+                width=data["width"],
+                height=data["height"],
+                is_active=data["is_active"],
+            )
+
+        machine.assignments.all().delete()
+        codes = data.get("assignments", [])
+        for code in codes:
+            master = Master.objects.filter(code=code).first()
+            if master:
+                MachineAssignment.objects.create(machine=machine, code=master)
+
+        return Response({
+            "id": machine.id,
+            "machine_no": machine.machine_no,
+            "machine_name": machine.machine_name,
+            "shape_type": machine.shape_type,
+            "map_x": machine.map_x,
+            "map_y": machine.map_y,
+            "width": machine.width,
+            "height": machine.height,
+            "is_active": machine.is_active,
+            "assignments": [
+                {"code": a.code.code, "name": a.code.name}
+                for a in machine.assignments.select_related("code").all()
+            ],
+        })
 
 
 class InspectionSheetIssueView(APIView):

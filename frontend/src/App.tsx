@@ -6,8 +6,9 @@ import { SettingsPanel } from './components/SettingsPanel';
 import { TargetsTable } from './components/TargetsTable';
 import { LayoutList } from './components/LayoutList';
 import { FactoryMapCreator } from './components/FactoryMapCreator';
+import { MachineMasterPanel } from './components/MachineMasterPanel';
 import type { Job, InspectionTarget, ApiError, LayoutSummary } from './types';
-import { ShieldAlert, RefreshCw, Layers, Map as MapIcon, Settings, PanelLeftClose, PanelLeftOpen, Sun, Moon, Palette } from 'lucide-react';
+import { ShieldAlert, RefreshCw, Layers, Map as MapIcon, Cpu, Settings, PanelLeftClose, PanelLeftOpen, Sun, Moon, Palette } from 'lucide-react';
 
 type ThemeMode = 'normal' | 'dark' | 'solarized-light' | 'solarized-dark';
 
@@ -26,7 +27,7 @@ const getNextTheme = (current: ThemeMode): ThemeMode => {
 };
 
 export const App: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'mapCreator' | 'settings'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'mapCreator' | 'machineMaster' | 'settings'>('dashboard');
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(false);
   const [sidebarSegment, setSidebarSegment] = useState<'import' | 'status'>('import');
   const [selectedDate, setSelectedDate] = useState<string>('');
@@ -264,17 +265,17 @@ export const App: React.FC = () => {
     }, 2500);
   };
 
-  const handleDeleteTargets = async (date: string, targetIds: number[]) => {
-    const response = await fetch('/api/inspection-targets/bulk-delete/', {
+  const handleHideTargets = async (date: string, targetIds: number[]) => {
+    const response = await fetch('/api/inspection-targets/bulk-hide/', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ date, target_ids: targetIds }),
     });
     if (!response.ok) {
       const errData = await response.json().catch(() => ({}));
-      throw new Error(errData.message || '削除に失敗しました');
+      throw new Error(errData.message || '非表示に失敗しました');
     }
-    setTargets(prev => prev.filter(t => !targetIds.includes(t.target_id)));
+    await fetchTargets(date);
   };
 
   const handleCheckUpdate = (date: string, items: { code: string; checks: Record<string, boolean> }[]) => {
@@ -327,6 +328,14 @@ export const App: React.FC = () => {
           </button>
           <button
             type="button"
+            className={`app-tab ${activeTab === 'machineMaster' ? 'active' : ''}`}
+            onClick={() => setActiveTab('machineMaster')}
+          >
+            <Cpu size={16} />
+            機械マスタ編集
+          </button>
+          <button
+            type="button"
             className={`app-tab ${activeTab === 'settings' ? 'active' : ''}`}
             onClick={() => setActiveTab('settings')}
           >
@@ -348,7 +357,7 @@ export const App: React.FC = () => {
         </div>
       </header>
 
-      <main className={`app-main ${activeTab === 'mapCreator' || activeTab === 'settings' ? 'scrollable' : ''}`}>
+      <main className={`app-main ${activeTab === 'mapCreator' || activeTab === 'settings' || activeTab === 'machineMaster' ? 'scrollable' : ''}`}>
 
         {globalError && (
           <div className="card error-card-global animate-shake">
@@ -434,24 +443,21 @@ export const App: React.FC = () => {
                   </div>
                 )}
 
-                {isLoadingTargets ? (
-                  <div className="loading-container">
-                    <div className="pulse-spinner"></div>
-                    <p>検査対象データを読み込んでいます...</p>
-                  </div>
-                ) : (
-                  <TargetsTable
-                    targets={targets}
-                    highlightedTargetId={highlightedTargetId}
-                    onTargetClick={handleTargetClick}
-                    selectedDate={selectedDate}
-                    onCheckUpdate={handleCheckUpdate}
-                    onDeleteTargets={handleDeleteTargets}
-                  />
-                )}
+                <TargetsTable
+                  targets={targets}
+                  highlightedTargetId={highlightedTargetId}
+                  onTargetClick={handleTargetClick}
+                  selectedDate={selectedDate}
+                  onCheckUpdate={handleCheckUpdate}
+                  onHideTargets={handleHideTargets}
+                  onRefresh={handleRefreshTargets}
+                  isLoading={isLoadingTargets}
+                />
               </div>
             </div>
           </div>
+        ) : activeTab === 'machineMaster' ? (
+          <MachineMasterPanel />
         ) : activeTab === 'settings' ? (
           <SettingsPanel fontSize={fontSize} onFontSizeChange={setFontSize} />
         ) : (

@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import type { InspectionTarget } from '../types';
-import { AlertTriangle, ChevronDown, ChevronUp, FileCheck, CheckCircle2, Package, Database, ArrowUpDown, ArrowUp, ArrowDown, Trash2 } from 'lucide-react';
+import { AlertTriangle, ChevronDown, ChevronUp, FileCheck, CheckCircle2, Package, Database, ArrowUpDown, ArrowUp, ArrowDown, EyeOff, Plus } from 'lucide-react';
+import { ManualAddModal } from './ManualAddModal';
 
 interface TargetsTableProps {
   targets: InspectionTarget[];
@@ -8,7 +9,9 @@ interface TargetsTableProps {
   onTargetClick: (target: InspectionTarget) => void;
   selectedDate: string;
   onCheckUpdate: (date: string, items: { code: string; checks: Record<string, boolean> }[]) => void;
-  onDeleteTargets: (date: string, targetIds: number[]) => void;
+  onHideTargets: (date: string, targetIds: number[]) => void;
+  onRefresh: () => void;
+  isLoading?: boolean;
 }
 
 const CLASS_LABELS: Record<number, string> = {
@@ -22,17 +25,36 @@ const CLASS_LABELS: Record<number, string> = {
   8: '手動',
 };
 
+const CLASS_COLORS: Record<number, { bg: string; text: string }> = {
+  1: { bg: '#dbeafe', text: '#1e40af' },
+  2: { bg: '#fef3c7', text: '#92400e' },
+  3: { bg: '#dcfce7', text: '#166534' },
+  4: { bg: '#fae8ff', text: '#86198f' },
+  5: { bg: '#ffedd5', text: '#9a3412' },
+  6: { bg: '#e0e7ff', text: '#3730a3' },
+  7: { bg: '#fce7f3', text: '#9d174d' },
+  8: { bg: '#f1f5f9', text: '#334155' },
+};
+
+const getClassColor = (classNum: number | null) => {
+  if (classNum === null || classNum === undefined) return { bg: '#f1f5f9', text: '#64748b' };
+  return CLASS_COLORS[classNum] || { bg: '#f1f5f9', text: '#334155' };
+};
+
 export const TargetsTable: React.FC<TargetsTableProps> = ({
   targets,
   highlightedTargetId,
   onTargetClick,
   selectedDate,
   onCheckUpdate,
-  onDeleteTargets,
+  onHideTargets,
+  onRefresh,
+  isLoading,
 }) => {
   const [expandedRows, setExpandedRows] = useState<Record<number, boolean>>({});
-  const [deleteChecked, setDeleteChecked] = useState<Set<number>>(new Set());
-  const [isDeleting, setIsDeleting] = useState(false);
+  const [hideChecked, setHideChecked] = useState<Set<number>>(new Set());
+  const [isHiding, setIsHiding] = useState(false);
+  const [showManualAddModal, setShowManualAddModal] = useState(false);
 
   useEffect(() => {
     if (highlightedTargetId === null) return;
@@ -60,8 +82,8 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
   const AUTO_SCROLL_MARGIN = 40;
   const AUTO_SCROLL_SPEED = 8;
 
-  // Delete drag-select state
-  const deleteDragRef = useRef<{
+  // Hide drag-select state
+  const hideDragRef = useRef<{
     isDragging: boolean; startX: number; startY: number;
     direction: 'check' | 'uncheck' | null;
     processed: Set<number>;
@@ -78,10 +100,10 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
     return null;
   };
 
-  const getDeleteCellTargetId = (el: HTMLElement | null): number | null => {
-    const cell = el?.closest('[data-delete-target-id]') as HTMLElement | null;
+  const getHideCellTargetId = (el: HTMLElement | null): number | null => {
+    const cell = el?.closest('[data-hide-target-id]') as HTMLElement | null;
     if (!cell) return null;
-    const id = cell.getAttribute('data-delete-target-id');
+    const id = cell.getAttribute('data-hide-target-id');
     return id ? parseInt(id, 10) : null;
   };
 
@@ -107,11 +129,11 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
     setPendingChecks(prev => new Set(prev).add(key));
   }, [targets]);
 
-  const processDeleteCell = useCallback((clientX: number, clientY: number) => {
-    const drag = deleteDragRef.current;
+  const processHideCell = useCallback((clientX: number, clientY: number) => {
+    const drag = hideDragRef.current;
     if (!drag.isDragging || drag.direction === null) return;
 
-    const targetId = getDeleteCellTargetId(document.elementFromPoint(clientX, clientY) as HTMLElement);
+    const targetId = getHideCellTargetId(document.elementFromPoint(clientX, clientY) as HTMLElement);
     if (targetId === null) return;
     if (drag.processed.has(targetId)) return;
     drag.processed.add(targetId);
@@ -120,11 +142,11 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
     if (!target) return;
 
     if (drag.direction === 'check') {
-      setDeleteChecked(prev => new Set(prev).add(targetId));
+      setHideChecked(prev => new Set(prev).add(targetId));
     } else if (drag.direction === 'uncheck') {
-      setDeleteChecked(prev => { const s = new Set(prev); s.delete(targetId); return s; });
+      setHideChecked(prev => { const s = new Set(prev); s.delete(targetId); return s; });
     }
-  }, [targets, deleteChecked]);
+  }, [targets, hideChecked]);
 
   const lastPointerRef = useRef({ x: 0, y: 0 });
 
@@ -136,11 +158,11 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
       container.scrollTop += speed;
       const { x, y } = lastPointerRef.current;
       processCell(x, y);
-      processDeleteCell(x, y);
+      processHideCell(x, y);
       autoScrollRafRef.current = requestAnimationFrame(step);
     };
     autoScrollRafRef.current = requestAnimationFrame(step);
-  }, [processCell, processDeleteCell]);
+  }, [processCell, processHideCell]);
 
   const stopAutoScroll = useCallback(() => {
     if (autoScrollRafRef.current !== null) {
@@ -180,8 +202,8 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
     drag.accumulated = new Map();
   }, [selectedDate, onCheckUpdate, stopAutoScroll]);
 
-  const endDeleteDrag = useCallback(() => {
-    const drag = deleteDragRef.current;
+  const endHideDrag = useCallback(() => {
+    const drag = hideDragRef.current;
     drag.isDragging = false;
     drag.direction = null;
     drag.processed = new Set();
@@ -256,26 +278,26 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
     endDrag();
   }, [endDrag, targets, selectedDate, onCheckUpdate]);
 
-  // Delete checkbox pointer handlers
-  const handleDeletePointerDown = useCallback((e: React.PointerEvent) => {
-    const targetId = getDeleteCellTargetId(e.currentTarget as HTMLElement);
+  // Hide checkbox pointer handlers
+  const handleHidePointerDown = useCallback((e: React.PointerEvent) => {
+    const targetId = getHideCellTargetId(e.currentTarget as HTMLElement);
     if (targetId === null) return;
     e.stopPropagation();
 
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
 
-    const isChecked = deleteChecked.has(targetId);
-    deleteDragRef.current = {
+    const isChecked = hideChecked.has(targetId);
+    hideDragRef.current = {
       isDragging: false,
       startX: e.clientX,
       startY: e.clientY,
       direction: isChecked ? 'uncheck' : 'check',
       processed: new Set([targetId]),
     };
-  }, [deleteChecked]);
+  }, [hideChecked]);
 
-  const handleDeletePointerMove = useCallback((e: React.PointerEvent) => {
-    const drag = deleteDragRef.current;
+  const handleHidePointerMove = useCallback((e: React.PointerEvent) => {
+    const drag = hideDragRef.current;
     if (!drag.isDragging && drag.direction === null) return;
 
     const dx = Math.abs(e.clientX - drag.startX);
@@ -284,7 +306,7 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
     if (!drag.isDragging) {
       if (dx < DRAG_THRESHOLD && dy < DRAG_THRESHOLD) return;
       drag.isDragging = true;
-      processDeleteCell(e.clientX, e.clientY);
+      processHideCell(e.clientX, e.clientY);
       return;
     }
 
@@ -294,18 +316,18 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
     if (now - lastMoveTimeRef.current < THROTTLE_MS) return;
     lastMoveTimeRef.current = now;
 
-    processDeleteCell(e.clientX, e.clientY);
+    processHideCell(e.clientX, e.clientY);
     checkAutoScroll(e.clientX, e.clientY);
-  }, [processDeleteCell, checkAutoScroll]);
+  }, [processHideCell, checkAutoScroll]);
 
-  const handleDeletePointerUp = useCallback((_e: React.PointerEvent) => {
-    const drag = deleteDragRef.current;
+  const handleHidePointerUp = useCallback((_e: React.PointerEvent) => {
+    const drag = hideDragRef.current;
     const wasDrag = drag.isDragging;
 
     if (!wasDrag) {
-      const targetId = getDeleteCellTargetId((_e.currentTarget as HTMLElement).closest('[data-delete-target-id]') as HTMLElement);
+      const targetId = getHideCellTargetId((_e.currentTarget as HTMLElement).closest('[data-hide-target-id]') as HTMLElement);
       if (targetId !== null) {
-        setDeleteChecked(prev => {
+        setHideChecked(prev => {
           const s = new Set(prev);
           if (s.has(targetId)) s.delete(targetId); else s.add(targetId);
           return s;
@@ -313,14 +335,14 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
       }
     }
 
-    endDeleteDrag();
-  }, [endDeleteDrag]);
+    endHideDrag();
+  }, [endHideDrag]);
 
   // Window-level pointerup as backup
   useEffect(() => {
     const handleWindowUp = () => {
       if (dragRef.current.slot) endDrag();
-      if (deleteDragRef.current.direction !== null) endDeleteDrag();
+      if (hideDragRef.current.direction !== null) endHideDrag();
     };
     window.addEventListener('pointerup', handleWindowUp);
     window.addEventListener('pointercancel', handleWindowUp);
@@ -328,7 +350,7 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
       window.removeEventListener('pointerup', handleWindowUp);
       window.removeEventListener('pointercancel', handleWindowUp);
     };
-  }, [endDrag, endDeleteDrag]);
+  }, [endDrag, endHideDrag]);
 
   // Cleanup auto-scroll on unmount
   useEffect(() => { return () => stopAutoScroll(); }, [stopAutoScroll]);
@@ -400,18 +422,26 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
     });
   }, [targets, sortConfig]);
 
-  const handleExecuteDelete = async () => {
-    if (deleteChecked.size === 0 || !selectedDate) return;
-    setIsDeleting(true);
+  const handleExecuteHide = async () => {
+    if (hideChecked.size === 0 || !selectedDate) return;
+    setIsHiding(true);
     try {
-      await onDeleteTargets(selectedDate, Array.from(deleteChecked));
-      setDeleteChecked(new Set());
+      await onHideTargets(selectedDate, Array.from(hideChecked));
+      setHideChecked(new Set());
     } finally {
-      setIsDeleting(false);
+      setIsHiding(false);
     }
   };
 
   if (targets.length === 0) {
+    if (isLoading) {
+      return (
+        <div className="loading-container">
+          <div className="pulse-spinner"></div>
+          <p>検査対象データを読み込んでいます...</p>
+        </div>
+      );
+    }
     return (
       <div className="card empty-card">
         <p className="empty-text">検査対象がありません。対象日を指定して取込を行ってください。</p>
@@ -441,18 +471,32 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
           検査対象一覧 (全 {targets.length} 件)
         </h2>
         <div className="table-card-actions">
-          {deleteChecked.size > 0 && (
-            <span className="delete-count-label">{deleteChecked.size}件選択中</span>
+          {hideChecked.size > 0 && (
+            <span className="hide-count-label">{hideChecked.size}件選択中</span>
           )}
           <button
-            className="btn btn-danger btn-sm"
-            onClick={handleExecuteDelete}
-            disabled={deleteChecked.size === 0 || isDeleting}
+            className="btn btn-primary btn-sm"
+            onClick={() => setShowManualAddModal(true)}
           >
-            <Trash2 size={14} />
-            {isDeleting ? '削除中...' : '削除実行'}
+            <Plus size={14} />
+            手動追加
+          </button>
+          <button
+            className="btn btn-danger btn-sm"
+            onClick={handleExecuteHide}
+            disabled={hideChecked.size === 0 || isHiding}
+          >
+            <EyeOff size={14} />
+            {isHiding ? '非表示中...' : '非表示実行'}
           </button>
         </div>
+        {showManualAddModal && selectedDate && (
+          <ManualAddModal
+            selectedDate={selectedDate}
+            onClose={() => setShowManualAddModal(false)}
+            onAdded={onRefresh}
+          />
+        )}
       </div>
       <div className="table-responsive" ref={containerRef}>
         <table className="targets-table">
@@ -467,7 +511,7 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
               <th className="text-center" style={{ width: '48px' }}>B</th>
               <th className="text-center" style={{ width: '48px' }}>C</th>
               <th className="text-center" style={{ width: '48px' }}>D</th>
-              <th className="text-center" style={{ width: '48px' }}>削除</th>
+              <th className="text-center" style={{ width: '48px' }}>非表示</th>
             </tr>
           </thead>
           <tbody>
@@ -475,7 +519,10 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
               const hasWarnings = target.warnings && target.warnings.length > 0;
               const isExpanded = !!expandedRows[target.target_id];
               const isHighlighted = target.target_id === highlightedTargetId;
-              const isDeleteChecked = deleteChecked.has(target.target_id);
+              const isHideChecked = hideChecked.has(target.target_id);
+              const classNum = target.class;
+              const classLabel = target.class_name ?? getClassLabel(classNum);
+              const classColor = getClassColor(classNum);
 
               return (
                 <React.Fragment key={target.target_id}>
@@ -501,7 +548,19 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
                       <span className="target-name">{target.name}</span>
                     </td>
                     <td>
-                      <span className="text-muted">{target.class_name ?? getClassLabel(target.class)}</span>
+                      <span
+                        style={{
+                          display: 'inline-block',
+                          padding: '2px 8px',
+                          borderRadius: '9999px',
+                          fontSize: '12px',
+                          fontWeight: 600,
+                          backgroundColor: classColor.bg,
+                          color: classColor.text,
+                        }}
+                      >
+                        {classLabel}
+                      </span>
                     </td>
                     <td>
                       {target.requires_inspection_sheet ? (
@@ -562,15 +621,15 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
                         <span className="check-dot-unchecked"></span>
                       )}
                     </td>
-                    <td className="text-center delete-check-cell"
-                      data-delete-target-id={target.target_id}
-                      onPointerDown={handleDeletePointerDown}
-                      onPointerMove={handleDeletePointerMove}
-                      onPointerUp={handleDeletePointerUp}
-                      onPointerCancel={handleDeletePointerUp}
+                    <td className="text-center hide-check-cell"
+                      data-hide-target-id={target.target_id}
+                      onPointerDown={handleHidePointerDown}
+                      onPointerMove={handleHidePointerMove}
+                      onPointerUp={handleHidePointerUp}
+                      onPointerCancel={handleHidePointerUp}
                       onClick={(e) => e.stopPropagation()}>
-                      <span className={`delete-checkbox ${isDeleteChecked ? 'checked' : ''}`}>
-                        {isDeleteChecked ? '✓' : ''}
+                      <span className={`hide-checkbox ${isHideChecked ? 'checked' : ''}`}>
+                        {isHideChecked ? '✓' : ''}
                       </span>
                     </td>
                   </tr>
