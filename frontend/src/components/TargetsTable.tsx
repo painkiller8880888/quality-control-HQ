@@ -398,8 +398,8 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
       let bVal: string | number;
 
       if (sortConfig.key === 'classLabel') {
-        aVal = a.class_name ?? getClassLabel(a.class);
-        bVal = b.class_name ?? getClassLabel(b.class);
+        aVal = a.class_name ?? getClassLabel(a.category);
+        bVal = b.class_name ?? getClassLabel(b.category);
       } else {
         const key = sortConfig.key;
         const aRaw = a[key];
@@ -520,7 +520,7 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
               const isExpanded = !!expandedRows[target.target_id];
               const isHighlighted = target.target_id === highlightedTargetId;
               const isHideChecked = hideChecked.has(target.target_id);
-              const classNum = target.class;
+              const classNum = target.category;
               const classLabel = target.class_name ?? getClassLabel(classNum);
               const classColor = getClassColor(classNum);
 

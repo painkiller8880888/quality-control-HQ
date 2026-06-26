@@ -8,7 +8,7 @@ import { LayoutList } from './components/LayoutList';
 import { FactoryMapCreator } from './components/FactoryMapCreator';
 import { MachineMasterPanel } from './components/MachineMasterPanel';
 import type { Job, InspectionTarget, ApiError, LayoutSummary } from './types';
-import { ShieldAlert, RefreshCw, Layers, Map as MapIcon, Cpu, Settings, PanelLeftClose, PanelLeftOpen, Sun, Moon, Palette } from 'lucide-react';
+import { ShieldAlert, RefreshCw, Layers, Map as MapIcon, Cpu, Settings, PanelLeftClose, PanelLeftOpen, Sun, Moon, Palette, Upload, Activity } from 'lucide-react';
 
 type ThemeMode = 'normal' | 'dark' | 'solarized-light' | 'solarized-dark';
 
@@ -372,45 +372,70 @@ export const App: React.FC = () => {
 
         {activeTab === 'dashboard' ? (
           <div className={`dashboard-grid ${isSidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
-            <aside className="dashboard-sidebar">
-              <button
-                type="button"
-                className="sidebar-toggle-btn"
-                onClick={() => setIsSidebarCollapsed((current) => !current)}
-                title={isSidebarCollapsed ? 'サイドバーを展開' : 'サイドバーを折りたたむ'}
-              >
-                {isSidebarCollapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}
-              </button>
-              {isSidebarCollapsed ? (
-                <div className="collapsed-sidebar-rail">
-                  <span>取込</span>
-                  {currentJob && <span className={`collapsed-status-dot ${currentJob.status}`}></span>}
+            <aside className={`dashboard-sidebar ${isSidebarCollapsed ? 'collapsed' : ''}`}>
+              <div className="sidebar-panel-card">
+                <div className="sidebar-header-actions">
+                  <button
+                    type="button"
+                    className="sidebar-toggle-btn-modern"
+                    onClick={() => setIsSidebarCollapsed((current) => !current)}
+                    title={isSidebarCollapsed ? 'サイドバーを展開' : 'サイドバーを折りたたむ'}
+                  >
+                    {isSidebarCollapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}
+                  </button>
                 </div>
-              ) : (
-                <>
-                  <div className="sidebar-segment-control">
-                    <button
+
+                {isSidebarCollapsed ? (
+                  <div className="collapsed-sidebar-rail">
+                    <button 
                       type="button"
-                      className={`sidebar-segment-btn ${sidebarSegment === 'import' ? 'active' : ''}`}
-                      onClick={() => setSidebarSegment('import')}
+                      className={`rail-action-btn ${sidebarSegment === 'import' ? 'active' : ''}`}
+                      onClick={() => { setSidebarSegment('import'); setIsSidebarCollapsed(false); }}
+                      title="作業計画・OCR 取込"
                     >
-                      取込
+                      <Upload size={20} />
                     </button>
-                    <button
+                    <button 
                       type="button"
-                      className={`sidebar-segment-btn ${sidebarSegment === 'status' ? 'active' : ''}`}
-                      onClick={() => setSidebarSegment('status')}
+                      className={`rail-action-btn ${sidebarSegment === 'status' ? 'active' : ''}`}
+                      onClick={() => { setSidebarSegment('status'); setIsSidebarCollapsed(false); }}
+                      title="ジョブステータス"
                     >
-                      ジョブステータス
+                      <div className="rail-icon-wrapper">
+                        <Activity size={20} />
+                        {currentJob && <span className={`rail-status-dot ${currentJob.status}`}></span>}
+                      </div>
                     </button>
                   </div>
-                  {sidebarSegment === 'import' ? (
-                    <ImportForm onImportStart={handleImportStart} isLoading={isLoadingJob} />
-                  ) : (
-                    <ImportSummary job={currentJob} />
-                  )}
-                </>
-              )}
+                ) : (
+                  <>
+                    <div className="sidebar-segment-control">
+                      <button
+                        type="button"
+                        className={`sidebar-segment-btn ${sidebarSegment === 'import' ? 'active' : ''}`}
+                        onClick={() => setSidebarSegment('import')}
+                      >
+                        取込
+                      </button>
+                      <button
+                        type="button"
+                        className={`sidebar-segment-btn ${sidebarSegment === 'status' ? 'active' : ''}`}
+                        onClick={() => setSidebarSegment('status')}
+                      >
+                        ジョブステータス
+                      </button>
+                    </div>
+                    
+                    <div className="sidebar-content-area">
+                      {sidebarSegment === 'import' ? (
+                        <ImportForm onImportStart={handleImportStart} isLoading={isLoadingJob} />
+                      ) : (
+                        <ImportSummary job={currentJob} />
+                      )}
+                    </div>
+                  </>
+                )}
+              </div>
             </aside>
 
             <div className="dashboard-workspace">

@@ -1526,58 +1526,123 @@ body {
 .dashboard-sidebar {
   min-width: 0;
   position: relative;
+  height: 100%;
 }
 
-.dashboard-content {
-  min-width: 0;
-}
-
-.sidebar-toggle-btn {
-  width: 100%;
-  margin-bottom: 12px;
-  background: rgba(15, 23, 42, 0.55);
+.sidebar-panel-card {
+  display: flex;
+  flex-direction: column;
+  background: var(--card-bg);
   border: 1px solid var(--card-border);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+  height: 100%;
+  min-height: 520px;
+  padding: 20px 16px;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  overflow-y: auto;
+}
+
+.dashboard-sidebar.collapsed .sidebar-panel-card {
+  padding: 20px 8px;
+  align-items: center;
+}
+
+.sidebar-header-actions {
+  display: flex;
+  justify-content: flex-end;
+  width: 100%;
+  margin-bottom: 16px;
+}
+
+.dashboard-sidebar.collapsed .sidebar-header-actions {
+  justify-content: center;
+  margin-bottom: 24px;
+}
+
+.sidebar-toggle-btn-modern {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius-md);
   color: var(--text-secondary);
-  padding: 8px;
-  cursor: pointer;
-  display: inline-flex;
+  width: 32px;
+  height: 32px;
+  display: flex;
   align-items: center;
   justify-content: center;
-  transition: var(--transition-smooth);
+  cursor: pointer;
+  transition: all 0.2s ease;
 }
 
-.sidebar-toggle-btn:hover {
+.sidebar-toggle-btn-modern:hover {
   color: var(--text-primary);
   border-color: var(--card-border-active);
+  background: rgba(255, 255, 255, 0.08);
 }
 
 .collapsed-sidebar-rail {
-  min-height: 520px;
-  border: 1px solid var(--card-border);
-  border-radius: var(--radius-lg);
-  background: var(--card-bg);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  width: 100%;
+}
+
+.rail-action-btn {
+  position: relative;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  width: 44px;
+  height: 44px;
+  border-radius: var(--radius-md);
   display: flex;
   align-items: center;
-  gap: 18px;
-  padding: 16px 0;
-  writing-mode: vertical-rl;
-  color: var(--text-secondary);
-  font-weight: 700;
-  letter-spacing: 0;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.2s ease;
 }
 
-.collapsed-status-dot {
-  width: 9px;
-  height: 9px;
+.rail-action-btn:hover {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.rail-action-btn.active {
+  color: var(--text-primary-on-accent, #ffffff);
+  background: var(--color-primary);
+  box-shadow: 0 2px 8px rgba(99, 102, 241, 0.4);
+}
+
+.rail-icon-wrapper {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.rail-status-dot {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
-  background: var(--text-muted);
+  border: 1px solid var(--card-bg);
 }
 
-.collapsed-status-dot.running,
-.collapsed-status-dot.queued {
+.rail-status-dot.running,
+.rail-status-dot.queued {
   background: var(--color-primary);
   animation: pulse-animation 1.5s infinite;
+}
+
+.rail-status-dot.succeeded {
+  background: var(--color-emerald);
+}
+
+.rail-status-dot.failed {
+  background: var(--color-rose);
 }
 
 .collapsed-status-dot.succeeded {
@@ -2067,10 +2132,10 @@ body {
 .sidebar-segment-control {
   display: flex;
   gap: 4px;
-  margin-bottom: 12px;
-  background: rgba(0, 0, 0, 0.2);
-  padding: 3px;
-  border-radius: var(--radius-sm);
+  margin-bottom: 20px;
+  background: rgba(0, 0, 0, 0.15);
+  padding: 4px;
+  border-radius: 30px;
   border: 1px solid var(--card-border);
 }
 
@@ -2079,24 +2144,36 @@ body {
   background: transparent;
   border: none;
   color: var(--text-muted);
-  padding: 6px 10px;
-  border-radius: 6px;
+  padding: 8px 12px;
+  border-radius: 20px;
   font-family: var(--font-sans);
   font-size: 0.8125rem;
   font-weight: 600;
   cursor: pointer;
-  transition: var(--transition-smooth);
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .sidebar-segment-btn:hover {
   color: var(--text-secondary);
-  background: rgba(255, 255, 255, 0.05);
 }
 
 .sidebar-segment-btn.active {
   color: var(--text-primary);
   background: var(--color-primary);
-  box-shadow: 0 2px 8px rgba(99, 102, 241, 0.4);
+  box-shadow: 0 2px 8px rgba(99, 102, 241, 0.3);
+}
+
+/* Reset cards nested inside the sidebar to blend them in seamlessly */
+.sidebar-content-area .card {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  padding: 0;
+  margin: 0;
+}
+
+.sidebar-content-area .card .card-title {
+  display: none; /* Hide the double title since the segment tabs represent the view */
 }
 
 /* Background image upload */
