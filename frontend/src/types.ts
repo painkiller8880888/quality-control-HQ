@@ -74,6 +74,7 @@ export interface AppSettings {
   csv_path: string;
   inspection_folder_paths: string[];
   erp_path: string;
+  history_file_path: string;
   updated_at: string;
 }
 

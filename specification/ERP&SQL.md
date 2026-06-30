@@ -139,6 +139,7 @@ ERP由来の品目マスタ。
 | session_id | PK | 主キー |
 | target_date | UNIQUE | 対象日 |
 | status |  | `open / closed` |
+| history | bool | 履歴ファイルへの記入状態 |
 | created_at |  | 作成日時 |
 | updated_at |  | 更新日時 |
 
@@ -211,11 +212,21 @@ ERP由来の品目マスタ。
 | machine_no | UNIQUE | 機械番号 |
 | machine_name |  | 機械名称 |
 | machine_category |  | 品目カテゴリ |
-| machine_class |  | `1`, `2`, `3`, `4`, `5` |
+| machine_class |  | `1`, `2`, `3`, `4`, `5`, `6` |
 | is_active |  | bool |
 | created_at |  | 作成日時 |
 | updated_at |  | 更新日時 |
 
+補足
+
+`machine_class`の対応表
+
+- `1`: 自動機
+- `2`: 半自動機
+- `3`: セッター
+- `4`: プレス
+- `5`: 2次加工機
+- `10`: 自動機・半自動機のハイブリッド
 
 ### 5.10 machine_assignments
 

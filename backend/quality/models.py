@@ -48,6 +48,7 @@ class AppSetting(models.Model):
     csv_path = models.TextField(blank=True, default="")
     inspection_folder_paths = models.JSONField(default=list, blank=True)
     erp_path = models.TextField(blank=True, default="")
+    history_file_path = models.TextField(blank=True, default="")
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
@@ -88,6 +89,7 @@ class InspectionSession(models.Model):
 
     target_date = models.DateField(unique=True)
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.OPEN)
+    history = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

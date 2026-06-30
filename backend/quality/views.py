@@ -57,9 +57,11 @@ from .services import (
     history_map_for_date,
     import_master_csv,
     import_plan_targets,
+    issue_daily_report,
     issue_inspection_sheets,
     run_job,
     set_check,
+    write_history_to_excel,
 )
 
 
@@ -375,6 +377,25 @@ class SingleHistoryView(APIView):
         )
 
 
+class HistoryWriteToFileView(APIView):
+    def post(self, request):
+        target_date = request.data.get("date")
+        if not target_date:
+            return error_response("INVALID_REQUEST", "date is required.")
+        try:
+            from datetime import date as date_type
+            from django.conf import settings
+            if isinstance(target_date, str):
+                from datetime import datetime
+                target_date = datetime.strptime(target_date, "%Y-%m-%d").date()
+            written_count = write_history_to_excel(target_date)
+        except FileNotFoundError as exc:
+            return error_response("FILE_NOT_FOUND", str(exc), status.HTTP_404_NOT_FOUND)
+        except Exception as exc:
+            return error_response("HISTORY_WRITE_FAILED", str(exc), status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return success_response(written_count=written_count)
+
+
 class FactoryMapView(APIView):
     def get(self, request):
         target_date = request.query_params.get("date")
@@ -666,6 +687,32 @@ class DailyReportGenerateView(APIView):
         except Exception as exc:
             return error_response(
                 "DAILY_REPORT_GENERATE_FAILED",
+                str(exc),
+                status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        return Response({"status": "accepted", "job_id": job.job_id}, status=status.HTTP_202_ACCEPTED)
+
+
+class DailyReportIssueView(APIView):
+    def post(self, request):
+        serializer = DailyReportGenerateRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        target_date = serializer.validated_data["date"]
+        job = create_job(
+            Job.JobType.DAILY_REPORT_GENERATE,
+            {"date": str(target_date)},
+        )
+
+        try:
+            run_job(job, lambda: issue_daily_report(target_date))
+        except FileNotFoundError as exc:
+            return error_response("FILE_NOT_FOUND", str(exc), status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except PermissionError as exc:
+            return error_response("FILE_IN_USE", str(exc), status.HTTP_409_CONFLICT)
+        except Exception as exc:
+            return error_response(
+                "DAILY_REPORT_ISSUE_FAILED",
                 str(exc),
                 status.HTTP_500_INTERNAL_SERVER_ERROR,
             )

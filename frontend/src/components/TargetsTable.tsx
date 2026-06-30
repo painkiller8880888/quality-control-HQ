@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import type { InspectionTarget } from '../types';
-import { AlertTriangle, ChevronDown, ChevronUp, FileCheck, CheckCircle2, Package, Database, ArrowUpDown, ArrowUp, ArrowDown, EyeOff, Plus, Printer } from 'lucide-react';
+import { AlertTriangle, ChevronDown, ChevronUp, FileCheck, CheckCircle2, Package, Database, ArrowUpDown, ArrowUp, ArrowDown, EyeOff, Plus, Printer, FileText, FileSpreadsheet } from 'lucide-react';
 import { ManualAddModal } from './ManualAddModal';
 
 interface TargetsTableProps {
@@ -11,6 +11,8 @@ interface TargetsTableProps {
   onCheckUpdate: (date: string, items: { code: string; checks: Record<string, boolean> }[]) => void;
   onHideTargets: (date: string, targetIds: number[]) => void;
   onIssueSheet: (date: string) => Promise<void>;
+  onIssueDailyReport: (date: string) => Promise<void>;
+  onWriteHistory: (date: string) => Promise<void>;
   onRefresh: () => void;
   isLoading?: boolean;
 }
@@ -50,6 +52,8 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
   onCheckUpdate,
   onHideTargets,
   onIssueSheet,
+  onIssueDailyReport,
+  onWriteHistory,
   onRefresh,
   isLoading,
 }) => {
@@ -58,6 +62,8 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
   const [isHiding, setIsHiding] = useState(false);
   const [showManualAddModal, setShowManualAddModal] = useState(false);
   const [isIssuing, setIsIssuing] = useState(false);
+  const [isIssuingDailyReport, setIsIssuingDailyReport] = useState(false);
+  const [isWritingHistory, setIsWritingHistory] = useState(false);
 
   useEffect(() => {
     if (highlightedTargetId === null) return;
@@ -444,6 +450,26 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
     }
   };
 
+  const handleIssueDailyReport = async () => {
+    if (!selectedDate) return;
+    setIsIssuingDailyReport(true);
+    try {
+      await onIssueDailyReport(selectedDate);
+    } finally {
+      setIsIssuingDailyReport(false);
+    }
+  };
+
+  const handleWriteHistory = async () => {
+    if (!selectedDate) return;
+    setIsWritingHistory(true);
+    try {
+      await onWriteHistory(selectedDate);
+    } finally {
+      setIsWritingHistory(false);
+    }
+  };
+
   const handleExecuteHide = async () => {
     if (hideChecked.size === 0 || !selectedDate) return;
     setIsHiding(true);
@@ -510,6 +536,22 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
           >
             <Printer size={14} />
             {isIssuing ? '印刷中...' : '検査書印刷'}
+          </button>
+          <button
+            className="btn btn-outline btn-sm"
+            onClick={handleIssueDailyReport}
+            disabled={isIssuingDailyReport}
+          >
+            <FileText size={14} />
+            {isIssuingDailyReport ? '発行中...' : '日報発行'}
+          </button>
+          <button
+            className="btn btn-outline btn-sm"
+            onClick={handleWriteHistory}
+            disabled={isWritingHistory}
+          >
+            <FileSpreadsheet size={14} />
+            {isWritingHistory ? '記入中...' : '履歴ファイルに記入'}
           </button>
           <button
             className="btn btn-danger btn-sm"

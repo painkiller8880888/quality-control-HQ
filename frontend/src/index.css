@@ -323,8 +323,19 @@ body {
 }
 
 .dashboard-workspace > div:last-child {
-  overflow-y: auto;
+  overflow: hidden;
   height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.dashboard-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
 }
 
 @media (max-width: 1024px) {
@@ -1077,11 +1088,19 @@ body {
 
 .table-card {
   padding: 20px;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
 }
 
 .table-responsive {
   width: 100%;
   overflow-x: auto;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
 }
 
 .targets-table {
@@ -1099,6 +1118,10 @@ body {
   font-size: 0.75rem;
   text-transform: uppercase;
   letter-spacing: 0.05em;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--card-bg);
 }
 
 .sortable-th-content {
@@ -1447,6 +1470,21 @@ body {
 
 .error-card-global .error-icon {
   color: var(--color-danger);
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.success-card-global {
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.2), rgba(16, 185, 129, 0.05));
+  border: 1px solid rgba(16, 185, 129, 0.3);
+  margin-bottom: 24px;
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+}
+
+.success-card-global .success-icon {
+  color: var(--color-success, #10b981);
   flex-shrink: 0;
   margin-top: 2px;
 }
@@ -2353,7 +2391,6 @@ button.editor-object {
   padding: 4px;
   border-radius: var(--radius-md);
   border: 1px solid var(--card-border);
-  margin-bottom: 16px;
   gap: 4px;
   width: fit-content;
   flex-shrink: 0;

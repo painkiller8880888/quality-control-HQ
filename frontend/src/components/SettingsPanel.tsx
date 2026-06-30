@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import type { AppSettings, Job, ApiError } from '../types';
-import { Save, Upload, FolderOpen, Loader2, Database, Plus, Trash2, CheckCircle2, AlertTriangle, Type, Play, Monitor } from 'lucide-react';
+import { Save, Upload, FolderOpen, Loader2, Database, Plus, Trash2, CheckCircle2, AlertTriangle, Type, Play, Monitor, FileSpreadsheet } from 'lucide-react';
 
 interface SettingsPanelProps {
   fontSize: number;
@@ -11,11 +11,14 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ fontSize, onFontSi
   const [csvPath, setCsvPath] = useState('');
   const [folderPaths, setFolderPaths] = useState<string[]>(['']);
   const [erpPath, setErpPath] = useState('');
+  const [historyFilePath, setHistoryFilePath] = useState('');
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
   const [isErpRunning, setIsErpRunning] = useState(false);
+  const [isHistoryWriting, setIsHistoryWriting] = useState(false);
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
+  const [historyWriteResult, setHistoryWriteResult] = useState<string | null>(null);
   const [erpResult, setErpResult] = useState<string | null>(null);
   const [jobResult, setJobResult] = useState<any>(null);
   const pollingTimerRef = useRef<any>(null);
@@ -38,6 +41,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ fontSize, onFontSi
       setCsvPath(data.csv_path || '');
       setFolderPaths(data.inspection_folder_paths?.length ? data.inspection_folder_paths : ['']);
       setErpPath(data.erp_path || '');
+      setHistoryFilePath(data.history_file_path || '');
     } catch (err: any) {
       setSaveMessage('エラー: ' + err.message);
     } finally {
@@ -57,6 +61,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ fontSize, onFontSi
           csv_path: csvPath,
           inspection_folder_paths: validFolders,
           erp_path: erpPath,
+          history_file_path: historyFilePath,
         }),
       });
       if (!response.ok) throw new Error('保存に失敗しました');
@@ -262,6 +267,32 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ fontSize, onFontSi
           <div className={`card-body-flex ${erpResult.startsWith('エラー') ? 'text-rose' : 'text-emerald'}`}>
             {erpResult.startsWith('エラー') ? <AlertTriangle size={16} /> : <CheckCircle2 size={16} />}
             <span>{erpResult}</span>
+          </div>
+        )}
+      </div>
+
+      <div className="card">
+        <h2 className="card-title">
+          <FileSpreadsheet className="icon-title" size={20} />
+          工程内検査履歴
+        </h2>
+        <div className="form-group">
+          <label className="form-label">
+            <FolderOpen size={14} className="label-icon" />
+            履歴ファイルパス
+          </label>
+          <input
+            type="text"
+            className="form-control"
+            value={historyFilePath}
+            onChange={(e) => setHistoryFilePath(e.target.value)}
+            placeholder="例: temp/history.xlsx"
+          />
+        </div>
+        {historyWriteResult && (
+          <div className={`card-body-flex ${historyWriteResult.startsWith('エラー') ? 'text-rose' : 'text-emerald'}`}>
+            {historyWriteResult.startsWith('エラー') ? <AlertTriangle size={16} /> : <CheckCircle2 size={16} />}
+            <span>{historyWriteResult}</span>
           </div>
         )}
       </div>

@@ -963,6 +963,122 @@ def run_job(job, fn):
     return result
 
 
+def _period_for_date(d: date_type) -> int:
+    if d.month >= 10:
+        return d.year - 1956
+    return d.year - 1 - 1956
+
+
+def _time_slot_to_am_pm(slot: str) -> str:
+    return "AM" if slot in ("A", "B") else "PM"
+
+
+def write_history_to_excel(target_date: date_type) -> int:
+    from .models import AppSetting, InspectionSession
+
+    setting = AppSetting.objects.first()
+    if not setting or not setting.history_file_path:
+        raise FileNotFoundError("履歴ファイルのパスが設定されていません。設定タブで履歴ファイルのパスを指定してください。")
+
+    history_path = Path(setting.history_file_path)
+    if not history_path.exists():
+        raise FileNotFoundError(f"履歴ファイルが見つかりません: {history_path}")
+
+    master_ids_class_1 = MasterClass.objects.filter(
+        class_master__class_no=1
+    ).values_list("master_id", flat=True)
+
+    qs = (
+        History.objects.filter(date=target_date, master_id__in=master_ids_class_1)
+        .select_related("master")
+        .order_by("master__code", "time_slot")
+    )
+    if not qs.exists():
+        return 0
+
+    period = _period_for_date(target_date)
+    sheet_name = f"{period}期"
+
+    import win32com.client
+    import pythoncom
+
+    pythoncom.CoInitialize()
+    xl = None
+    try:
+        xl = win32com.client.DispatchEx("Excel.Application")
+        xl.DisplayAlerts = False
+        xl.EnableEvents = False
+
+        wb = xl.Workbooks.Open(str(history_path.resolve()))
+
+        ws = None
+        for s in wb.Sheets:
+            if s.Name == sheet_name:
+                ws = s
+                break
+        if ws is None:
+            ws = wb.Sheets.Add(After=wb.Sheets(wb.Sheets.Count))
+            ws.Name = sheet_name
+
+        existing_keys = set()
+        first_blank_row = None
+        try:
+            max_row = ws.UsedRange.Rows.Count
+        except Exception:
+            max_row = 1
+
+        for row_idx in range(2, max(max_row, 1) + 2):
+            b_val = ws.Cells(row_idx, 2).Value
+            if b_val is None and first_blank_row is None:
+                first_blank_row = row_idx
+                break
+            c_val = ws.Cells(row_idx, 3).Value
+            d_val = ws.Cells(row_idx, 4).Value
+            if b_val is not None and c_val is not None and d_val is not None:
+                existing_keys.add((b_val, str(c_val).strip(), str(d_val).strip()))
+
+        if first_blank_row is None:
+            first_blank_row = max(max_row, 1) + 1
+
+        next_row = first_blank_row
+
+        written_count = 0
+        for h in qs:
+            code = h.master.code if h.master else ""
+            name = h.master.name if h.master else ""
+            serial_date = _excel_serial_date(h.date)
+            am_pm = _time_slot_to_am_pm(h.time_slot)
+            key = (serial_date, am_pm, code)
+            if key in existing_keys:
+                continue
+            existing_keys.add(key)
+
+            ws.Cells(next_row, 2).Value = serial_date
+            ws.Cells(next_row, 3).Value = am_pm
+            ws.Cells(next_row, 4).Value = code
+            ws.Cells(next_row, 5).Value = name
+            ws.Cells(next_row, 6).Value = "合格"
+            next_row += 1
+            written_count += 1
+
+        wb.Save()
+        xl.Visible = True
+    finally:
+        if xl is not None:
+            try:
+                xl.EnableEvents = True
+            except pythoncom.com_error:
+                pass
+        pythoncom.CoUninitialize()
+
+    session = InspectionSession.objects.filter(target_date=target_date).first()
+    if session:
+        session.history = True
+        session.save(update_fields=["history", "updated_at"])
+
+    return written_count
+
+
 def _excel_serial_date(d: date_type) -> int:
     delta = d - date_type(1899, 12, 30)
     return delta.days
@@ -983,8 +1099,13 @@ def issue_inspection_sheets(target_date: date_type | None = None):
 
     master_ids = list(qs.values_list("master_id", flat=True).distinct())
     class_map: dict[int, int | None] = {}
+    sheet_target_master_ids: set[int] = set()
     for mc in MasterClass.objects.filter(master_id__in=master_ids).select_related("class_master"):
-        class_map[mc.master_id] = mc.class_master.class_no if mc.class_master else None
+        cn = mc.class_master.class_no if mc.class_master else None
+        if mc.master_id not in class_map:
+            class_map[mc.master_id] = cn
+        if cn in (1, 6, 7):
+            sheet_target_master_ids.add(mc.master_id)
 
     file_map: dict[int, str] = {}
     for fi in InspectionFile.objects.filter(master_id__in=master_ids):
@@ -992,9 +1113,14 @@ def issue_inspection_sheets(target_date: date_type | None = None):
             file_map[fi.master_id] = fi.file_path
 
     rows = []
+    target_history_ids: list[int] = []
     for h in qs:
+        if h.master_id not in sheet_target_master_ids:
+            continue
+        file_path = file_map.get(h.master_id)
+        if not file_path:
+            continue
         class_no = class_map.get(h.master_id)
-        file_path = file_map.get(h.master_id, "")
         serial_date = _excel_serial_date(h.date)
         rows.append([
             file_path,
@@ -1004,6 +1130,10 @@ def issue_inspection_sheets(target_date: date_type | None = None):
             "1-6",
             "前田 賢一",
         ])
+        target_history_ids.append(h.history_id)
+
+    if not rows:
+        return {"issued_count": 0, "message": "No printable entries found (no valid file paths or non-target classes)."}
 
     try:
         import win32com.client
@@ -1034,24 +1164,37 @@ def issue_inspection_sheets(target_date: date_type | None = None):
             for j, val in enumerate(row_data, start=1):
                 ws_data.Cells(i, j).Value = val
 
-        wb.Application.Run("RunBatch")
-
         wb.Save()
+
+        wb.Application.Run("RunBatch")
     finally:
         if xl is not None:
-            xl.ScreenUpdating = True
-            xl.DisplayAlerts = True
-            xl.EnableEvents = True
+            try:
+                xl.ScreenUpdating = True
+            except pythoncom.com_error:
+                pass
+            # DisplayAlerts は Quit まで False のままにしておく（未保存ワークブックの確認ダイアログを抑制）
+            try:
+                xl.EnableEvents = True
+            except pythoncom.com_error:
+                pass
             try:
                 xl.Calculation = -4105  # xlAutomatic
             except pythoncom.com_error:
                 pass
-            wb.Close(False)
+            # RunBatch 内で閉じ忘れたワークブックをすべて閉じる
+            try:
+                for w in xl.Workbooks:
+                    try:
+                        w.Close(False)
+                    except pythoncom.com_error:
+                        pass
+            except pythoncom.com_error:
+                pass
             xl.Quit()
         pythoncom.CoUninitialize()
 
-    history_ids = [h.history_id for h in qs]
-    History.objects.filter(history_id__in=history_ids).update(is_sheet_issued=True)
+    History.objects.filter(history_id__in=target_history_ids).update(is_sheet_issued=True)
 
     return {"issued_count": len(rows), "date": str(target_date) if target_date else "all"}
 
@@ -1064,14 +1207,59 @@ def generate_daily_report(target_date):
     output_dir = Path(settings.DAILY_REPORT_OUTPUT_DIR)
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"{target_date}.xlsm"
+    return _write_daily_report(template_path, output_path, target_date)
 
-    workbook = load_workbook(template_path, keep_vba=True)
+
+def issue_daily_report(target_date):
+    template_path = Path(settings.DAILY_REPORT_TEMPLATE)
+    if not template_path.exists():
+        raise FileNotFoundError(f"Daily report template not found: {template_path}")
+
+    output_dir = Path(settings.DAILY_REPORT_OUTPUT_DIR)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    date_str = target_date.strftime("%Y%m%d")
+    output_path = output_dir / f"{date_str}.xlsx"
+    result = _write_daily_report(template_path, output_path, target_date, keep_vba=False)
+
+    import win32com.client
+    import pythoncom
+
+    pythoncom.CoInitialize()
+    xl = None
+    try:
+        xl = win32com.client.DispatchEx("Excel.Application")
+        xl.DisplayAlerts = False
+        xl.EnableEvents = False
+        xl.Visible = False
+        wb = xl.Workbooks.Open(str(output_path.resolve()))
+        ws = wb.Sheets("日報") if "日報" in [s.Name for s in wb.Sheets] else wb.Sheets[0]
+        ws.PageSetup.BlackAndWhite = True
+        ws.PrintOut()
+        wb.Close(False)
+    finally:
+        if xl is not None:
+            try:
+                xl.EnableEvents = True
+            except pythoncom.com_error:
+                pass
+            try:
+                xl.Quit()
+            except pythoncom.com_error:
+                pass
+        pythoncom.CoUninitialize()
+
+    return result
+
+
+def _write_daily_report(template_path, output_path, target_date, keep_vba=True):
+    workbook = load_workbook(template_path, keep_vba=keep_vba)
     sheet = workbook["日報"] if "日報" in workbook.sheetnames else workbook.active
 
     slot_columns = {"A": "C", "B": "F", "C": "I", "D": "L"}
     category_start_rows = {
         2: 4,
         3: 4,
+        8: 4,
         6: 18,
         7: 22,
         1: 26,

@@ -240,4 +240,4 @@ class MachineMasterSaveSerializer(serializers.Serializer):
 class AppSettingSerializer(serializers.ModelSerializer):
     class Meta:
         model = AppSetting
-        fields = ["id", "csv_path", "inspection_folder_paths", "erp_path", "updated_at"]
+        fields = ["id", "csv_path", "inspection_folder_paths", "erp_path", "history_file_path", "updated_at"]

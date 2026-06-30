@@ -767,9 +767,10 @@ class PhaseTwoMasterUpdateTests(TestCase):
         from datetime import date
         from unittest.mock import MagicMock, patch, PropertyMock
 
-        cm = ClassMaster.objects.get_or_create(class_no=99, class_name="TestClass")[0]
+        cm = ClassMaster.objects.get(class_no=1)
         master = Master.objects.create(code="CDP0028", name="TestItem")
         MasterClass.objects.create(master=master, class_master=cm)
+        InspectionFile.objects.create(master=master, file_name="test.xls", file_path=r"C:\test\test.xls")
         h = History.objects.create(date=date(2026, 6, 26), master=master, time_slot="A")
 
         cells_data = {}
@@ -799,7 +800,6 @@ class PhaseTwoMasterUpdateTests(TestCase):
                 cell_mock._value = None
                 cell_mock.Value = None
                 cell_mock.configure_mock(**{'Value': cell_mock.Value})
-                # Use a different approach
                 cell.Value = None
                 cell_map[key] = cell
             return cell_map[key]
@@ -836,6 +836,70 @@ class PhaseTwoMasterUpdateTests(TestCase):
 
             h.refresh_from_db()
             self.assertTrue(h.is_sheet_issued)
+
+    def test_issue_inspection_sheets_filters_non_target_class(self):
+        from quality.services import issue_inspection_sheets
+        from datetime import date
+        from unittest.mock import MagicMock, patch
+
+        cm = ClassMaster.objects.get(class_no=4)
+        master = Master.objects.create(code="TEST01", name="NonTarget")
+        MasterClass.objects.create(master=master, class_master=cm)
+        History.objects.create(date=date(2026, 6, 26), master=master, time_slot="A")
+
+        with TemporaryDirectory() as tmp:
+            template_path = Path(tmp) / "daily.xlsm"
+            workbook = Workbook()
+            workbook.save(template_path)
+
+            mock_ws = MagicMock()
+            mock_ws.Name = "data"
+
+            mock_wb = MagicMock()
+            mock_wb.Sheets.return_value = mock_ws
+            mock_wb.Sheets.__iter__.return_value = iter([mock_ws])
+
+            mock_xl = MagicMock()
+            mock_xl.Workbooks.Open.return_value = mock_wb
+
+            with patch("win32com.client.Dispatch", return_value=mock_xl):
+                with override_settings(DAILY_REPORT_TEMPLATE=template_path):
+                    result = issue_inspection_sheets(target_date=date(2026, 6, 26))
+
+            self.assertEqual(result["issued_count"], 0)
+            self.assertIn("No printable entries", result["message"])
+
+    def test_issue_inspection_sheets_skips_missing_file_path(self):
+        from quality.services import issue_inspection_sheets
+        from datetime import date
+        from unittest.mock import MagicMock, patch
+
+        cm = ClassMaster.objects.get(class_no=1)
+        master = Master.objects.create(code="TEST02", name="NoFileItem")
+        MasterClass.objects.create(master=master, class_master=cm)
+        History.objects.create(date=date(2026, 6, 26), master=master, time_slot="A")
+
+        with TemporaryDirectory() as tmp:
+            template_path = Path(tmp) / "daily.xlsm"
+            workbook = Workbook()
+            workbook.save(template_path)
+
+            mock_ws = MagicMock()
+            mock_ws.Name = "data"
+
+            mock_wb = MagicMock()
+            mock_wb.Sheets.return_value = mock_ws
+            mock_wb.Sheets.__iter__.return_value = iter([mock_ws])
+
+            mock_xl = MagicMock()
+            mock_xl.Workbooks.Open.return_value = mock_wb
+
+            with patch("win32com.client.Dispatch", return_value=mock_xl):
+                with override_settings(DAILY_REPORT_TEMPLATE=template_path):
+                    result = issue_inspection_sheets(target_date=date(2026, 6, 26))
+
+            self.assertEqual(result["issued_count"], 0)
+            self.assertIn("No printable entries", result["message"])
 
     def test_utf8_sig_csv_import(self):
         """utf-8-sig BOM付きCSVでも読み込めること"""

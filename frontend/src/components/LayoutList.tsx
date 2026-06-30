@@ -149,31 +149,30 @@ export const LayoutList: React.FC<LayoutListProps> = ({
 
   return (
     <div className="layout-list-container" style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
-      <div className="map-segment-control">
-        {layoutMaps.map(({ layout, mapData }) => {
-          const machineIdsOnLayout = new Set(
-            mapData?.layout?.objects
-              ?.filter((obj) => obj.type === 'machine' && obj.machine_id != null)
-              ?.map((obj) => obj.machine_id) ?? []
-          );
-          const targetCount = mapData?.machines
-            ?.filter((m) => machineIdsOnLayout.has(m.machine_id))
-            ?.reduce((sum, m) => sum + m.target_codes.length, 0) ?? 0;
-          return (
-            <button
-              key={layout.id}
-              type="button"
-              className={`map-segment-button ${activeLayoutId === layout.id ? 'active' : ''}`}
-              onClick={() => setActiveLayoutId(layout.id)}
-            >
-              {layout.layout_name}
-              {targetCount > 0 && <span className="map-segment-badge">{targetCount}</span>}
-            </button>
-          );
-        })}
-      </div>
-
       <div className="layout-list-item card" style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+        <div className="map-segment-control">
+          {layoutMaps.map(({ layout, mapData }) => {
+            const machineIdsOnLayout = new Set(
+              mapData?.layout?.objects
+                ?.filter((obj) => obj.type === 'machine' && obj.machine_id != null)
+                ?.map((obj) => obj.machine_id) ?? []
+            );
+            const targetCount = mapData?.machines
+              ?.filter((m) => machineIdsOnLayout.has(m.machine_id))
+              ?.reduce((sum, m) => sum + m.target_codes.length, 0) ?? 0;
+            return (
+              <button
+                key={layout.id}
+                type="button"
+                className={`map-segment-button ${activeLayoutId === layout.id ? 'active' : ''}`}
+                onClick={() => setActiveLayoutId(layout.id)}
+              >
+                {layout.layout_name}
+                {targetCount > 0 && <span className="map-segment-badge">{targetCount}</span>}
+              </button>
+            );
+          })}
+        </div>
         <div className="layout-list-header">
           <h3 className="layout-list-title">{activeMap.layout.layout_name}</h3>
           {activeMap.isLoading && <div className="pulse-spinner small" />}

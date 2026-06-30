@@ -8,7 +8,7 @@ import { LayoutList } from './components/LayoutList';
 import { FactoryMapCreator } from './components/FactoryMapCreator';
 import { MachineMasterPanel } from './components/MachineMasterPanel';
 import type { Job, InspectionTarget, ApiError, LayoutSummary } from './types';
-import { ShieldAlert, RefreshCw, Layers, Map as MapIcon, Cpu, Settings, PanelLeftClose, PanelLeftOpen, Sun, Moon, Palette, Upload, Activity } from 'lucide-react';
+import { ShieldAlert, RefreshCw, Layers, Map as MapIcon, Cpu, Settings, PanelLeftClose, PanelLeftOpen, Sun, Moon, Palette, Upload, Activity, CheckCircle2 } from 'lucide-react';
 
 type ThemeMode = 'normal' | 'dark' | 'solarized-light' | 'solarized-dark';
 
@@ -36,6 +36,8 @@ export const App: React.FC = () => {
   const [isLoadingJob, setIsLoadingJob] = useState<boolean>(false);
   const [isLoadingTargets, setIsLoadingTargets] = useState<boolean>(false);
   const [globalError, setGlobalError] = useState<string | null>(null);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const successTimerRef = useRef<any>(null);
   const [theme, setTheme] = useState<ThemeMode>(() => {
     if (typeof window !== 'undefined') {
       return (localStorage.getItem('theme') as ThemeMode) || 'normal';
@@ -69,6 +71,9 @@ export const App: React.FC = () => {
     return () => {
       if (pollingTimerRef.current) {
         clearInterval(pollingTimerRef.current);
+      }
+      if (successTimerRef.current) {
+        clearTimeout(successTimerRef.current);
       }
     };
   }, []);
@@ -316,6 +321,74 @@ export const App: React.FC = () => {
     }
   };
 
+  const showSuccess = (message: string) => {
+    setSuccessMessage(message);
+    if (successTimerRef.current) clearTimeout(successTimerRef.current);
+    successTimerRef.current = setTimeout(() => setSuccessMessage(null), 4000);
+  };
+
+  const handleWriteHistory = async (date: string) => {
+    setGlobalError(null);
+    try {
+      const response = await fetch('/api/history/write-to-file/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ date }),
+      });
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        throw new Error(errData.message || '履歴ファイルへの記入に失敗しました');
+      }
+      const data = await response.json();
+      if (data.written_count > 0) {
+        showSuccess(`履歴ファイルに ${data.written_count} 件記入しました`);
+      } else {
+        showSuccess('記入対象の履歴がありません');
+      }
+      fetchTargets(date);
+    } catch (err: any) {
+      setGlobalError(err.message || '履歴ファイルへの記入に失敗しました');
+      throw err;
+    }
+  };
+
+  const handleIssueDailyReport = async (date: string) => {
+    setGlobalError(null);
+    try {
+      const response = await fetch('/api/daily-report/issue/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ date }),
+      });
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        throw new Error(errData.message || '日報発行の開始に失敗しました');
+      }
+      const { job_id } = await response.json();
+      await new Promise<void>((resolve, reject) => {
+        const poll = setInterval(async () => {
+          try {
+            const res = await fetch(`/api/jobs/${job_id}/`);
+            const jobData: Job = await res.json();
+            setCurrentJob(jobData);
+            if (jobData.status === 'succeeded') {
+              clearInterval(poll);
+              resolve();
+            } else if (jobData.status === 'failed') {
+              clearInterval(poll);
+              reject(new Error(jobData.error_message || '日報発行ジョブが失敗しました'));
+            }
+          } catch {
+            // continue polling
+          }
+        }, 2000);
+      });
+    } catch (err: any) {
+      setGlobalError(err.message || '日報発行の開始に失敗しました');
+      throw err;
+    }
+  };
+
   const handleCheckUpdate = (date: string, items: { code: string; checks: Record<string, boolean> }[]) => {
     setTargets(prev => prev.map(t => {
       const item = items.find(i => i.code === t.code);
@@ -397,6 +470,14 @@ export const App: React.FC = () => {
 
       <main className={`app-main ${activeTab === 'mapCreator' || activeTab === 'settings' || activeTab === 'machineMaster' ? 'scrollable' : ''}`}>
 
+        {successMessage && (
+          <div className="card success-card-global">
+            <CheckCircle2 size={20} className="success-icon" />
+            <div className="error-content">
+              <p>{successMessage}</p>
+            </div>
+          </div>
+        )}
         {globalError && (
           <div className="card error-card-global animate-shake">
             <ShieldAlert size={20} className="error-icon" />
@@ -514,6 +595,8 @@ export const App: React.FC = () => {
                   onCheckUpdate={handleCheckUpdate}
                   onHideTargets={handleHideTargets}
                   onIssueSheet={handleIssueSheet}
+                  onIssueDailyReport={handleIssueDailyReport}
+                  onWriteHistory={handleWriteHistory}
                   onRefresh={handleRefreshTargets}
                   isLoading={isLoadingTargets}
                 />
