@@ -23,6 +23,7 @@ from .models import (
     InspectionTarget,
     InspectionTargetWarning,
     Job,
+    MachineAssignment,
     Master,
     MasterClass,
     Structure,
@@ -350,10 +351,55 @@ def classify_master_by_product_code(code):
     return {"node_type_1": "", "node_type_2": "", "category": ""}
 
 
+def get_assignment_class_for_master(master):
+    if master is None:
+        return None
+    ma = MachineAssignment.objects.filter(
+        code=master, assignment_class__isnull=False
+    ).order_by("assignment_class").first()
+    return ma.assignment_class if ma else None
+
+
+def assigned_to_machine_class(master, machine_class):
+    if master is None:
+        return False
+    return MachineAssignment.objects.filter(
+        code=master, machine__machine_class=str(machine_class)
+    ).exists()
+
+
+def sync_master_class_from_assignment(master):
+    if master is None:
+        return
+    ac = get_assignment_class_for_master(master)
+    if ac is not None and ac in (1, 2):
+        cm = ClassMaster.objects.filter(class_no=ac).first()
+        if cm:
+            MasterClass.objects.update_or_create(
+                master=master,
+                defaults={"class_master": cm},
+            )
+    if ac is None and assigned_to_machine_class(master, 3):
+        cm = ClassMaster.objects.filter(class_no=3).first()
+        if cm:
+            MasterClass.objects.update_or_create(
+                master=master,
+                defaults={"class_master": cm},
+            )
+
+
 def determine_inspection_class(master, file_codes_by_code):
     if master is None:
         return None
     code = master.code
+
+    ac = get_assignment_class_for_master(master)
+    if ac is not None and ac in (1, 2):
+        return ac
+
+    if assigned_to_machine_class(master, 3):
+        return 3
+
     n1 = (master.node_type_1 or "").strip()
     dept = (master.department or "").strip()
 
@@ -364,12 +410,6 @@ def determine_inspection_class(master, file_codes_by_code):
         if fc:
             folder_classes.add(fc)
 
-    if "auto1" in folder_classes:
-        return 1
-    if "auto2" in folder_classes and "auto1" not in folder_classes:
-        return 2
-    if "setter" in folder_classes:
-        return 3
     if "product1" in folder_classes:
         return 6
     if "product2" in folder_classes:
@@ -1370,3 +1410,71 @@ def print_inspection_file(target_id):
             win32api.ShellExecute(0, "print", file_path, None, ".", 0)
     finally:
         pythoncom.CoUninitialize()
+
+
+@transaction.atomic
+def sync_all_master_classes():
+    from .models import Master, Machine
+    masters = Master.objects.all()
+    updated = 0
+    for master in masters:
+        ac = get_assignment_class_for_master(master)
+        if ac is not None and ac in (1, 2):
+            cm = ClassMaster.objects.filter(class_no=ac).first()
+            if cm:
+                MasterClass.objects.update_or_create(
+                    master=master,
+                    defaults={"class_master": cm},
+                )
+                updated += 1
+                continue
+        if assigned_to_machine_class(master, 3):
+            cm = ClassMaster.objects.filter(class_no=3).first()
+            if cm:
+                MasterClass.objects.update_or_create(
+                    master=master,
+                    defaults={"class_master": cm},
+                )
+                updated += 1
+                continue
+        n1 = (master.node_type_1 or "").strip()
+        dept = (master.department or "").strip()
+        if n1 == "プレス":
+            cm = ClassMaster.objects.filter(class_no=4).first()
+            if cm:
+                MasterClass.objects.update_or_create(
+                    master=master,
+                    defaults={"class_master": cm},
+                )
+                updated += 1
+                continue
+        if n1 == "加工" and (dept == "製造管理部" or dept == "生残技術部"):
+            cm = ClassMaster.objects.filter(class_no=5).first()
+            if cm:
+                MasterClass.objects.update_or_create(
+                    master=master,
+                    defaults={"class_master": cm},
+                )
+                updated += 1
+                continue
+        MasterClass.objects.filter(master=master).delete()
+        updated += 1
+    return updated
+
+
+@transaction.atomic
+def sync_targets_inspection_sheet_required():
+    from .models import InspectionTarget
+    targets = InspectionTarget.objects.filter(master__isnull=False).select_related("master")
+    updated_count = 0
+    for target in targets:
+        required = inspection_sheet_required(target.master)
+        if target.requires_inspection_sheet != required:
+            target.requires_inspection_sheet = required
+            if required and target.issue_status == InspectionTarget.IssueStatus.NOT_REQUIRED:
+                target.issue_status = InspectionTarget.IssueStatus.PENDING
+            elif not required:
+                target.issue_status = InspectionTarget.IssueStatus.NOT_REQUIRED
+            target.save(update_fields=["requires_inspection_sheet", "issue_status", "updated_at"])
+            updated_count += 1
+    return updated_count

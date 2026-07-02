@@ -194,6 +194,7 @@ class Machine(models.Model):
 
     machine_no = models.CharField(max_length=64, unique=True)
     machine_name = models.CharField(max_length=255)
+    machine_class = models.PositiveSmallIntegerField(null=True, blank=True)
     shape_type = models.CharField(max_length=16, choices=ShapeType.choices)
     map_x = models.FloatField()
     map_y = models.FloatField()
@@ -208,6 +209,7 @@ class Machine(models.Model):
 class MachineAssignment(models.Model):
     machine = models.ForeignKey(Machine, on_delete=models.CASCADE, related_name="assignments")
     code = models.ForeignKey(Master, to_field="code", on_delete=models.CASCADE, related_name="machine_assignments")
+    assignment_class = models.PositiveSmallIntegerField(null=True, blank=True)
 
     class Meta:
         constraints = [

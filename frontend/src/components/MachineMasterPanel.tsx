@@ -11,6 +11,7 @@ interface MasterSearchResult {
 interface MachineForm {
   machine_no: string;
   machine_name: string;
+  machine_class: number | null;
   shape_type: 'circle' | 'ellipse' | 'rectangle';
   map_x: number;
   map_y: number;
@@ -19,9 +20,30 @@ interface MachineForm {
   is_active: boolean;
 }
 
+const MACHINE_CLASS_OPTIONS: { value: number; label: string }[] = [
+  { value: 1, label: '1: 自動機' },
+  { value: 2, label: '2: 半自動機' },
+  { value: 3, label: '3: セッター' },
+  { value: 4, label: '4: プレス' },
+  { value: 5, label: '5: 2次加工機' },
+  { value: 10, label: '10: 自動機・半自動機ハイブリッド' },
+];
+
+const CLASS_NAME_MAP: Record<number, string> = {
+  1: '自動機',
+  2: '半自動機',
+  3: 'セッター',
+  4: 'プレス',
+  5: '二次加工',
+  6: '製品検査(1)',
+  7: '製品検査(2)',
+  8: '手動',
+};
+
 const defaultForm: MachineForm = {
   machine_no: '',
   machine_name: '',
+  machine_class: null,
   shape_type: 'circle',
   map_x: 0,
   map_y: 0,
@@ -44,7 +66,7 @@ export const MachineMasterPanel: React.FC = () => {
   const [machines, setMachines] = useState<MachineDetail[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [form, setForm] = useState<MachineForm>({ ...defaultForm });
-  const [assignments, setAssignments] = useState<{ code: string; name: string }[]>([]);
+  const [assignments, setAssignments] = useState<{ code: string; name: string; assignment_class?: number | null }[]>([]);
   const [isSaving, setIsSaving] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
@@ -88,6 +110,7 @@ export const MachineMasterPanel: React.FC = () => {
       setForm({
         machine_no: m.machine_no,
         machine_name: m.machine_name,
+        machine_class: m.machine_class ?? null,
         shape_type: m.shape_type,
         map_x: m.map_x,
         map_y: m.map_y,
@@ -95,7 +118,7 @@ export const MachineMasterPanel: React.FC = () => {
         height: m.height,
         is_active: m.is_active,
       });
-      setAssignments(m.assignments.map(a => ({ ...a })));
+      setAssignments(m.assignments.map(a => ({ ...a, assignment_class: a.assignment_class ?? null })));
     }
   };
 
@@ -107,14 +130,19 @@ export const MachineMasterPanel: React.FC = () => {
     setIsSaving(true);
     setMessage(null);
     try {
+      const mc = form.machine_class;
+      const body = {
+        id: selectedId,
+        ...form,
+        assignments: assignments.map(a => ({
+          code: a.code,
+          assignment_class: (mc === 1 || mc === 2) ? mc : (a.assignment_class ?? null),
+        })),
+      };
       const res = await fetch('/api/machine-master/', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          id: selectedId,
-          ...form,
-          assignments: assignments.map(a => a.code),
-        }),
+        body: JSON.stringify(body),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -155,7 +183,12 @@ export const MachineMasterPanel: React.FC = () => {
 
   const addAssignment = (code: string, name: string) => {
     if (assignments.some(a => a.code === code)) return;
-    setAssignments(prev => [...prev, { code, name }]);
+    const mc = form.machine_class;
+    setAssignments(prev => [...prev, {
+      code,
+      name,
+      assignment_class: (mc === 1 || mc === 2) ? mc : null,
+    }]);
     setSearchQuery('');
     setSearchResults([]);
   };
@@ -198,6 +231,15 @@ export const MachineMasterPanel: React.FC = () => {
             <div className="form-group">
               <label className="form-label">機械名称</label>
               <input className="form-control" value={form.machine_name} onChange={e => setForm(f => ({ ...f, machine_name: e.target.value }))} />
+            </div>
+            <div className="form-group">
+              <label className="form-label">機械クラス</label>
+              <select className="form-control" value={form.machine_class ?? ''} onChange={e => setForm(f => ({ ...f, machine_class: e.target.value ? Number(e.target.value) : null }))}>
+                <option value="">-- 選択 --</option>
+                {MACHINE_CLASS_OPTIONS.map(opt => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
+              </select>
             </div>
             <div className="form-group">
               <label className="form-label">形状</label>
@@ -281,6 +323,26 @@ export const MachineMasterPanel: React.FC = () => {
                   <div className="machine-master-assign-info">
                     <span className="machine-master-assign-code">{a.code}</span>
                     <span className="machine-master-assign-name">{a.name}</span>
+                  </div>
+                  <div className="machine-master-assign-class">
+                    {form.machine_class === 10 ? (
+                      <select
+                        className="form-control form-control-sm"
+                        value={a.assignment_class ?? ''}
+                        onChange={e => {
+                          const val = e.target.value ? Number(e.target.value) : null;
+                          setAssignments(prev => prev.map(x => x.code === a.code ? { ...x, assignment_class: val } : x));
+                        }}
+                      >
+                        <option value="">-- class --</option>
+                        <option value={1}>1: 自動機</option>
+                        <option value={2}>2: 半自動機</option>
+                      </select>
+                    ) : form.machine_class === 1 || form.machine_class === 2 ? (
+                      <span className="machine-master-assign-class-badge">
+                        {form.machine_class} ({CLASS_NAME_MAP[form.machine_class]})
+                      </span>
+                    ) : null}
                   </div>
                   <button className="btn btn-icon-only btn-secondary" onClick={() => removeAssignment(a.code)} title="削除">
                     <X size={14} />

@@ -223,25 +223,32 @@ class MachineSerializer(serializers.ModelSerializer):
 class MachineDetailSerializer(serializers.ModelSerializer):
     class Meta:
         model = Machine
-        fields = ["id", "machine_no", "machine_name", "shape_type", "map_x", "map_y", "width", "height", "is_active"]
+        fields = ["id", "machine_no", "machine_name", "machine_class", "shape_type", "map_x", "map_y", "width", "height", "is_active"]
 
 
 class MachineAssignmentSerializer(serializers.Serializer):
     code = serializers.CharField()
     name = serializers.CharField()
+    assignment_class = serializers.IntegerField(required=False, allow_null=True)
+
+
+class AssignmentInputSerializer(serializers.Serializer):
+    code = serializers.CharField()
+    assignment_class = serializers.IntegerField(required=False, allow_null=True, default=None)
 
 
 class MachineMasterSaveSerializer(serializers.Serializer):
     id = serializers.IntegerField(required=False, allow_null=True)
     machine_no = serializers.CharField(max_length=64)
     machine_name = serializers.CharField(max_length=255)
+    machine_class = serializers.IntegerField(required=False, allow_null=True, default=None)
     shape_type = serializers.ChoiceField(choices=["circle", "ellipse", "rectangle"])
     map_x = serializers.FloatField()
     map_y = serializers.FloatField()
     width = serializers.FloatField()
     height = serializers.FloatField()
     is_active = serializers.BooleanField(default=True)
-    assignments = serializers.ListField(child=serializers.CharField(), default=list)
+    assignments = serializers.ListField(child=AssignmentInputSerializer(), default=list)
 
 
 class AppSettingSerializer(serializers.ModelSerializer):

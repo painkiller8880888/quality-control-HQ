@@ -115,6 +115,7 @@ export interface LayoutObject {
 export interface AssignedItem {
   code: string;
   name: string;
+  assignment_class?: number | null;
 }
 
 export interface FactoryMapMachine {
@@ -167,11 +168,12 @@ export interface MachineDetail {
   id: number;
   machine_no: string;
   machine_name: string;
+  machine_class?: number | null;
   shape_type: 'circle' | 'ellipse' | 'rectangle';
   map_x: number;
   map_y: number;
   width: number;
   height: number;
   is_active: boolean;
-  assignments: { code: string; name: string }[];
+  assignments: { code: string; name: string; assignment_class?: number | null }[];
 }

@@ -30,6 +30,7 @@ from .models import (
 )
 from .serializers import (
     AppSettingSerializer,
+    AssignmentInputSerializer,
     BulkHideTargetsRequestSerializer,
     BulkHistoryRequestSerializer,
     CreateLayoutSerializer,
@@ -65,6 +66,7 @@ from .services import (
     print_inspection_file,
     run_job,
     set_check,
+    sync_master_class_from_assignment,
     write_history_to_excel,
 )
 
@@ -646,13 +648,14 @@ class MachineMasterView(APIView):
         result = []
         for m in machines:
             assignments = [
-                {"code": a.code.code, "name": a.code.name}
+                {"code": a.code.code, "name": a.code.name, "assignment_class": a.assignment_class}
                 for a in m.assignments.all()
             ]
             result.append({
                 "id": m.id,
                 "machine_no": m.machine_no,
                 "machine_name": m.machine_name,
+                "machine_class": m.machine_class,
                 "shape_type": m.shape_type,
                 "map_x": m.map_x,
                 "map_y": m.map_y,
@@ -673,6 +676,7 @@ class MachineMasterView(APIView):
             machine = get_object_or_404(Machine, id=data["id"])
             machine.machine_no = data["machine_no"]
             machine.machine_name = data["machine_name"]
+            machine.machine_class = data.get("machine_class")
             machine.shape_type = data["shape_type"]
             machine.map_x = data["map_x"]
             machine.map_y = data["map_y"]
@@ -684,6 +688,7 @@ class MachineMasterView(APIView):
             machine = Machine.objects.create(
                 machine_no=data["machine_no"],
                 machine_name=data["machine_name"],
+                machine_class=data.get("machine_class"),
                 shape_type=data["shape_type"],
                 map_x=data["map_x"],
                 map_y=data["map_y"],
@@ -693,16 +698,28 @@ class MachineMasterView(APIView):
             )
 
         machine.assignments.all().delete()
-        codes = data.get("assignments", [])
-        for code in codes:
-            master = Master.objects.filter(code=code).first()
+        assignments_data = data.get("assignments", [])
+        mc = machine.machine_class
+        for item in assignments_data:
+            code_str = item["code"]
+            master = Master.objects.filter(code=code_str).first()
             if master:
-                MachineAssignment.objects.create(machine=machine, code=master)
+                if mc in (1, 2):
+                    ac = mc
+                else:
+                    ac = item.get("assignment_class")
+                MachineAssignment.objects.create(
+                    machine=machine,
+                    code=master,
+                    assignment_class=ac,
+                )
+                sync_master_class_from_assignment(master)
 
         return Response({
             "id": machine.id,
             "machine_no": machine.machine_no,
             "machine_name": machine.machine_name,
+            "machine_class": machine.machine_class,
             "shape_type": machine.shape_type,
             "map_x": machine.map_x,
             "map_y": machine.map_y,
@@ -710,7 +727,7 @@ class MachineMasterView(APIView):
             "height": machine.height,
             "is_active": machine.is_active,
             "assignments": [
-                {"code": a.code.code, "name": a.code.name}
+                {"code": a.code.code, "name": a.code.name, "assignment_class": a.assignment_class}
                 for a in machine.assignments.select_related("code").all()
             ],
         })
