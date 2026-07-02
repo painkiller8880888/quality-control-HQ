@@ -1373,7 +1373,7 @@ body {
 }
 
 .target-detail-container.expanded {
-  max-height: 500px;
+  max-height: 640px;
   padding: 16px 20px;
 }
 
@@ -1412,6 +1412,14 @@ body {
   display: flex;
   gap: 4px;
   flex-wrap: wrap;
+}
+
+.target-detail-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
 }
 
 .warning-detail-trigger {

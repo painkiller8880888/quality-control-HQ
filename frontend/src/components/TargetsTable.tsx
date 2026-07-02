@@ -481,6 +481,42 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
     }
   };
 
+  const [printingTargetId, setPrintingTargetId] = useState<number | null>(null);
+
+  const handleOpenFile = useCallback(async (targetId: number) => {
+    const res = await fetch(`/api/inspection-targets/${targetId}/file/`);
+    const contentType = res.headers.get('Content-Type') || '';
+    if (contentType.includes('application/json')) {
+      const data = await res.json();
+      if (data.status !== 'success') {
+        alert('ファイルを開けませんでした');
+      }
+    } else if (res.ok) {
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      window.open(url, '_blank');
+      setTimeout(() => URL.revokeObjectURL(url), 30000);
+    }
+  }, []);
+
+  const handlePrintFile = useCallback(async (targetId: number) => {
+    setPrintingTargetId(targetId);
+    try {
+      const res = await fetch(`/api/inspection-targets/${targetId}/print-file/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        alert(err.message || '印刷に失敗しました');
+      }
+    } catch {
+      alert('印刷リクエストに失敗しました');
+    } finally {
+      setPrintingTargetId(null);
+    }
+  }, []);
+
   if (targets.length === 0) {
     if (isLoading) {
       return (
@@ -771,6 +807,26 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
                                 </li>
                               ))}
                             </ul>
+                          </div>
+                        )}
+
+                        {target.has_inspection_file && (
+                          <div className="target-detail-actions">
+                            <button
+                              className="btn btn-outline btn-sm"
+                              onClick={(e) => { e.stopPropagation(); handleOpenFile(target.target_id); }}
+                            >
+                              <FileText size={14} />
+                              検査書表示
+                            </button>
+                            <button
+                              className="btn btn-outline btn-sm"
+                              disabled={printingTargetId === target.target_id}
+                              onClick={(e) => { e.stopPropagation(); handlePrintFile(target.target_id); }}
+                            >
+                              <Printer size={14} />
+                              {printingTargetId === target.target_id ? '印刷中...' : '印刷'}
+                            </button>
                           </div>
                         )}
                       </div>

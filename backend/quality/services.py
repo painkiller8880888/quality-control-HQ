@@ -1303,3 +1303,70 @@ def _write_daily_report(template_path, output_path, target_date, keep_vba=True):
         "date": str(target_date),
         "excel_path": str(output_path),
     }
+
+
+def print_inspection_file(target_id):
+    import os as os_mod
+    import tempfile
+    import pythoncom
+    import win32com.client
+    import win32api
+
+    target = InspectionTarget.objects.select_related("master").get(id=target_id)
+    if not target.master:
+        raise ValueError("検査対象にマスターが登録されていません")
+
+    insp_file = InspectionFile.objects.filter(master=target.master).first()
+    if not insp_file:
+        raise FileNotFoundError(f"検査書ファイルが見つかりません（コード: {target.normalized_code}）")
+
+    file_path = insp_file.file_path
+    if not os_mod.path.exists(file_path):
+        raise FileNotFoundError(f"ファイルが存在しません: {file_path}")
+
+    ext = os_mod.path.splitext(file_path)[1].lower()
+
+    pythoncom.CoInitialize()
+    try:
+        if ext in (".xls", ".xlsx", ".xlsm"):
+            xl = None
+            try:
+                xl = win32com.client.DispatchEx("Excel.Application")
+                xl.DisplayAlerts = False
+                xl.Visible = False
+                wb = xl.Workbooks.Open(file_path)
+                for ws in wb.Sheets:
+                    ws.PageSetup.BlackAndWhite = True
+                wb.PrintOut()
+                wb.Close(False)
+            finally:
+                if xl:
+                    xl.Quit()
+        elif ext == ".pdf":
+            import fitz
+            doc = fitz.open(file_path)
+            new_doc = fitz.open()
+            tmp_path = None
+            try:
+                for page in doc:
+                    rect = page.rect
+                    pix = page.get_pixmap(dpi=200, colorspace=fitz.csGRAY)
+                    new_page = new_doc.new_page(
+                        width=rect.width, height=rect.height
+                    )
+                    new_page.insert_image(rect, stream=pix.tobytes("png"))
+                tmp_path = tempfile.mktemp(suffix=".pdf")
+                new_doc.save(tmp_path)
+                win32api.ShellExecute(0, "print", tmp_path, None, ".", 0)
+            finally:
+                doc.close()
+                new_doc.close()
+                if tmp_path and os_mod.path.exists(tmp_path):
+                    try:
+                        os_mod.unlink(tmp_path)
+                    except OSError:
+                        pass
+        else:
+            win32api.ShellExecute(0, "print", file_path, None, ".", 0)
+    finally:
+        pythoncom.CoUninitialize()

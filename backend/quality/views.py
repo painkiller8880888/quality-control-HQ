@@ -1,8 +1,10 @@
+import mimetypes
 import os
 import sys
 import uuid
 
 from django.conf import settings
+from django.http import FileResponse
 from django.shortcuts import get_object_or_404
 from django.db import transaction
 from django.db import models as db_models
@@ -15,6 +17,7 @@ from rest_framework.views import APIView
 from .models import (
     AppSetting,
     History,
+    InspectionFile,
     InspectionSession,
     InspectionTarget,
     Job,
@@ -59,6 +62,7 @@ from .services import (
     import_plan_targets,
     issue_daily_report,
     issue_inspection_sheets,
+    print_inspection_file,
     run_job,
     set_check,
     write_history_to_excel,
@@ -312,6 +316,69 @@ class InspectionTargetDetailView(APIView):
         target.visible = False
         target.save()
         return success_response()
+
+
+class TargetInspectionFileView(APIView):
+    def get(self, request, target_id):
+        target = get_object_or_404(
+            InspectionTarget.objects.select_related("master"), id=target_id
+        )
+        if not target.master:
+            return error_response(
+                "NO_MASTER", "検査対象にマスターが登録されていません"
+            )
+
+        insp_file = InspectionFile.objects.filter(master=target.master).first()
+        if not insp_file:
+            return error_response(
+                "FILE_NOT_FOUND", "検査書ファイルが見つかりません"
+            )
+
+        file_path = insp_file.file_path
+        if not os.path.exists(file_path):
+            return error_response(
+                "FILE_NOT_FOUND",
+                f"ファイルが存在しません: {file_path}",
+            )
+
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext in (".xls", ".xlsx", ".xlsm"):
+            os.startfile(file_path)
+            return success_response(message="ファイルを起動しました")
+
+        content_type = (
+            mimetypes.guess_type(file_path)[0] or "application/octet-stream"
+        )
+        response = FileResponse(open(file_path, "rb"), content_type=content_type)
+        response["Content-Disposition"] = (
+            f'inline; filename="{os.path.basename(file_path)}"'
+        )
+        return response
+
+
+class TargetInspectionFilePrintView(APIView):
+    def post(self, request, target_id):
+        try:
+            print_inspection_file(target_id)
+            return success_response(message="印刷を開始しました")
+        except InspectionTarget.DoesNotExist:
+            return error_response(
+                "NOT_FOUND",
+                "検査対象が見つかりません",
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        except FileNotFoundError as exc:
+            return error_response(
+                "FILE_NOT_FOUND",
+                str(exc),
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        except ValueError as exc:
+            return error_response("INVALID_REQUEST", str(exc))
+        except Exception as exc:
+            return error_response(
+                "PRINT_FAILED", str(exc), status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
 
 class BulkHideTargetsView(APIView):

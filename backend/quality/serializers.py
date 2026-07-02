@@ -1,7 +1,7 @@
 from rest_framework import serializers
 
 from .constants import CHECK_SLOTS
-from .models import AppSetting, History, InspectionTarget, Job, LayoutMaster, LayoutObject, LayoutObjectType, Machine, MasterClass
+from .models import AppSetting, History, InspectionFile, InspectionTarget, Job, LayoutMaster, LayoutObject, LayoutObjectType, Machine, MasterClass
 
 
 LAYOUT_OBJECT_TYPES = {"machine", "wall", "path", "area", "stairs", "entrance"}
@@ -23,6 +23,7 @@ class InspectionTargetSerializer(serializers.ModelSerializer):
     source_flags = serializers.SerializerMethodField()
     checks = serializers.SerializerMethodField()
     warnings = WarningSerializer(many=True, read_only=True)
+    has_inspection_file = serializers.SerializerMethodField()
 
     class Meta:
         model = InspectionTarget
@@ -39,6 +40,7 @@ class InspectionTargetSerializer(serializers.ModelSerializer):
             "visible",
             "warnings",
             "checks",
+            "has_inspection_file",
         ]
 
     def get_name(self, obj):
@@ -70,6 +72,11 @@ class InspectionTargetSerializer(serializers.ModelSerializer):
         histories = self.context.get("histories", {})
         checked_slots = histories.get(obj.master_id, set()) if obj.master_id else set()
         return {slot: slot in checked_slots for slot in CHECK_SLOTS}
+
+    def get_has_inspection_file(self, obj):
+        if obj.master is None:
+            return False
+        return InspectionFile.objects.filter(master=obj.master).exists()
 
 
 class ManualTargetsRequestSerializer(serializers.Serializer):

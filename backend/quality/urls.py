@@ -24,6 +24,8 @@ from .views import (
     SeedMasterView,
     SettingsView,
     SingleHistoryView,
+    TargetInspectionFilePrintView,
+    TargetInspectionFileView,
     UploadBackgroundImageView,
 )
 
@@ -40,6 +42,8 @@ urlpatterns = [
     path("inspection-targets/manual/", ManualTargetsView.as_view()),
     path("inspection-targets/bulk-hide/", BulkHideTargetsView.as_view()),
     path("inspection-targets/<int:target_id>/", InspectionTargetDetailView.as_view()),
+    path("inspection-targets/<int:target_id>/file/", TargetInspectionFileView.as_view()),
+    path("inspection-targets/<int:target_id>/print-file/", TargetInspectionFilePrintView.as_view()),
     path("history/", SingleHistoryView.as_view()),
     path("history/bulk-upsert/", BulkHistoryView.as_view()),
     path("factory-map/layouts/", FactoryMapLayoutsView.as_view()),

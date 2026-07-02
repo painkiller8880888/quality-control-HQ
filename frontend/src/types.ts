@@ -50,6 +50,7 @@ export interface InspectionTarget {
     manual: boolean;
   };
   requires_inspection_sheet: boolean;
+  has_inspection_file: boolean;
   issue_status: string;
   warnings: InspectionTargetWarning[];
   checks: {
