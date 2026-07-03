@@ -30,12 +30,13 @@ class ClassMaster(models.Model):
 class MasterClass(models.Model):
     master = models.ForeignKey(Master, on_delete=models.CASCADE, related_name="master_classes")
     class_master = models.ForeignKey(ClassMaster, on_delete=models.PROTECT, null=True, blank=True, related_name="master_classes")
+    inspection_sheet_path = models.TextField(blank=True, default="")
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         constraints = [
             models.UniqueConstraint(
-                fields=["master"],
+                fields=["master", "class_master"],
                 name="unique_master_class",
             )
         ]
@@ -129,13 +130,14 @@ class InspectionTarget(models.Model):
         default=IssueStatus.NOT_REQUIRED,
     )
     visible = models.BooleanField(default=True)
+    class_override = models.PositiveSmallIntegerField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         constraints = [
             models.UniqueConstraint(
-                fields=["session", "normalized_code"],
+                fields=["session", "normalized_code", "class_override"],
                 name="unique_target_per_session_code",
             )
         ]
@@ -172,6 +174,7 @@ class History(models.Model):
     date = models.DateField()
     master = models.ForeignKey(Master, on_delete=models.CASCADE, related_name="histories")
     time_slot = models.CharField(max_length=1, choices=TimeSlot.choices)
+    class_override = models.PositiveSmallIntegerField(null=True, blank=True)
     is_sheet_issued = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -179,7 +182,7 @@ class History(models.Model):
     class Meta:
         constraints = [
             models.UniqueConstraint(
-                fields=["date", "master", "time_slot"],
+                fields=["date", "master", "time_slot", "class_override"],
                 name="unique_history_date_master_slot",
             )
         ]

@@ -41,21 +41,26 @@ class InspectionTargetSerializer(serializers.ModelSerializer):
             "warnings",
             "checks",
             "has_inspection_file",
+            "class_override",
         ]
 
     def get_name(self, obj):
         return obj.master.name if obj.master else obj.normalized_code
 
     def get_category(self, obj):
+        if obj.class_override:
+            return obj.class_override
         if obj.master is None:
             return None
-        mc = MasterClass.objects.filter(master=obj.master).first()
+        mc = MasterClass.objects.filter(master=obj.master).exclude(class_master__class_no=9).first()
         return mc.class_master.class_no if mc and mc.class_master else None
 
     def get_class_name(self, obj):
+        if obj.class_override == 9:
+            return "特殊検査"
         if obj.master is None:
             return None
-        mc = MasterClass.objects.filter(master=obj.master).first()
+        mc = MasterClass.objects.filter(master=obj.master).exclude(class_master__class_no=9).first()
         return mc.class_master.class_name if mc and mc.class_master else None
 
     def get_product_category(self, obj):
@@ -85,11 +90,25 @@ class ManualTargetsRequestSerializer(serializers.Serializer):
         child=serializers.CharField(max_length=64),
         allow_empty=False,
     )
+    class_override = serializers.IntegerField(required=False, allow_null=True, default=None)
+
+
+class Class9SettingSerializer(serializers.Serializer):
+    id = serializers.IntegerField(read_only=True)
+    code = serializers.CharField(max_length=32)
+    name = serializers.CharField(read_only=True)
+    inspection_sheet_path = serializers.CharField(required=False, allow_blank=True, default="")
+
+
+class Class9SettingCreateSerializer(serializers.Serializer):
+    code = serializers.CharField(max_length=32)
+    inspection_sheet_path = serializers.CharField(required=False, allow_blank=True, default="")
 
 
 class CheckItemSerializer(serializers.Serializer):
     code = serializers.CharField(max_length=64)
     checks = serializers.DictField(child=serializers.BooleanField())
+    class_override = serializers.IntegerField(required=False, allow_null=True, default=None)
 
     def validate_checks(self, value):
         invalid = set(value) - set(CHECK_SLOTS)
@@ -108,6 +127,7 @@ class SingleHistoryRequestSerializer(serializers.Serializer):
     code = serializers.CharField(max_length=64)
     time = serializers.ChoiceField(choices=History.TimeSlot.choices)
     checked = serializers.BooleanField()
+    class_override = serializers.IntegerField(required=False, allow_null=True, default=None)
 
 
 class BulkHideTargetsRequestSerializer(serializers.Serializer):

@@ -1,14 +1,21 @@
 import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import type { InspectionTarget } from '../types';
-import { AlertTriangle, ChevronDown, ChevronUp, FileCheck, CheckCircle2, Package, Database, ArrowUpDown, ArrowUp, ArrowDown, EyeOff, Plus, Printer, FileText, FileSpreadsheet } from 'lucide-react';
+import { AlertTriangle, ChevronDown, ChevronUp, FileCheck, CheckCircle2, Package, Database, ArrowUpDown, ArrowUp, ArrowDown, EyeOff, Plus, Printer, FileText, FileSpreadsheet, Bug } from 'lucide-react';
 import { ManualAddModal } from './ManualAddModal';
+import { SpecialAddModal } from './SpecialAddModal';
+
+interface CheckUpdateItem {
+  code: string;
+  checks: Record<string, boolean>;
+  class_override?: number | null;
+}
 
 interface TargetsTableProps {
   targets: InspectionTarget[];
   highlightedTargetId: number | null;
   onTargetClick: (target: InspectionTarget) => void;
   selectedDate: string;
-  onCheckUpdate: (date: string, items: { code: string; checks: Record<string, boolean> }[]) => void;
+  onCheckUpdate: (date: string, items: CheckUpdateItem[]) => void;
   onHideTargets: (date: string, targetIds: number[]) => void;
   onIssueSheet: (date: string) => Promise<void>;
   onIssueDailyReport: (date: string) => Promise<void>;
@@ -26,6 +33,7 @@ const CLASS_LABELS: Record<number, string> = {
   6: '製品検査(1)',
   7: '製品検査(2)',
   8: '手動',
+  9: '特殊検査',
 };
 
 const CLASS_COLORS: Record<number, { bg: string; text: string }> = {
@@ -37,6 +45,7 @@ const CLASS_COLORS: Record<number, { bg: string; text: string }> = {
   6: { bg: '#e0e7ff', text: '#3730a3' },
   7: { bg: '#fce7f3', text: '#9d174d' },
   8: { bg: '#f1f5f9', text: '#334155' },
+  9: { bg: '#fff1f0', text: '#cf1322' },
 };
 
 const getClassColor = (classNum: number | null) => {
@@ -61,6 +70,7 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
   const [hideChecked, setHideChecked] = useState<Set<number>>(new Set());
   const [isHiding, setIsHiding] = useState(false);
   const [showManualAddModal, setShowManualAddModal] = useState(false);
+  const [showSpecialAddModal, setShowSpecialAddModal] = useState(false);
   const [isIssuing, setIsIssuing] = useState(false);
   const [isIssuingDailyReport, setIsIssuingDailyReport] = useState(false);
   const [isWritingHistory, setIsWritingHistory] = useState(false);
@@ -79,10 +89,11 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
 
   // Drag-to-check state (A/B/C/D slots)
   const containerRef = useRef<HTMLDivElement>(null);
+  interface AccumulatedData { code: string; checks: Record<string, boolean>; class_override: number | null; }
   const dragRef = useRef<{
     isDragging: boolean; startX: number; startY: number; slot: string;
     setChecked: boolean;
-    processed: Set<string>; accumulated: Map<string, Record<string, boolean>>;
+    processed: Set<string>; accumulated: Map<number, AccumulatedData>;
   }>({ isDragging: false, startX: 0, startY: 0, slot: '', setChecked: true, processed: new Set(), accumulated: new Map() });
   const [pendingChecks, setPendingChecks] = useState<Set<string>>(new Set());
   const autoScrollRafRef = useRef<number | null>(null);
@@ -99,14 +110,15 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
     processed: Set<number>;
   }>({ isDragging: false, startX: 0, startY: 0, direction: null, processed: new Set() });
 
-  const getCheckKey = (code: string, slot: string) => `${code}:${slot}`;
+  const getCheckKey = (targetId: number, slot: string) => `${targetId}:${slot}`;
 
   const getCellData = (el: HTMLElement | null) => {
-    const cell = el?.closest('[data-check-code]') as HTMLElement | null;
+    const cell = el?.closest('[data-check-target-id]') as HTMLElement | null;
     if (!cell) return null;
-    const code = cell.getAttribute('data-check-code');
+    const attr = cell.getAttribute('data-check-target-id');
     const slot = cell.getAttribute('data-check-slot');
-    if (code && slot) return { code, slot, element: cell };
+    const targetId = attr ? parseInt(attr, 10) : null;
+    if (targetId && slot) return { targetId, slot, element: cell };
     return null;
   };
 
@@ -118,23 +130,25 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
   };
 
   const isCellChecked = (target: InspectionTarget, slot: string) =>
-    !!target.checks?.[slot as keyof typeof target.checks] || pendingChecks.has(getCheckKey(target.code, slot));
+    !!target.checks?.[slot as keyof typeof target.checks] || pendingChecks.has(getCheckKey(target.target_id, slot));
 
   const processCell = useCallback((clientX: number, clientY: number) => {
     const drag = dragRef.current;
     const cellData = getCellData(document.elementFromPoint(clientX, clientY) as HTMLElement);
     if (!cellData || cellData.slot !== drag.slot) return;
 
-    const key = getCheckKey(cellData.code, cellData.slot);
+    const key = getCheckKey(cellData.targetId, cellData.slot);
     if (drag.processed.has(key)) return;
     drag.processed.add(key);
 
-    const target = targets.find(t => t.code === cellData.code);
+    const target = targets.find(t => t.target_id === cellData.targetId);
     if (target?.checks?.[cellData.slot as keyof typeof target.checks] === drag.setChecked) return;
 
-    const existing = drag.accumulated.get(cellData.code) || {};
-    existing[cellData.slot] = drag.setChecked;
-    drag.accumulated.set(cellData.code, existing);
+    const existing = drag.accumulated.get(cellData.targetId) || { code: target?.code ?? '', checks: {}, class_override: target?.class_override ?? null };
+    existing.checks[cellData.slot] = drag.setChecked;
+    existing.class_override = target?.class_override ?? null;
+    existing.code = target?.code ?? '';
+    drag.accumulated.set(cellData.targetId, existing);
 
     if (drag.setChecked) {
       setPendingChecks(prev => new Set(prev).add(key));
@@ -206,7 +220,11 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
     stopAutoScroll();
 
     if (drag.accumulated.size > 0 && selectedDate) {
-      const items = Array.from(drag.accumulated.entries()).map(([code, checks]) => ({ code, checks }));
+      const items = Array.from(drag.accumulated.values()).map(data => ({
+        code: data.code,
+        checks: data.checks,
+        class_override: data.class_override,
+      }));
       onCheckUpdate(selectedDate, items);
     }
 
@@ -231,7 +249,7 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
 
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
 
-    const target = targets.find(t => t.code === cellData.code);
+    const target = targets.find(t => t.target_id === cellData.targetId);
     const isChecked = !!target?.checks?.[cellData.slot as keyof typeof target.checks];
 
     dragRef.current = {
@@ -274,13 +292,13 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
     const wasDrag = drag.isDragging;
 
     if (!wasDrag) {
-      const cellData = getCellData((_e.currentTarget as HTMLElement).closest('[data-check-code]') as HTMLElement);
+      const cellData = getCellData((_e.currentTarget as HTMLElement).closest('[data-check-target-id]') as HTMLElement);
       if (cellData && selectedDate) {
-        const target = targets.find(t => t.code === cellData.code);
+        const target = targets.find(t => t.target_id === cellData.targetId);
         if (target) {
           const currentlyChecked = !!target.checks?.[cellData.slot as keyof typeof target.checks];
           const newChecked = !currentlyChecked;
-          const key = getCheckKey(cellData.code, cellData.slot);
+          const key = getCheckKey(cellData.targetId, cellData.slot);
 
           if (newChecked) {
             setPendingChecks(prev => new Set(prev).add(key));
@@ -288,7 +306,11 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
             setPendingChecks(prev => { const s = new Set(prev); s.delete(key); return s; });
           }
 
-          onCheckUpdate(selectedDate, [{ code: cellData.code, checks: { [cellData.slot]: newChecked } }]);
+          onCheckUpdate(selectedDate, [{
+            code: target.code,
+            checks: { [cellData.slot]: newChecked },
+            class_override: target.class_override ?? null,
+          }]);
         }
       }
     }
@@ -566,6 +588,13 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
             手動追加
           </button>
           <button
+            className="btn btn-danger btn-sm"
+            onClick={() => setShowSpecialAddModal(true)}
+          >
+            <Bug size={14} />
+            特殊検査追加
+          </button>
+          <button
             className="btn btn-outline btn-sm"
             onClick={handleIssueSheet}
             disabled={isIssuing}
@@ -602,6 +631,13 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
           <ManualAddModal
             selectedDate={selectedDate}
             onClose={() => setShowManualAddModal(false)}
+            onAdded={onRefresh}
+          />
+        )}
+        {showSpecialAddModal && selectedDate && (
+          <SpecialAddModal
+            selectedDate={selectedDate}
+            onClose={() => setShowSpecialAddModal(false)}
             onAdded={onRefresh}
           />
         )}
@@ -678,7 +714,7 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
                       )}
                     </td>
                     <td className="text-center check-cell"
-                      data-check-code={target.code}
+                      data-check-target-id={target.target_id}
                       data-check-slot="A"
                       onPointerDown={handleCellPointerDown}
                       onPointerMove={handleCellPointerMove}
@@ -691,7 +727,7 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
                       )}
                     </td>
                     <td className="text-center check-cell"
-                      data-check-code={target.code}
+                      data-check-target-id={target.target_id}
                       data-check-slot="B"
                       onPointerDown={handleCellPointerDown}
                       onPointerMove={handleCellPointerMove}
@@ -704,7 +740,7 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
                       )}
                     </td>
                     <td className="text-center check-cell"
-                      data-check-code={target.code}
+                      data-check-target-id={target.target_id}
                       data-check-slot="C"
                       onPointerDown={handleCellPointerDown}
                       onPointerMove={handleCellPointerMove}
@@ -717,7 +753,7 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
                       )}
                     </td>
                     <td className="text-center check-cell"
-                      data-check-code={target.code}
+                      data-check-target-id={target.target_id}
                       data-check-slot="D"
                       onPointerDown={handleCellPointerDown}
                       onPointerMove={handleCellPointerMove}

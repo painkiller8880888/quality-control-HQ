@@ -16,6 +16,7 @@ from rest_framework.views import APIView
 
 from .models import (
     AppSetting,
+    ClassMaster,
     History,
     InspectionFile,
     InspectionSession,
@@ -27,12 +28,15 @@ from .models import (
     Machine,
     MachineAssignment,
     Master,
+    MasterClass,
 )
 from .serializers import (
     AppSettingSerializer,
     AssignmentInputSerializer,
     BulkHideTargetsRequestSerializer,
     BulkHistoryRequestSerializer,
+    Class9SettingCreateSerializer,
+    Class9SettingSerializer,
     CreateLayoutSerializer,
     DailyReportGenerateRequestSerializer,
     InspectionTargetSerializer,
@@ -290,6 +294,7 @@ class ManualTargetsView(APIView):
         session, added_count = add_manual_targets(
             serializer.validated_data["date"],
             serializer.validated_data["codes"],
+            class_override=serializer.validated_data.get("class_override"),
         )
         return success_response(session_id=session.id, added_count=added_count)
 
@@ -426,6 +431,7 @@ class SingleHistoryView(APIView):
                 serializer.validated_data["code"],
                 serializer.validated_data["time"],
                 serializer.validated_data["checked"],
+                class_override=serializer.validated_data.get("class_override"),
             )
         except ValueError as exc:
             return error_response("UNKNOWN_CODE", str(exc))
@@ -826,6 +832,59 @@ class LayoutObjectTypeColorUpdateView(APIView):
         obj_type.color = serializer.validated_data["color"]
         obj_type.save()
         return Response(LayoutObjectTypeSerializer(obj_type).data)
+
+
+class Class9SettingsView(APIView):
+    def get(self, request):
+        class9 = ClassMaster.objects.filter(class_no=9).first()
+        if not class9:
+            return Response([])
+        qs = MasterClass.objects.filter(class_master=class9).select_related("master")
+        return Response([
+            {
+                "id": mc.id,
+                "code": mc.master.code,
+                "name": mc.master.name,
+                "inspection_sheet_path": mc.inspection_sheet_path,
+            }
+            for mc in qs
+        ])
+
+    @transaction.atomic
+    def post(self, request):
+        serializer = Class9SettingCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        code = serializer.validated_data["code"]
+        inspection_sheet_path = serializer.validated_data.get("inspection_sheet_path", "")
+
+        master = Master.objects.filter(code=code).first()
+        if not master:
+            return error_response("MASTER_NOT_FOUND", f"コード '{code}' が見つかりません。", status.HTTP_404_NOT_FOUND)
+
+        class9 = ClassMaster.objects.get(class_no=9)
+        mc, created = MasterClass.objects.update_or_create(
+            master=master,
+            class_master=class9,
+            defaults={
+                "class_master": class9,
+                "inspection_sheet_path": inspection_sheet_path,
+            },
+        )
+        return Response({
+            "id": mc.id,
+            "code": master.code,
+            "name": master.name,
+            "inspection_sheet_path": mc.inspection_sheet_path,
+        }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+    def delete(self, request, pk=None):
+        if pk is None:
+            pk = request.query_params.get("id")
+        if not pk:
+            return error_response("INVALID_REQUEST", "id is required.")
+        mc = get_object_or_404(MasterClass, id=pk)
+        mc.delete()
+        return success_response()
 
 
 class SeedMasterView(APIView):

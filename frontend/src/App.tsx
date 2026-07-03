@@ -392,7 +392,7 @@ export const App: React.FC = () => {
     }
   };
 
-  const handleCheckUpdate = (date: string, items: { code: string; checks: Record<string, boolean> }[]) => {
+  const handleCheckUpdate = (date: string, items: { code: string; checks: Record<string, boolean>; class_override?: number | null }[]) => {
     setTargets(prev => prev.map(t => {
       const item = items.find(i => i.code === t.code);
       if (!item) return t;
@@ -403,10 +403,15 @@ export const App: React.FC = () => {
       return { ...t, checks: newChecks };
     }));
 
+    const itemsWithClass = items.map(item => ({
+      ...item,
+      class_override: item.class_override ?? undefined,
+    }));
+
     fetch('/api/history/bulk-upsert/', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ date, items }),
+      body: JSON.stringify({ date, items: itemsWithClass }),
     }).then(res => {
       if (!res.ok) fetchTargets(date);
     }).catch(() => fetchTargets(date));

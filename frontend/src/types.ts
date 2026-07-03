@@ -59,6 +59,14 @@ export interface InspectionTarget {
     C: boolean;
     D: boolean;
   };
+  class_override?: number | null;
+}
+
+export interface Class9Setting {
+  id: number;
+  code: string;
+  name: string;
+  inspection_sheet_path: string;
 }
 
 export interface MasterUpdateJobResult {

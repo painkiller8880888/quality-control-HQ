@@ -3,6 +3,7 @@ from django.urls import path
 from .views import (
     BulkHideTargetsView,
     BulkHistoryView,
+    Class9SettingsView,
     DailyReportGenerateView,
     DailyReportIssueView,
     ErpAutomationView,
@@ -58,4 +59,6 @@ urlpatterns = [
     path("history/write-to-file/", HistoryWriteToFileView.as_view()),
     path("daily-report/generate/", DailyReportGenerateView.as_view()),
     path("daily-report/issue/", DailyReportIssueView.as_view()),
+    path("class9-settings/", Class9SettingsView.as_view()),
+    path("class9-settings/<int:pk>/", Class9SettingsView.as_view()),
 ]

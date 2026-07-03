@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
-import type { AppSettings, Job, ApiError } from '../types';
-import { Save, Upload, FolderOpen, Loader2, Database, Plus, Trash2, CheckCircle2, AlertTriangle, Type, Play, Monitor, FileSpreadsheet } from 'lucide-react';
+import type { AppSettings, Job, ApiError, Class9Setting } from '../types';
+import { Save, Upload, FolderOpen, Loader2, Database, Plus, Trash2, CheckCircle2, AlertTriangle, Type, Play, Monitor, FileSpreadsheet, Bug } from 'lucide-react';
 
 interface SettingsPanelProps {
   fontSize: number;
@@ -16,15 +16,25 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ fontSize, onFontSi
   const [isSaving, setIsSaving] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
   const [isErpRunning, setIsErpRunning] = useState(false);
-  const [isHistoryWriting, setIsHistoryWriting] = useState(false);
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
-  const [historyWriteResult, setHistoryWriteResult] = useState<string | null>(null);
+  const [historyWriteResult] = useState<string | null>(null);
   const [erpResult, setErpResult] = useState<string | null>(null);
   const [jobResult, setJobResult] = useState<any>(null);
   const pollingTimerRef = useRef<any>(null);
 
+  // Class 9 settings
+  const [class9Settings, setClass9Settings] = useState<Class9Setting[]>([]);
+  const [class9Code, setClass9Code] = useState('');
+  const [class9SheetPath, setClass9SheetPath] = useState('');
+  const [class9SearchResults, setClass9SearchResults] = useState<{ code: string; name: string }[]>([]);
+  const [isClass9Searching, setIsClass9Searching] = useState(false);
+  const [isClass9Saving, setIsClass9Saving] = useState(false);
+  const [class9Message, setClass9Message] = useState<string | null>(null);
+  const searchTimerRef = useRef<number | null>(null);
+
   useEffect(() => {
     fetchSettings();
+    fetchClass9Settings();
     return () => {
       if (pollingTimerRef.current) {
         clearInterval(pollingTimerRef.current);
@@ -46,6 +56,79 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ fontSize, onFontSi
       setSaveMessage('エラー: ' + err.message);
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const fetchClass9Settings = async () => {
+    try {
+      const res = await fetch('/api/class9-settings/');
+      if (res.ok) {
+        const data: Class9Setting[] = await res.json();
+        setClass9Settings(data);
+      }
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleClass9CodeSearch = (value: string) => {
+    setClass9Code(value);
+    if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+    if (!value.trim()) {
+      setClass9SearchResults([]);
+      return;
+    }
+    searchTimerRef.current = window.setTimeout(async () => {
+      setIsClass9Searching(true);
+      try {
+        const res = await fetch(`/api/masters/search/?q=${encodeURIComponent(value.trim())}`);
+        if (res.ok) {
+          setClass9SearchResults(await res.json());
+        }
+      } catch {
+        // ignore
+      } finally {
+        setIsClass9Searching(false);
+      }
+    }, 300);
+  };
+
+  const handleClass9Add = async () => {
+    if (!class9Code.trim()) return;
+    setIsClass9Saving(true);
+    setClass9Message(null);
+    try {
+      const res = await fetch('/api/class9-settings/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          code: class9Code.trim(),
+          inspection_sheet_path: class9SheetPath.trim(),
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.message || '登録に失敗しました');
+      }
+      setClass9Code('');
+      setClass9SheetPath('');
+      setClass9SearchResults([]);
+      await fetchClass9Settings();
+      setClass9Message('特殊検査(クラス9)を登録しました');
+    } catch (err: any) {
+      setClass9Message('エラー: ' + err.message);
+    } finally {
+      setIsClass9Saving(false);
+    }
+  };
+
+  const handleClass9Delete = async (id: number) => {
+    try {
+      const res = await fetch(`/api/class9-settings/${id}/`, { method: 'DELETE' });
+      if (!res.ok) throw new Error('削除に失敗しました');
+      await fetchClass9Settings();
+    } catch (err: any) {
+      setClass9Message('エラー: ' + err.message);
     }
   };
 
@@ -293,6 +376,77 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ fontSize, onFontSi
           <div className={`card-body-flex ${historyWriteResult.startsWith('エラー') ? 'text-rose' : 'text-emerald'}`}>
             {historyWriteResult.startsWith('エラー') ? <AlertTriangle size={16} /> : <CheckCircle2 size={16} />}
             <span>{historyWriteResult}</span>
+          </div>
+        )}
+      </div>
+
+      <div className="card">
+        <h2 className="card-title">
+          <Bug className="icon-title" size={20} />
+          特殊検査(クラス9)設定
+        </h2>
+        <div className="form-group">
+          <label className="form-label">品番検索</label>
+          <input
+            type="text"
+            className="form-control"
+            value={class9Code}
+            onChange={e => handleClass9CodeSearch(e.target.value)}
+            placeholder="品目コードまたは品目名で検索..."
+          />
+          {isClass9Searching && <div className="manual-add-loading">検索中...</div>}
+          {class9SearchResults.length > 0 && (
+            <ul className="class9-search-results">
+              {class9SearchResults.map(r => (
+                <li key={r.code} className="class9-search-item" onClick={() => { setClass9Code(r.code); setClass9SearchResults([]); }}>
+                  <span className="font-mono">{r.code}</span>
+                  <span className="text-muted">{r.name}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+        <div className="form-group">
+          <label className="form-label">
+            検査書ファイルパス (任意)
+          </label>
+          <input
+            type="text"
+            className="form-control"
+            value={class9SheetPath}
+            onChange={e => setClass9SheetPath(e.target.value)}
+            placeholder="\\\\server\\share\\folder\\file.xlsx (省略可)"
+          />
+        </div>
+        <div className="form-actions">
+          <button type="button" className="btn btn-primary" onClick={handleClass9Add} disabled={isClass9Saving || !class9Code.trim()}>
+            {isClass9Saving ? <Loader2 size={16} className="animate-spin" /> : <Plus size={16} />}
+            クラス9として登録
+          </button>
+        </div>
+        {class9Settings.length > 0 && (
+          <div className="class9-list">
+            <h4>登録済み ({class9Settings.length}件)</h4>
+            {class9Settings.map(s => (
+              <div key={s.id} className="class9-list-item">
+                <div className="class9-list-info">
+                  <span className="font-mono font-bold">{s.code}</span>
+                  <span className="text-muted">{s.name}</span>
+                  {s.inspection_sheet_path && (
+                    <span className="class9-path">{s.inspection_sheet_path}</span>
+                  )}
+                </div>
+                <button type="button" className="btn btn-danger btn-icon-only" onClick={() => handleClass9Delete(s.id)} title="削除">
+                  <Trash2 size={14} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+        {class9Message && (
+          <div className={`card-body-flex ${class9Message.startsWith('エラー') ? 'text-rose' : 'text-emerald'}`}>
+            {class9Message.startsWith('エラー') ? <AlertTriangle size={16} /> : <CheckCircle2 size={16} />}
+            <span>{class9Message}</span>
           </div>
         )}
       </div>

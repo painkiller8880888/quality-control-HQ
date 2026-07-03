@@ -44,7 +44,7 @@ def normalize_code(code):
 def inspection_sheet_required(master):
     if master is None:
         return False
-    mc = MasterClass.objects.filter(master=master).first()
+    mc = MasterClass.objects.filter(master=master).exclude(class_master__class_no=9).first()
     return mc is not None and mc.class_master is not None and mc.class_master.class_no in (1, 6, 7)
 
 
@@ -377,6 +377,7 @@ def sync_master_class_from_assignment(master):
         if cm:
             MasterClass.objects.update_or_create(
                 master=master,
+                class_master=cm,
                 defaults={"class_master": cm},
             )
     if ac is None and assigned_to_machine_class(master, 3):
@@ -384,6 +385,7 @@ def sync_master_class_from_assignment(master):
         if cm:
             MasterClass.objects.update_or_create(
                 master=master,
+                class_master=cm,
                 defaults={"class_master": cm},
             )
 
@@ -431,7 +433,7 @@ def get_ocr_engine():
 
 
 @transaction.atomic
-def upsert_targets(target_date, codes, source):
+def upsert_targets(target_date, codes, source, class_override=None):
     session, _ = InspectionSession.objects.get_or_create(target_date=target_date)
     added_count = 0
     duplicate_count = 0
@@ -441,21 +443,35 @@ def upsert_targets(target_date, codes, source):
         if not normalized_code:
             continue
         master = Master.objects.filter(code=normalized_code).first()
+
+        lookup_kwargs = {
+            "session": session,
+            "normalized_code": normalized_code,
+        }
+        if class_override:
+            lookup_kwargs["class_override"] = class_override
+        else:
+            lookup_kwargs["class_override__isnull"] = True
+
+        is_class_9 = class_override == 9
+        requires_sheet = True if is_class_9 else inspection_sheet_required(master)
+        issue_status = (
+            InspectionTarget.IssueStatus.PENDING
+            if requires_sheet
+            else InspectionTarget.IssueStatus.NOT_REQUIRED
+        )
+
         target, created = InspectionTarget.objects.get_or_create(
-            session=session,
-            normalized_code=normalized_code,
+            **lookup_kwargs,
             defaults={
                 "master": master,
                 "raw_code": raw_code,
+                "class_override": class_override,
                 "source_ocr": source == "ocr",
                 "source_excel": source == "excel",
                 "source_manual": source == "manual",
-                "requires_inspection_sheet": inspection_sheet_required(master),
-                "issue_status": (
-                    InspectionTarget.IssueStatus.PENDING
-                    if inspection_sheet_required(master)
-                    else InspectionTarget.IssueStatus.NOT_REQUIRED
-                ),
+                "requires_inspection_sheet": requires_sheet,
+                "issue_status": issue_status,
             },
         )
 
@@ -469,9 +485,14 @@ def upsert_targets(target_date, codes, source):
                 target.source_manual = True
             if master and not target.master:
                 target.master = master
-            target.requires_inspection_sheet = inspection_sheet_required(target.master)
-            if target.requires_inspection_sheet and target.issue_status == InspectionTarget.IssueStatus.NOT_REQUIRED:
-                target.issue_status = InspectionTarget.IssueStatus.PENDING
+            if is_class_9:
+                target.requires_inspection_sheet = True
+                if target.issue_status == InspectionTarget.IssueStatus.NOT_REQUIRED:
+                    target.issue_status = InspectionTarget.IssueStatus.PENDING
+            else:
+                target.requires_inspection_sheet = inspection_sheet_required(target.master)
+                if target.requires_inspection_sheet and target.issue_status == InspectionTarget.IssueStatus.NOT_REQUIRED:
+                    target.issue_status = InspectionTarget.IssueStatus.PENDING
             target.save(
                 update_fields=[
                     "source_manual",
@@ -499,8 +520,8 @@ def upsert_targets(target_date, codes, source):
     return session, added_count, duplicate_count
 
 
-def add_manual_targets(target_date, codes):
-    session, added_count, _ = upsert_targets(target_date, codes, "manual")
+def add_manual_targets(target_date, codes, class_override=None):
+    session, added_count, _ = upsert_targets(target_date, codes, "manual", class_override=class_override)
     return session, added_count
 
 
@@ -782,6 +803,7 @@ def import_master_csv(master_file=None, csv_path=None, inspection_folder_paths=N
             cm = ClassMaster.objects.filter(class_no=insp_class).first()
             MasterClass.objects.update_or_create(
                 master=master,
+                class_master=cm,
                 defaults={"class_master": cm},
             )
             class_count += 1
@@ -898,37 +920,46 @@ def import_plan_targets(target_date, scan_file=None, excel_file=None, sheet_name
 
 
 def history_map_for_date(target_date):
-    rows = History.objects.filter(date=target_date).values_list("master_id", "time_slot")
+    rows = History.objects.filter(date=target_date).values_list("master_id", "time_slot", "class_override")
     history_map = {}
-    for master_id, time_slot in rows:
+    for master_id, time_slot, co in rows:
         history_map.setdefault(master_id, set()).add(time_slot)
     return history_map
 
 
 @transaction.atomic
-def set_check(target_date, code, time_slot, checked):
+def set_check(target_date, code, time_slot, checked, class_override=None):
     normalized_code = normalize_code(code)
     master = Master.objects.filter(code=normalized_code).first()
     if master is None:
         raise ValueError(f"Unknown code: {normalized_code}")
 
+    lookup = {
+        "date": target_date,
+        "master": master,
+        "time_slot": time_slot,
+    }
+    if class_override:
+        lookup["class_override"] = class_override
+    else:
+        lookup["class_override__isnull"] = True
+
     if checked:
         History.objects.update_or_create(
-            date=target_date,
-            master=master,
-            time_slot=time_slot,
+            **lookup,
             defaults={},
         )
     else:
-        History.objects.filter(date=target_date, master=master, time_slot=time_slot).delete()
+        History.objects.filter(**lookup).delete()
 
 
 @transaction.atomic
 def bulk_upsert_history(target_date, items):
     updated = 0
     for item in items:
+        co = item.get("class_override")
         for slot, checked in item["checks"].items():
-            set_check(target_date, item["code"], slot, checked)
+            set_check(target_date, item["code"], slot, checked, class_override=co)
         updated += 1
     return updated
 
@@ -1083,6 +1114,62 @@ def _excel_serial_date(d: date_type) -> int:
     return delta.days
 
 
+def _print_file_direct(file_path: str):
+    import os as os_mod
+    import pythoncom
+    import win32com.client
+    import win32api
+
+    if not os_mod.path.exists(file_path):
+        raise FileNotFoundError(f"ファイルが存在しません: {file_path}")
+
+    ext = os_mod.path.splitext(file_path)[1].lower()
+
+    pythoncom.CoInitialize()
+    try:
+        if ext in (".xls", ".xlsx", ".xlsm"):
+            xl = None
+            try:
+                xl = win32com.client.DispatchEx("Excel.Application")
+                xl.DisplayAlerts = False
+                xl.Visible = False
+                wb = xl.Workbooks.Open(file_path)
+                for ws in wb.Sheets:
+                    ws.PageSetup.BlackAndWhite = True
+                wb.PrintOut()
+                wb.Close(False)
+            finally:
+                if xl:
+                    xl.Quit()
+        elif ext == ".pdf":
+            import fitz
+            import tempfile
+            doc = fitz.open(file_path)
+            new_doc = fitz.open()
+            tmp_path = None
+            try:
+                for page in doc:
+                    rect = page.rect
+                    pix = page.get_pixmap(dpi=200, colorspace=fitz.csGRAY)
+                    new_page = new_doc.new_page(width=rect.width, height=rect.height)
+                    new_page.insert_image(rect, stream=pix.tobytes("png"))
+                tmp_path = tempfile.mktemp(suffix=".pdf")
+                new_doc.save(tmp_path)
+                win32api.ShellExecute(0, "print", tmp_path, None, ".", 0)
+            finally:
+                doc.close()
+                new_doc.close()
+                if tmp_path and os_mod.path.exists(tmp_path):
+                    try:
+                        os_mod.unlink(tmp_path)
+                    except OSError:
+                        pass
+        else:
+            win32api.ShellExecute(0, "print", file_path, None, ".", 0)
+    finally:
+        pythoncom.CoUninitialize()
+
+
 def issue_inspection_sheets(target_date: date_type | None = None):
     template_path = Path(settings.DAILY_REPORT_TEMPLATE)
     if not template_path.exists():
@@ -1099,12 +1186,15 @@ def issue_inspection_sheets(target_date: date_type | None = None):
     master_ids = list(qs.values_list("master_id", flat=True).distinct())
     class_map: dict[int, int | None] = {}
     sheet_target_master_ids: set[int] = set()
+    class9_master_map: dict[int, str] = {}
     for mc in MasterClass.objects.filter(master_id__in=master_ids).select_related("class_master"):
         cn = mc.class_master.class_no if mc.class_master else None
         if mc.master_id not in class_map:
             class_map[mc.master_id] = cn
         if cn in (1, 6, 7):
             sheet_target_master_ids.add(mc.master_id)
+        if cn == 9 and mc.inspection_sheet_path:
+            class9_master_map[mc.master_id] = mc.inspection_sheet_path
 
     file_map: dict[int, str] = {}
     for fi in InspectionFile.objects.filter(master_id__in=master_ids):
@@ -1113,7 +1203,11 @@ def issue_inspection_sheets(target_date: date_type | None = None):
 
     rows = []
     target_history_ids: list[int] = []
+    class9_history_ids: list[int] = []
     for h in qs:
+        if h.class_override == 9 or h.master_id in class9_master_map:
+            class9_history_ids.append(h.history_id)
+            continue
         if h.master_id not in sheet_target_master_ids:
             continue
         file_path = file_map.get(h.master_id)
@@ -1131,71 +1225,86 @@ def issue_inspection_sheets(target_date: date_type | None = None):
         ])
         target_history_ids.append(h.history_id)
 
-    if not rows:
+    class9_printed = 0
+    if class9_history_ids:
+        for h in qs.filter(history_id__in=class9_history_ids).select_related("master"):
+            file_path = class9_master_map.get(h.master_id)
+            if file_path:
+                try:
+                    _print_file_direct(file_path)
+                    class9_printed += 1
+                except Exception as exc:
+                    logger.warning("Class 9 print failed for %s: %s", h.master.code if h.master else "?", exc)
+
+    if not rows and not class9_history_ids:
         return {"issued_count": 0, "message": "No printable entries found (no valid file paths or non-target classes)."}
 
-    try:
-        import win32com.client
-        import pythoncom
-    except ImportError:
-        raise RuntimeError("pywin32 is required for COM Excel automation")
-
-    pythoncom.CoInitialize()
-    xl = None
-    try:
-        xl = win32com.client.DispatchEx("Excel.Application")
-        xl.DisplayAlerts = False
-        xl.EnableEvents = False
-        xl.Visible = False
-        xl.AskToUpdateLinks = False
+    if rows:
         try:
-            xl.Calculation = -4135  # xlManual
-        except pythoncom.com_error:
-            logger.warning("Excel Calculation property could not be set")
-        xl.ScreenUpdating = False
+            import win32com.client
+            import pythoncom
+        except ImportError:
+            raise RuntimeError("pywin32 is required for COM Excel automation")
 
-        wb = xl.Workbooks.Open(str(template_path.resolve()), UpdateLinks=False)
-        ws_data = wb.Sheets("data") if "data" in [s.Name for s in wb.Sheets] else wb.Sheets[0]
-
-        ws_data.Cells.ClearContents()
-
-        for i, row_data in enumerate(rows, start=2):
-            for j, val in enumerate(row_data, start=1):
-                ws_data.Cells(i, j).Value = val
-
-        wb.Save()
-
-        wb.Application.Run("RunBatch")
-    finally:
-        if xl is not None:
+        pythoncom.CoInitialize()
+        xl = None
+        try:
+            xl = win32com.client.DispatchEx("Excel.Application")
+            xl.DisplayAlerts = False
+            xl.EnableEvents = False
+            xl.Visible = False
+            xl.AskToUpdateLinks = False
             try:
-                xl.ScreenUpdating = True
+                xl.Calculation = -4135  # xlManual
             except pythoncom.com_error:
-                pass
-            # DisplayAlerts は Quit まで False のままにしておく（未保存ワークブックの確認ダイアログを抑制）
-            try:
-                xl.EnableEvents = True
-            except pythoncom.com_error:
-                pass
-            try:
-                xl.Calculation = -4105  # xlAutomatic
-            except pythoncom.com_error:
-                pass
-            # RunBatch 内で閉じ忘れたワークブックをすべて閉じる
-            try:
-                for w in xl.Workbooks:
-                    try:
-                        w.Close(False)
-                    except pythoncom.com_error:
-                        pass
-            except pythoncom.com_error:
-                pass
-            xl.Quit()
-        pythoncom.CoUninitialize()
+                logger.warning("Excel Calculation property could not be set")
+            xl.ScreenUpdating = False
 
-    History.objects.filter(history_id__in=target_history_ids).update(is_sheet_issued=True)
+            wb = xl.Workbooks.Open(str(template_path.resolve()), UpdateLinks=False)
+            ws_data = wb.Sheets("data") if "data" in [s.Name for s in wb.Sheets] else wb.Sheets[0]
 
-    return {"issued_count": len(rows), "date": str(target_date) if target_date else "all"}
+            ws_data.Cells.ClearContents()
+
+            for i, row_data in enumerate(rows, start=2):
+                for j, val in enumerate(row_data, start=1):
+                    ws_data.Cells(i, j).Value = val
+
+            wb.Save()
+
+            wb.Application.Run("RunBatch")
+        finally:
+            if xl is not None:
+                try:
+                    xl.ScreenUpdating = True
+                except pythoncom.com_error:
+                    pass
+                try:
+                    xl.EnableEvents = True
+                except pythoncom.com_error:
+                    pass
+                try:
+                    xl.Calculation = -4105  # xlAutomatic
+                except pythoncom.com_error:
+                    pass
+                try:
+                    for w in xl.Workbooks:
+                        try:
+                            w.Close(False)
+                        except pythoncom.com_error:
+                            pass
+                except pythoncom.com_error:
+                    pass
+                xl.Quit()
+            pythoncom.CoUninitialize()
+
+    all_issued = target_history_ids + class9_history_ids
+    History.objects.filter(history_id__in=all_issued).update(is_sheet_issued=True)
+
+    return {
+        "issued_count": len(rows) + class9_printed,
+        "class9_printed": class9_printed,
+        "date": str(target_date) if target_date else "all",
+    }
 
 
 def generate_daily_report(target_date):
@@ -1383,6 +1492,7 @@ def sync_all_master_classes():
             if cm:
                 MasterClass.objects.update_or_create(
                     master=master,
+                    class_master=cm,
                     defaults={"class_master": cm},
                 )
                 updated += 1
@@ -1392,6 +1502,7 @@ def sync_all_master_classes():
             if cm:
                 MasterClass.objects.update_or_create(
                     master=master,
+                    class_master=cm,
                     defaults={"class_master": cm},
                 )
                 updated += 1
@@ -1403,6 +1514,7 @@ def sync_all_master_classes():
             if cm:
                 MasterClass.objects.update_or_create(
                     master=master,
+                    class_master=cm,
                     defaults={"class_master": cm},
                 )
                 updated += 1
@@ -1412,11 +1524,12 @@ def sync_all_master_classes():
             if cm:
                 MasterClass.objects.update_or_create(
                     master=master,
+                    class_master=cm,
                     defaults={"class_master": cm},
                 )
                 updated += 1
                 continue
-        MasterClass.objects.filter(master=master).delete()
+        MasterClass.objects.filter(master=master).exclude(class_master__class_no=9).delete()
         updated += 1
     return updated
 
