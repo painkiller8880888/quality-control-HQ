@@ -173,7 +173,7 @@ export const App: React.FC = () => {
     }, 2500);
   };
 
-  const handleImportStart = async (targetDate: string, scanFile: File | null, excelFile: File | null) => {
+  const handleImportStart = async (targetDate: string, scanFile: File | null, excelFile: File | null, sheetName: string) => {
     setGlobalError(null);
     setIsLoadingJob(true);
     setSelectedDate(targetDate);
@@ -186,6 +186,9 @@ export const App: React.FC = () => {
     }
     if (excelFile) {
       formData.append('excel_file', excelFile);
+    }
+    if (sheetName) {
+      formData.append('sheet_name', sheetName);
     }
 
     try {

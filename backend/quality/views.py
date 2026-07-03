@@ -253,12 +253,17 @@ class PlansImportView(APIView):
         serializer.is_valid(raise_exception=True)
         scan_file = request.FILES.get("scan_file")
         excel_file = request.FILES.get("excel_file")
+        sheet_name = serializer.validated_data.get("sheet_name", "")
+
+        if excel_file and not sheet_name:
+            return error_response("INVALID_REQUEST", "計画Excelファイルを指定する場合はシート名を入力してください。")
         job = create_job(
             Job.JobType.PLANS_IMPORT,
             {
                 "target_date": str(serializer.validated_data["target_date"]),
                 "scan_file": getattr(scan_file, "name", None),
                 "excel_file": getattr(excel_file, "name", None),
+                "sheet_name": sheet_name,
             },
         )
         try:
@@ -268,6 +273,7 @@ class PlansImportView(APIView):
                     serializer.validated_data["target_date"],
                     scan_file=scan_file,
                     excel_file=excel_file,
+                    sheet_name=sheet_name,
                 ),
             )
         except FileNotFoundError as exc:

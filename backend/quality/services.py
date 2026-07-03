@@ -522,51 +522,30 @@ def extract_codes_from_uploaded_text(uploaded_file):
     return find_code_candidates(raw.decode("utf-8", errors="ignore"))
 
 
-def press_plan_candidates(target_date):
-    base_dir = Path(settings.PRESS_PLAN_DIR)
-    candidates = []
-    for suffix in ("xls", "xlsx", "xlsm"):
-        candidates.append(base_dir / f"{target_date.year}.{target_date.month}.{target_date.day:02d}.{suffix}")
-        candidates.append(base_dir / f"{target_date.year}.{target_date.month}.{target_date.day}.{suffix}")
-    return candidates
-
-
-def find_press_plan_file(target_date):
-    candidates = press_plan_candidates(target_date)
-    test_input_dir = Path(settings.TEST_INPUT_DIR)
-    for candidate in list(candidates):
-        candidates.append(test_input_dir / candidate.name)
-
-    for candidate in candidates:
-        try:
-            if candidate.exists():
-                return candidate
-        except OSError:
-            continue
-    return None
-
-
-def extract_codes_from_plan_excel(path_or_file, file_name=None):
+def extract_codes_from_plan_excel(path_or_file, sheet_name, file_name=None):
     name = file_name or str(path_or_file)
     suffix = Path(name).suffix.lower()
+    values = []
     if suffix == ".xls":
         if hasattr(path_or_file, "read"):
             workbook = xlrd.open_workbook(file_contents=path_or_file.read())
         else:
             workbook = xlrd.open_workbook(str(path_or_file))
-        worksheet = workbook.sheet_by_name("雛形")
-        values = []
-        for row_index in range(4, worksheet.nrows):
-            values.append(worksheet.cell_value(row_index, 6))
+        worksheet = workbook.sheet_by_name(sheet_name)
+        for row_index in range(3, 103):
+            val = worksheet.cell_value(row_index, 5)
+            if val:
+                values.append(val)
     else:
         workbook = load_workbook(path_or_file, read_only=True, data_only=True)
-        worksheet = workbook["雛形"]
-        values = [worksheet.cell(row=row, column=7).value for row in range(5, worksheet.max_row + 1)]
+        worksheet = workbook[sheet_name]
+        for row in range(4, 104):
+            val = worksheet.cell(row=row, column=6).value
+            if val:
+                values.append(val)
 
     codes = []
     for value in values:
-        if value is None:
-            continue
         codes.extend(find_code_candidates(str(value)))
     return codes
 
@@ -850,9 +829,8 @@ def import_master_csv(master_file=None, csv_path=None, inspection_folder_paths=N
 
 
 @transaction.atomic
-def import_plan_targets(target_date, scan_file=None, excel_file=None):
+def import_plan_targets(target_date, scan_file=None, excel_file=None, sheet_name=None):
     sources = []
-    missing_plan_file = False
     warning_summary = {
         "UNKNOWN_CODE": 0,
         "DUPLICATE_TARGET": 0,
@@ -892,7 +870,7 @@ def import_plan_targets(target_date, scan_file=None, excel_file=None):
         )
 
     if excel_file:
-        excel_codes = extract_codes_from_plan_excel(excel_file, excel_file.name)
+        excel_codes = extract_codes_from_plan_excel(excel_file, sheet_name, excel_file.name)
         _, added_count, duplicate_count = upsert_targets(target_date, excel_codes, "excel")
         warning_summary["DUPLICATE_TARGET"] += duplicate_count
         sources.append(
@@ -903,23 +881,6 @@ def import_plan_targets(target_date, scan_file=None, excel_file=None):
                 "duplicate_count": duplicate_count,
             }
         )
-    else:
-        default_plan = find_press_plan_file(target_date)
-        if default_plan:
-            excel_codes = extract_codes_from_plan_excel(default_plan)
-            _, added_count, duplicate_count = upsert_targets(target_date, excel_codes, "excel")
-            warning_summary["DUPLICATE_TARGET"] += duplicate_count
-            sources.append(
-                {
-                    "source": "excel",
-                    "path": str(default_plan),
-                    "read_count": len(excel_codes),
-                    "added_count": added_count,
-                    "duplicate_count": duplicate_count,
-                }
-            )
-        else:
-            missing_plan_file = True
 
     session, _ = InspectionSession.objects.get_or_create(target_date=target_date)
     warning_count = InspectionTargetWarning.objects.filter(target__session=session).count()
@@ -933,8 +894,6 @@ def import_plan_targets(target_date, scan_file=None, excel_file=None):
         "warning_summary": warning_summary,
         "sources": sources,
     }
-    if missing_plan_file:
-        result["missing_plan_file"] = True
     return result
 
 

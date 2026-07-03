@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Upload, Calendar, FileSpreadsheet, FileText, Loader2 } from 'lucide-react';
 
 interface ImportFormProps {
-  onImportStart: (targetDate: string, scanFile: File | null, excelFile: File | null) => Promise<void>;
+  onImportStart: (targetDate: string, scanFile: File | null, excelFile: File | null, sheetName: string) => Promise<void>;
   isLoading: boolean;
 }
 
@@ -19,6 +19,7 @@ export const ImportForm: React.FC<ImportFormProps> = ({ onImportStart, isLoading
   const [targetDate, setTargetDate] = useState<string>(getTodayString());
   const [scanFile, setScanFile] = useState<File | null>(null);
   const [excelFile, setExcelFile] = useState<File | null>(null);
+  const [sheetName, setSheetName] = useState<string>('');
   const [validationError, setValidationError] = useState<string | null>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -30,8 +31,13 @@ export const ImportForm: React.FC<ImportFormProps> = ({ onImportStart, isLoading
       return;
     }
 
+    if (excelFile && !sheetName.trim()) {
+      setValidationError('計画Excelファイルを指定する場合はシート名を入力してください。');
+      return;
+    }
+
     try {
-      await onImportStart(targetDate, scanFile, excelFile);
+      await onImportStart(targetDate, scanFile, excelFile, sheetName.trim());
     } catch (err) {
       console.error(err);
     }
@@ -126,6 +132,22 @@ export const ImportForm: React.FC<ImportFormProps> = ({ onImportStart, isLoading
                 </button>
               )}
             </div>
+          </div>
+
+          <div className="form-group">
+            <label className="form-label" htmlFor="sheet-name">
+              <FileSpreadsheet size={16} className="label-icon" />
+              シート名 <span className={excelFile ? 'required' : ''}>*</span>
+            </label>
+            <input
+              id="sheet-name"
+              type="text"
+              className="form-control"
+              placeholder="例: 計画"
+              value={sheetName}
+              onChange={(e) => setSheetName(e.target.value)}
+              disabled={isLoading}
+            />
           </div>
         </div>
 

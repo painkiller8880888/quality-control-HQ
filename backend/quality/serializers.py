@@ -121,6 +121,7 @@ class DailyReportGenerateRequestSerializer(serializers.Serializer):
 
 class PlanImportRequestSerializer(serializers.Serializer):
     target_date = serializers.DateField()
+    sheet_name = serializers.CharField(required=False, default="")
 
 
 class MasterImportRequestSerializer(serializers.Serializer):
