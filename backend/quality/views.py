@@ -29,6 +29,7 @@ from .models import (
     MachineAssignment,
     Master,
     MasterClass,
+    Structure,
 )
 from .serializers import (
     AppSettingSerializer,
@@ -915,3 +916,128 @@ class SeedMasterView(APIView):
             updated_count += 1
 
         return success_response(updated_count=updated_count)
+
+
+class InspectionFileOpenByCodeView(APIView):
+    def get(self, request):
+        code = request.query_params.get("code", "").strip().upper()
+        if not code:
+            return error_response("INVALID_REQUEST", "code is required.")
+
+        insp_file = InspectionFile.objects.filter(master__code=code).first()
+        if not insp_file:
+            return error_response("FILE_NOT_FOUND", "検査書ファイルが見つかりません")
+
+        file_path = insp_file.file_path
+        if not os.path.exists(file_path):
+            return error_response("FILE_NOT_FOUND", f"ファイルが存在しません: {file_path}")
+
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext in (".xls", ".xlsx", ".xlsm"):
+            os.startfile(file_path)
+            return success_response(message="ファイルを起動しました")
+
+        content_type = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
+        response = FileResponse(open(file_path, "rb"), content_type=content_type)
+        response["Content-Disposition"] = f'inline; filename="{os.path.basename(file_path)}"'
+        return response
+
+
+class InspectionFilePrintByCodeView(APIView):
+    def post(self, request):
+        code = request.query_params.get("code", "").strip().upper()
+        if not code:
+            return error_response("INVALID_REQUEST", "code is required.")
+
+        insp_file = InspectionFile.objects.filter(master__code=code).first()
+        if not insp_file:
+            return error_response("FILE_NOT_FOUND", "検査書ファイルが見つかりません")
+
+        file_path = insp_file.file_path
+        if not os.path.exists(file_path):
+            return error_response("FILE_NOT_FOUND", f"ファイルが存在しません: {file_path}")
+
+        try:
+            os.startfile(file_path, "print")
+            return success_response(message="印刷を開始しました")
+        except Exception as exc:
+            return error_response("PRINT_FAILED", str(exc), status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class StructureView(APIView):
+    def get(self, request):
+        code = request.query_params.get("code", "").strip().upper()
+        if not code:
+            return error_response("INVALID_REQUEST", "code query parameter is required.")
+
+        all_edges: list[Structure] = []
+        visited: set[str] = set()
+        queue = [code]
+
+        while queue:
+            current = queue.pop(0)
+            if current in visited:
+                continue
+            visited.add(current)
+            records = list(Structure.objects.filter(parent_code=current))
+            for r in records:
+                all_edges.append(r)
+                if r.child_code not in visited:
+                    queue.append(r.child_code)
+
+        codes = {code}
+        for r in all_edges:
+            codes.add(r.parent_code)
+            codes.add(r.child_code)
+
+        has_file_codes: set[str] = set(
+            InspectionFile.objects.filter(master__code__in=list(codes))
+            .values_list("master__code", flat=True)
+        )
+
+        master_map: dict[str, dict] = {}
+        for m in Master.objects.filter(code__in=list(codes)):
+            master_map[m.code] = {
+                "name": m.name,
+                "department": m.department,
+                "node_type_1": m.node_type_1,
+                "node_type_2": m.node_type_2,
+                "has_inspection_file": m.code in has_file_codes,
+            }
+
+        EMPTY = {"name": "", "department": "", "node_type_1": "", "node_type_2": "", "has_inspection_file": False}
+        root_info = master_map.get(code, {**EMPTY, "name": code})
+
+        def get_info(c: str) -> dict:
+            return master_map.get(c, {**EMPTY, "name": c})
+
+        edges = []
+        for r in all_edges:
+            p = get_info(r.parent_code)
+            c = get_info(r.child_code)
+            edges.append({
+                "parent_code": r.parent_code,
+                "child_code": r.child_code,
+                "parent_name": p["name"],
+                "child_name": c["name"],
+                "parent_department": p["department"],
+                "parent_node_type_1": p["node_type_1"],
+                "parent_node_type_2": p["node_type_2"],
+                "parent_has_inspection_file": p["has_inspection_file"],
+                "child_department": c["department"],
+                "child_node_type_1": c["node_type_1"],
+                "child_node_type_2": c["node_type_2"],
+                "child_has_inspection_file": c["has_inspection_file"],
+                "level": r.level,
+                "quantity": float(r.quantity) if r.quantity is not None else None,
+            })
+
+        return Response({
+            "root_code": code,
+            "root_name": root_info["name"],
+            "root_department": root_info["department"],
+            "root_node_type_1": root_info["node_type_1"],
+            "root_node_type_2": root_info["node_type_2"],
+            "root_has_inspection_file": root_info["has_inspection_file"],
+            "edges": edges,
+        })

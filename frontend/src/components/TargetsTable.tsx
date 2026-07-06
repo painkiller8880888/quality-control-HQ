@@ -1,8 +1,9 @@
 import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import type { InspectionTarget } from '../types';
-import { AlertTriangle, ChevronDown, ChevronUp, FileCheck, CheckCircle2, Package, Database, ArrowUpDown, ArrowUp, ArrowDown, EyeOff, Plus, Printer, FileText, FileSpreadsheet, Bug } from 'lucide-react';
+import { AlertTriangle, ChevronDown, ChevronUp, FileCheck, CheckCircle2, Package, Database, ArrowUpDown, ArrowUp, ArrowDown, EyeOff, Plus, Printer, FileText, FileSpreadsheet, Bug, ListTree } from 'lucide-react';
 import { ManualAddModal } from './ManualAddModal';
 import { SpecialAddModal } from './SpecialAddModal';
+import { AssemblyStructureModal } from './AssemblyStructureModal';
 
 interface CheckUpdateItem {
   code: string;
@@ -504,6 +505,7 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
   };
 
   const [printingTargetId, setPrintingTargetId] = useState<number | null>(null);
+  const [structureModalCode, setStructureModalCode] = useState<string | null>(null);
 
   const handleOpenFile = useCallback(async (targetId: number) => {
     const res = await fetch(`/api/inspection-targets/${targetId}/file/`);
@@ -639,6 +641,13 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
             selectedDate={selectedDate}
             onClose={() => setShowSpecialAddModal(false)}
             onAdded={onRefresh}
+          />
+        )}
+        {structureModalCode && (
+          <AssemblyStructureModal
+            code={structureModalCode}
+            name={targets.find(t => t.code === structureModalCode)?.name ?? ''}
+            onClose={() => setStructureModalCode(null)}
           />
         )}
       </div>
@@ -846,25 +855,37 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
                           </div>
                         )}
 
-                        {target.has_inspection_file && (
-                          <div className="target-detail-actions">
-                            <button
-                              className="btn btn-outline btn-sm"
-                              onClick={(e) => { e.stopPropagation(); handleOpenFile(target.target_id); }}
-                            >
-                              <FileText size={14} />
-                              検査書表示
-                            </button>
-                            <button
-                              className="btn btn-outline btn-sm"
-                              disabled={printingTargetId === target.target_id}
-                              onClick={(e) => { e.stopPropagation(); handlePrintFile(target.target_id); }}
-                            >
-                              <Printer size={14} />
-                              {printingTargetId === target.target_id ? '印刷中...' : '印刷'}
-                            </button>
-                          </div>
-                        )}
+                        <div className="target-detail-actions">
+                          {target.has_inspection_file && (
+                            <>
+                              <button
+                                className="btn btn-outline btn-sm"
+                                onClick={(e) => { e.stopPropagation(); handleOpenFile(target.target_id); }}
+                              >
+                                <FileText size={14} />
+                                検査書表示
+                              </button>
+                              <button
+                                className="btn btn-outline btn-sm"
+                                disabled={printingTargetId === target.target_id}
+                                onClick={(e) => { e.stopPropagation(); handlePrintFile(target.target_id); }}
+                              >
+                                <Printer size={14} />
+                                {printingTargetId === target.target_id ? '印刷中...' : '印刷'}
+                              </button>
+                            </>
+                          )}
+                          <button
+                            className="btn btn-outline btn-sm"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setStructureModalCode(target.code);
+                            }}
+                          >
+                            <ListTree size={14} />
+                            組立構成図
+                          </button>
+                        </div>
                       </div>
                     </td>
                   </tr>
