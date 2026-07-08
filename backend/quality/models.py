@@ -45,6 +45,24 @@ class MasterClass(models.Model):
         return f"{self.master.code} -> {self.class_master.class_no if self.class_master else '-'}"
 
 
+class SpecialInspectionClass9(models.Model):
+    master = models.OneToOneField(
+        Master,
+        on_delete=models.CASCADE,
+        related_name="special_inspection_class9",
+    )
+    inspection_sheet_path = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Special Inspection Class 9"
+        verbose_name_plural = "Special Inspection Class 9"
+
+    def __str__(self):
+        return f"{self.master.code} (class9)"
+
+
 class AppSetting(models.Model):
     csv_path = models.TextField(blank=True, default="")
     inspection_folder_paths = models.JSONField(default=list, blank=True)

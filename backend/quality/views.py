@@ -29,6 +29,7 @@ from .models import (
     MachineAssignment,
     Master,
     MasterClass,
+    SpecialInspectionClass9,
     Structure,
 )
 from .serializers import (
@@ -837,18 +838,15 @@ class LayoutObjectTypeColorUpdateView(APIView):
 
 class Class9SettingsView(APIView):
     def get(self, request):
-        class9 = ClassMaster.objects.filter(class_no=9).first()
-        if not class9:
-            return Response([])
-        qs = MasterClass.objects.filter(class_master=class9).select_related("master")
+        qs = SpecialInspectionClass9.objects.select_related("master").all()
         return Response([
             {
-                "id": mc.id,
-                "code": mc.master.code,
-                "name": mc.master.name,
-                "inspection_sheet_path": mc.inspection_sheet_path,
+                "id": sic.id,
+                "code": sic.master.code,
+                "name": sic.master.name,
+                "inspection_sheet_path": sic.inspection_sheet_path,
             }
-            for mc in qs
+            for sic in qs
         ])
 
     @transaction.atomic
@@ -862,20 +860,17 @@ class Class9SettingsView(APIView):
         if not master:
             return error_response("MASTER_NOT_FOUND", f"コード '{code}' が見つかりません。", status.HTTP_404_NOT_FOUND)
 
-        class9 = ClassMaster.objects.get(class_no=9)
-        mc, created = MasterClass.objects.update_or_create(
+        sic, created = SpecialInspectionClass9.objects.update_or_create(
             master=master,
-            class_master=class9,
             defaults={
-                "class_master": class9,
                 "inspection_sheet_path": inspection_sheet_path,
             },
         )
         return Response({
-            "id": mc.id,
+            "id": sic.id,
             "code": master.code,
             "name": master.name,
-            "inspection_sheet_path": mc.inspection_sheet_path,
+            "inspection_sheet_path": sic.inspection_sheet_path,
         }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
     def delete(self, request, pk=None):
@@ -883,8 +878,8 @@ class Class9SettingsView(APIView):
             pk = request.query_params.get("id")
         if not pk:
             return error_response("INVALID_REQUEST", "id is required.")
-        mc = get_object_or_404(MasterClass, id=pk)
-        mc.delete()
+        sic = get_object_or_404(SpecialInspectionClass9, id=pk)
+        sic.delete()
         return success_response()
 
 
@@ -1041,3 +1036,26 @@ class StructureView(APIView):
             "root_has_inspection_file": root_info["has_inspection_file"],
             "edges": edges,
         })
+
+
+class StructureReverseRootsView(APIView):
+    def get(self, request):
+        code = request.query_params.get("code", "").strip().upper()
+        if not code:
+            return error_response("INVALID_REQUEST", "code query parameter is required.")
+
+        root_codes = (
+            Structure.objects.filter(db_models.Q(child_code=code) | db_models.Q(parent_code=code))
+            .exclude(root_code=code)
+            .values_list("root_code", flat=True)
+            .distinct()
+        )
+        roots = []
+        for root_code in root_codes:
+            master = Master.objects.filter(code=root_code).first()
+            roots.append({
+                "root_code": root_code,
+                "root_name": master.name if master else root_code,
+            })
+        roots.sort(key=lambda r: r["root_code"])
+        return Response({"code": code, "roots": roots})

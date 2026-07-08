@@ -48,7 +48,7 @@ interface TreeNode {
 interface AssemblyStructureModalProps {
   code: string;
   name: string;
-  onClose: () => void;
+  onClose?: () => void;
 }
 
 const GROUP_COLORS = ['var(--ast-group-0)', 'var(--ast-group-1)', 'var(--ast-group-2)'];
@@ -158,12 +158,44 @@ function computeLineInfo(rows: { node: TreeNode; rowKey: string }[]): LineInfo[]
   return result;
 }
 
-export const AssemblyStructureModal: React.FC<AssemblyStructureModalProps> = ({ code, name, onClose }) => {
+interface ReverseRoot {
+  root_code: string;
+  root_name: string;
+}
+
+export const AssemblyStructureView: React.FC<AssemblyStructureModalProps> = ({ code, name, onClose }) => {
   const [tree, setTree] = useState<TreeNode | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [printingCode, setPrintingCode] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<'forward' | 'reverse'>('forward');
+  const [reverseRoots, setReverseRoots] = useState<ReverseRoot[]>([]);
+  const [selectedRoot, setSelectedRoot] = useState<string>('');
+  const [highlightCode, setHighlightCode] = useState<string | null>(null);
+
+  const loadStructure = useCallback(async (rootCode: string, highlight: string | null) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/structure/?code=${encodeURIComponent(rootCode)}`);
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.message || '構成データの取得に失敗しました');
+      }
+      const data: StructureData = await res.json();
+      const t = buildTree(data);
+      setTree(t);
+      setHighlightCode(highlight);
+      if (t) {
+        setExpanded(new Set([t.code]));
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '構成データの取得に失敗しました');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -183,8 +215,8 @@ export const AssemblyStructureModal: React.FC<AssemblyStructureModalProps> = ({ 
         if (t) {
           setExpanded(new Set([t.code]));
         }
-      } catch (err: any) {
-        if (!cancelled) setError(err.message || '構成データの取得に失敗しました');
+      } catch (err) {
+        if (!cancelled) setError(err instanceof Error ? err.message : '構成データの取得に失敗しました');
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -192,6 +224,48 @@ export const AssemblyStructureModal: React.FC<AssemblyStructureModalProps> = ({ 
     fetchStructure();
     return () => { cancelled = true; };
   }, [code]);
+
+  const handleViewModeChange = useCallback(async (mode: 'forward' | 'reverse') => {
+    setViewMode(mode);
+    if (mode === 'forward') {
+      setReverseRoots([]);
+      setSelectedRoot('');
+      setHighlightCode(null);
+      loadStructure(code, null);
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/structure/reverse-roots/?code=${encodeURIComponent(code)}`);
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.message || '逆展開ルートの取得に失敗しました');
+      }
+      const data: { roots: ReverseRoot[] } = await res.json();
+      setReverseRoots(data.roots);
+      if (data.roots.length > 0) {
+        const first = data.roots[0].root_code;
+        setSelectedRoot(first);
+        loadStructure(first, code);
+      } else {
+        setTree(null);
+        setSelectedRoot('');
+        setHighlightCode(null);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '逆展開ルートの取得に失敗しました');
+    } finally {
+      setLoading(false);
+    }
+  }, [code, loadStructure]);
+
+  const handleRootSelect = useCallback((rootCode: string) => {
+    setSelectedRoot(rootCode);
+    if (rootCode) {
+      loadStructure(rootCode, code);
+    }
+  }, [code, loadStructure]);
 
   const visibleRows = useMemo<VisibleRow[]>(() => {
     if (!tree) return [];
@@ -275,22 +349,50 @@ export const AssemblyStructureModal: React.FC<AssemblyStructureModalProps> = ({ 
     return parts.join('>');
   };
 
-  return createPortal(
-    <div className="modal-overlay ast-modal-overlay" onClick={onClose}>
-      <div className="ast-modal-content" onClick={e => e.stopPropagation()}>
-        <div className="modal-header">
-          <h3>
-            <Package size={18} />
-            組立構成図
-          </h3>
+  return (
+    <div className="ast-modal-content ast-view-content" onClick={e => e.stopPropagation()}>
+      <div className="modal-header">
+        <h3>
+          <Package size={18} />
+          組立構成図
+        </h3>
+        {onClose && (
           <button className="btn btn-secondary btn-sm" onClick={onClose}>
             <X size={16} />
           </button>
-        </div>
+        )}
+      </div>
 
         <div className="ast-modal-body">
           <div className="ast-target-label">
             対象：<strong>{code}</strong> {name && <span className="text-muted">({name})</span>}
+            <span className="ast-view-toggle">
+              <button
+                className={`btn btn-ghost btn-xs ${viewMode === 'forward' ? 'btn-active' : ''}`}
+                onClick={() => handleViewModeChange('forward')}
+              >
+                正展開
+              </button>
+              <button
+                className={`btn btn-ghost btn-xs ${viewMode === 'reverse' ? 'btn-active' : ''}`}
+                onClick={() => handleViewModeChange('reverse')}
+              >
+                逆展開
+              </button>
+            </span>
+            {viewMode === 'reverse' && reverseRoots.length > 0 && (
+              <select
+                className="ast-reverse-select"
+                value={selectedRoot}
+                onChange={e => handleRootSelect(e.target.value)}
+              >
+                {reverseRoots.map(r => (
+                  <option key={r.root_code} value={r.root_code}>
+                    {r.root_code} {r.root_name ? `(${r.root_name})` : ''}
+                  </option>
+                ))}
+              </select>
+            )}
           </div>
 
           <div className="ast-toolbar">
@@ -318,8 +420,9 @@ export const AssemblyStructureModal: React.FC<AssemblyStructureModalProps> = ({ 
                   {visibleRows.map(({ node, l2Index, rowKey, line }) => {
                     const isExpanded = expanded.has(node.code);
                     const hasChildren = node.children.length > 0;
+                    const isTarget = highlightCode !== null && node.code === highlightCode;
                     const groupColorIndex = l2Index % GROUP_COLORS.length;
-                    const bgColor = node.level >= 2 ? GROUP_COLORS[groupColorIndex] : undefined;
+                    const bgColor = !isTarget && node.level >= 2 ? GROUP_COLORS[groupColorIndex] : undefined;
 
                     let IconComponent;
                     if (node.level === 1) IconComponent = Crown;
@@ -331,7 +434,7 @@ export const AssemblyStructureModal: React.FC<AssemblyStructureModalProps> = ({ 
                     return (
                       <div
                         key={rowKey}
-                        className="ast-node-row"
+                        className={`ast-node-row${isTarget ? ' ast-target-node' : ''}`}
                         style={{ backgroundColor: bgColor }}
                       >
                         <span className="ast-tree-lines" onClick={() => hasChildren && toggleExpand(node.code)}>
@@ -408,6 +511,12 @@ export const AssemblyStructureModal: React.FC<AssemblyStructureModalProps> = ({ 
                 </div>
               ))}
               <div className="ast-legend-divider" />
+              <div className="ast-legend-title">逆展開</div>
+              <div className="ast-legend-item">
+                <span className="ast-color-swatch ast-swatch-target" />
+                <span>対象ノード（{code}）</span>
+              </div>
+              <div className="ast-legend-divider" />
               <div className="ast-legend-title">操作</div>
               <div className="ast-legend-item">
                 <ChevronRight size={12} /> <span>クリックで展開</span>
@@ -418,7 +527,14 @@ export const AssemblyStructureModal: React.FC<AssemblyStructureModalProps> = ({ 
             </div>
           </div>
         </div>
-      </div>
+    </div>
+  );
+};
+
+export const AssemblyStructureModal: React.FC<AssemblyStructureModalProps> = ({ code, name, onClose }) => {
+  return createPortal(
+    <div className="modal-overlay ast-modal-overlay" onClick={onClose}>
+      <AssemblyStructureView code={code} name={name} onClose={onClose} />
     </div>,
     document.body
   );

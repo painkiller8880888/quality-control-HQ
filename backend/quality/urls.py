@@ -27,6 +27,7 @@ from .views import (
     SeedMasterView,
     SettingsView,
     SingleHistoryView,
+    StructureReverseRootsView,
     StructureView,
     TargetInspectionFilePrintView,
     TargetInspectionFileView,
@@ -65,6 +66,7 @@ urlpatterns = [
     path("class9-settings/", Class9SettingsView.as_view()),
     path("class9-settings/<int:pk>/", Class9SettingsView.as_view()),
     path("structure/", StructureView.as_view()),
+    path("structure/reverse-roots/", StructureReverseRootsView.as_view()),
     path("inspection-file/open/", InspectionFileOpenByCodeView.as_view()),
     path("inspection-file/print/", InspectionFilePrintByCodeView.as_view()),
 ]

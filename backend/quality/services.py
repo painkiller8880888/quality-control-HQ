@@ -26,6 +26,7 @@ from .models import (
     MachineAssignment,
     Master,
     MasterClass,
+    SpecialInspectionClass9,
     Structure,
 )
 
@@ -1193,8 +1194,9 @@ def issue_inspection_sheets(target_date: date_type | None = None):
             class_map[mc.master_id] = cn
         if cn in (1, 6, 7):
             sheet_target_master_ids.add(mc.master_id)
-        if cn == 9 and mc.inspection_sheet_path:
-            class9_master_map[mc.master_id] = mc.inspection_sheet_path
+    for sic in SpecialInspectionClass9.objects.filter(master_id__in=master_ids):
+        if sic.inspection_sheet_path:
+            class9_master_map[sic.master_id] = sic.inspection_sheet_path
 
     file_map: dict[int, str] = {}
     for fi in InspectionFile.objects.filter(master_id__in=master_ids):
@@ -1205,7 +1207,7 @@ def issue_inspection_sheets(target_date: date_type | None = None):
     target_history_ids: list[int] = []
     class9_history_ids: list[int] = []
     for h in qs:
-        if h.class_override == 9 or h.master_id in class9_master_map:
+        if h.class_override == 9:
             class9_history_ids.append(h.history_id)
             continue
         if h.master_id not in sheet_target_master_ids:
@@ -1529,7 +1531,7 @@ def sync_all_master_classes():
                 )
                 updated += 1
                 continue
-        MasterClass.objects.filter(master=master).exclude(class_master__class_no=9).delete()
+        MasterClass.objects.filter(master=master).delete()
         updated += 1
     return updated
 

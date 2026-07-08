@@ -74,6 +74,8 @@
   --ast-group-1: rgba(16, 185, 129, 0.15);
   --ast-group-2: rgba(168, 85, 247, 0.15);
 
+  --ast-target-node: rgba(251, 191, 36, 0.28);
+
   --radius-sm: 8px;
   --radius-md: 12px;
   --radius-lg: 16px;
@@ -145,6 +147,8 @@
   --ast-group-0: #EEF5FF;
   --ast-group-1: #F5FAEE;
   --ast-group-2: #F7F2FF;
+
+  --ast-target-node: #FFF3CD;
 }
 
 /* ── Solarized Light Theme ── */
@@ -211,6 +215,8 @@
   --ast-group-0: rgba(38, 139, 210, 0.12);
   --ast-group-1: rgba(133, 153, 0, 0.12);
   --ast-group-2: rgba(211, 54, 130, 0.12);
+
+  --ast-target-node: rgba(181, 137, 0, 0.18);
 }
 
 /* ── Solarized Dark Theme ── */
@@ -276,6 +282,8 @@
   --ast-group-0: rgba(38, 139, 210, 0.2);
   --ast-group-1: rgba(133, 153, 0, 0.2);
   --ast-group-2: rgba(108, 113, 196, 0.2);
+
+  --ast-target-node: rgba(181, 137, 0, 0.28);
 }
 
 /* Global resets */
@@ -3240,6 +3248,32 @@ button.editor-object {
   color: var(--text-primary);
 }
 
+.ast-view-toggle {
+  display: inline-flex;
+  gap: 4px;
+  margin-left: 12px;
+}
+
+.ast-view-toggle .btn {
+  border-radius: 6px;
+}
+
+.ast-reverse-select {
+  margin-left: 12px;
+  padding: 3px 6px;
+  font-size: 0.8125rem;
+  border-radius: 6px;
+  border: 1px solid var(--card-border);
+  background: var(--container-bg-secondary);
+  color: var(--text-primary);
+  max-width: 280px;
+}
+
+.ast-node-row.ast-target-node {
+  background-color: var(--ast-target-node) !important;
+  font-weight: 600;
+}
+
 .ast-toolbar {
   display: flex;
   gap: 8px;
@@ -3256,6 +3290,12 @@ button.editor-object {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+
+.btn-ghost.btn-active {
+  background: var(--color-primary);
+  border-color: var(--color-primary);
+  color: #fff;
+}
   font-family: var(--font-sans);
   font-weight: 500;
   transition: var(--transition-smooth);
@@ -3509,6 +3549,8 @@ button.editor-object {
 .ast-swatch-1 { background-color: var(--ast-group-1); }
 .ast-swatch-2 { background-color: var(--ast-group-2); }
 
+.ast-swatch-target { background-color: var(--ast-target-node); border: 1px solid var(--card-border); }
+
 .ast-legend-divider {
   height: 1px;
   background: var(--card-border);
@@ -3526,5 +3568,83 @@ button.editor-object {
 
 .ast-error {
   color: var(--color-danger);
+}
+
+.ast-view-content {
+  min-width: unset;
+  max-width: unset;
+  width: 100%;
+  max-height: unset;
+  height: 100%;
+  box-shadow: none;
+  border-radius: 0;
+  padding: 0;
+  animation: none;
+}
+
+.ast-tab-container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  gap: 12px;
+  padding: 16px;
+}
+
+.ast-tab-input-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+  padding: 12px 16px;
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius-lg);
+}
+
+.ast-tab-input-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ast-tab-input-group label {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+
+.ast-tab-input-group input {
+  min-width: 220px;
+  padding: 7px 10px;
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius-sm);
+  background: var(--input-bg);
+  color: var(--text-primary);
+  font-size: 0.875rem;
+}
+
+.ast-tab-input-with-icon {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.ast-tab-input-icon {
+  position: absolute;
+  left: 10px;
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+.ast-tab-input-with-icon input {
+  padding-left: 32px;
+}
+
+.ast-tab-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  color: var(--text-muted);
+  font-size: 0.9375rem;
 }
 

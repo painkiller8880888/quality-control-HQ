@@ -7,8 +7,9 @@ import { TargetsTable } from './components/TargetsTable';
 import { LayoutList } from './components/LayoutList';
 import { FactoryMapCreator } from './components/FactoryMapCreator';
 import { MachineMasterPanel } from './components/MachineMasterPanel';
+import { AssemblyStructureTab } from './components/AssemblyStructureTab';
 import type { Job, InspectionTarget, ApiError, LayoutSummary } from './types';
-import { ShieldAlert, RefreshCw, Layers, Map as MapIcon, Cpu, Settings, PanelLeftClose, PanelLeftOpen, Sun, Moon, Palette, Upload, Activity, CheckCircle2 } from 'lucide-react';
+import { ShieldAlert, RefreshCw, Layers, Map as MapIcon, Cpu, Settings, PanelLeftClose, PanelLeftOpen, Sun, Moon, Palette, Upload, Activity, CheckCircle2, Package } from 'lucide-react';
 
 type ThemeMode = 'normal' | 'dark' | 'solarized-light' | 'solarized-dark';
 
@@ -27,7 +28,7 @@ const getNextTheme = (current: ThemeMode): ThemeMode => {
 };
 
 export const App: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'mapCreator' | 'machineMaster' | 'settings'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'structure' | 'mapCreator' | 'machineMaster' | 'settings'>('dashboard');
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(false);
   const [sidebarSegment, setSidebarSegment] = useState<'import' | 'status'>('import');
   const [selectedDate, setSelectedDate] = useState<string>('');
@@ -439,6 +440,14 @@ export const App: React.FC = () => {
           </button>
           <button
             type="button"
+            className={`app-tab ${activeTab === 'structure' ? 'active' : ''}`}
+            onClick={() => setActiveTab('structure')}
+          >
+            <Package size={16} />
+            組立構成図
+          </button>
+          <button
+            type="button"
             className={`app-tab ${activeTab === 'mapCreator' ? 'active' : ''}`}
             onClick={() => setActiveTab('mapCreator')}
           >
@@ -475,7 +484,7 @@ export const App: React.FC = () => {
         </div>
       </header>
 
-      <main className={`app-main ${activeTab === 'mapCreator' || activeTab === 'settings' || activeTab === 'machineMaster' ? 'scrollable' : ''}`}>
+      <main className={`app-main ${activeTab === 'mapCreator' || activeTab === 'settings' || activeTab === 'machineMaster' || activeTab === 'structure' ? 'scrollable' : ''}`}>
 
         {successMessage && (
           <div className="card success-card-global">
@@ -496,7 +505,9 @@ export const App: React.FC = () => {
           </div>
         )}
 
-        {activeTab === 'dashboard' ? (
+        {activeTab === 'structure' ? (
+          <AssemblyStructureTab />
+        ) : activeTab === 'dashboard' ? (
           <div className={`dashboard-grid ${isSidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
             <aside className={`dashboard-sidebar ${isSidebarCollapsed ? 'collapsed' : ''}`}>
               <div className="sidebar-panel-card">
