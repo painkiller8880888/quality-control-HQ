@@ -16,6 +16,7 @@
   
   --card-bg: rgba(30, 41, 59, 0.7);
   --card-bg-hover: rgba(30, 41, 59, 0.85);
+  --modal-bg: #1e293b;
   --card-border: rgba(255, 255, 255, 0.08);
   --card-border-active: rgba(99, 102, 241, 0.4);
 
@@ -69,9 +70,9 @@
   --container-bg-secondary: rgba(15, 23, 42, 0.4);
   --container-bg-secondary-hover: rgba(15, 23, 42, 0.6);
 
-  --ast-group-0: rgba(99, 102, 241, 0.05);
-  --ast-group-1: rgba(16, 185, 129, 0.05);
-  --ast-group-2: rgba(168, 85, 247, 0.05);
+  --ast-group-0: rgba(99, 102, 241, 0.15);
+  --ast-group-1: rgba(16, 185, 129, 0.15);
+  --ast-group-2: rgba(168, 85, 247, 0.15);
 
   --radius-sm: 8px;
   --radius-md: 12px;
@@ -87,6 +88,7 @@
   
   --card-bg: rgba(255, 255, 255, 0.85);
   --card-bg-hover: rgba(255, 255, 255, 0.95);
+  --modal-bg: #ffffff;
   --card-border: rgba(15, 23, 42, 0.08);
   --card-border-active: rgba(99, 102, 241, 0.4);
 
@@ -152,6 +154,7 @@
   
   --card-bg: rgba(255, 255, 255, 0.75);
   --card-bg-hover: rgba(255, 255, 255, 0.9);
+  --modal-bg: #fdf6e3;
   --card-border: rgba(0, 0, 0, 0.1);
   --card-border-active: rgba(38, 139, 210, 0.5);
 
@@ -205,9 +208,9 @@
   --container-bg-secondary: #eee8d5;
   --container-bg-secondary-hover: #e4ddcb;
 
-  --ast-group-0: #fdf6e3;
-  --ast-group-1: #eee8d5;
-  --ast-group-2: #fdf6e3;
+  --ast-group-0: rgba(38, 139, 210, 0.12);
+  --ast-group-1: rgba(133, 153, 0, 0.12);
+  --ast-group-2: rgba(211, 54, 130, 0.12);
 }
 
 /* ── Solarized Dark Theme ── */
@@ -270,9 +273,9 @@
   --container-bg-secondary: #073642;
   --container-bg-secondary-hover: rgba(0, 43, 54, 0.65);
 
-  --ast-group-0: rgba(38, 139, 210, 0.08);
-  --ast-group-1: rgba(133, 153, 0, 0.08);
-  --ast-group-2: rgba(108, 113, 196, 0.08);
+  --ast-group-0: rgba(38, 139, 210, 0.2);
+  --ast-group-1: rgba(133, 153, 0, 0.2);
+  --ast-group-2: rgba(108, 113, 196, 0.2);
 }
 
 /* Global resets */
@@ -1110,6 +1113,67 @@ body {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+
+.table-card-actions .btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  max-width: 140px;
+}
+
+.table-card-actions .btn span,
+.table-card-actions .btn > :not(svg) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.table-card-actions.collapsed .btn {
+  padding: 8px;
+  justify-content: center;
+  gap: 0;
+}
+.table-card-actions.collapsed .btn span {
+  display: none;
+}
+
+.btn-issue {
+  background: linear-gradient(135deg, #16a34a, #15803d);
+  color: #ffffff;
+  box-shadow: 0 4px 14px rgba(22, 163, 74, 0.3);
+}
+
+.btn-issue:hover:not(:disabled) {
+  background: linear-gradient(135deg, #15803d, #166534);
+  box-shadow: 0 6px 20px rgba(22, 163, 74, 0.4);
+  transform: translateY(-1px);
+}
+
+.btn-issue:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+.btn-report {
+  background: linear-gradient(135deg, #eab308, #ca8a04);
+  color: #ffffff;
+  box-shadow: 0 4px 14px rgba(234, 179, 8, 0.3);
+}
+
+.btn-report:hover:not(:disabled) {
+  background: linear-gradient(135deg, #ca8a04, #a16207);
+  box-shadow: 0 6px 20px rgba(234, 179, 8, 0.4);
+  transform: translateY(-1px);
+}
+
+.btn-report:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  box-shadow: none;
 }
 
 .hide-count-label {
@@ -3147,7 +3211,7 @@ button.editor-object {
   display: flex;
   flex-direction: column;
   animation: scaleIn 0.15s ease;
-  background: var(--card-bg);
+  background: var(--modal-bg);
   border: 1px solid var(--card-border);
   border-radius: var(--radius-lg);
   padding: 20px;
@@ -3363,13 +3427,8 @@ button.editor-object {
 .ast-node-actions {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 4px;
   flex-shrink: 0;
-  opacity: 0;
-  transition: opacity 0.12s ease;
-}
-
-.ast-node-row:hover .ast-node-actions {
   opacity: 1;
 }
 
@@ -3377,18 +3436,18 @@ button.editor-object {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 20px;
-  height: 20px;
-  border: none;
-  background: transparent;
-  color: var(--text-muted);
-  border-radius: 3px;
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--card-border);
+  background: var(--container-bg-secondary);
+  color: var(--text-secondary);
+  border-radius: 4px;
   cursor: pointer;
   transition: var(--transition-smooth);
 }
 
 .ast-file-btn:hover {
-  background: var(--container-bg-secondary);
+  background: var(--card-border);
   color: var(--color-primary);
 }
 

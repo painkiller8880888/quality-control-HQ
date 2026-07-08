@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { createPortal } from 'react-dom';
 import { X, ChevronRight, ChevronDown, Crown, Folder, FileText, Package, Maximize2, Minimize2, Printer } from 'lucide-react';
 
 interface StructureEdge {
@@ -274,8 +275,8 @@ export const AssemblyStructureModal: React.FC<AssemblyStructureModalProps> = ({ 
     return parts.join('>');
   };
 
-  return (
-    <div className="modal-overlay" onClick={onClose}>
+  return createPortal(
+    <div className="modal-overlay ast-modal-overlay" onClick={onClose}>
       <div className="ast-modal-content" onClick={e => e.stopPropagation()}>
         <div className="modal-header">
           <h3>
@@ -318,7 +319,7 @@ export const AssemblyStructureModal: React.FC<AssemblyStructureModalProps> = ({ 
                     const isExpanded = expanded.has(node.code);
                     const hasChildren = node.children.length > 0;
                     const groupColorIndex = l2Index % GROUP_COLORS.length;
-                    const bgColor = node.level === 2 ? GROUP_COLORS[groupColorIndex] : undefined;
+                    const bgColor = node.level >= 2 ? GROUP_COLORS[groupColorIndex] : undefined;
 
                     let IconComponent;
                     if (node.level === 1) IconComponent = Crown;
@@ -418,6 +419,7 @@ export const AssemblyStructureModal: React.FC<AssemblyStructureModalProps> = ({ 
           </div>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 };

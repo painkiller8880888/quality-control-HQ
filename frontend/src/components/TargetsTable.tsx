@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import type { InspectionTarget } from '../types';
-import { AlertTriangle, ChevronDown, ChevronUp, FileCheck, CheckCircle2, Package, Database, ArrowUpDown, ArrowUp, ArrowDown, EyeOff, Plus, Printer, FileText, FileSpreadsheet, Bug, ListTree } from 'lucide-react';
+import { AlertTriangle, ChevronDown, ChevronUp, FileCheck, CheckCircle2, Package, Database, ArrowUpDown, ArrowUp, ArrowDown, EyeOff, Plus, Printer, FileText, Bug, ListTree } from 'lucide-react';
 import { ManualAddModal } from './ManualAddModal';
 import { SpecialAddModal } from './SpecialAddModal';
 import { AssemblyStructureModal } from './AssemblyStructureModal';
@@ -75,6 +75,28 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
   const [isIssuing, setIsIssuing] = useState(false);
   const [isIssuingDailyReport, setIsIssuingDailyReport] = useState(false);
   const [isWritingHistory, setIsWritingHistory] = useState(false);
+  const [isPaneCollapsed, setIsPaneCollapsed] = useState(false);
+  const observerRef = useRef<ResizeObserver | null>(null);
+  const paneRef = useCallback((node: HTMLDivElement | null) => {
+    if (observerRef.current) {
+      observerRef.current.disconnect();
+      observerRef.current = null;
+    }
+    if (node) {
+      const observer = new ResizeObserver((entries) => {
+        for (let entry of entries) {
+          // Change layout if the pane width is 750px or less
+          if (entry.contentRect.width <= 750) {
+            setIsPaneCollapsed(true);
+          } else {
+            setIsPaneCollapsed(false);
+          }
+        }
+      });
+      observer.observe(node);
+      observerRef.current = observer;
+    }
+  }, []);
 
   useEffect(() => {
     if (highlightedTargetId === null) return;
@@ -572,13 +594,13 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
   );
 
   return (
-    <div className="card table-card">
+    <div className="card table-card" ref={paneRef}>
       <div className="table-card-header">
         <h2 className="card-title">
           <FileCheck className="icon-title" size={20} />
-          検査対象一覧 (全 {targets.length} 件)
+           検査対象一覧
         </h2>
-        <div className="table-card-actions">
+        <div className={`table-card-actions ${isPaneCollapsed ? 'collapsed' : ''}`}>
           {hideChecked.size > 0 && (
             <span className="hide-count-label">{hideChecked.size}件選択中</span>
           )}
@@ -586,47 +608,47 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
             className="btn btn-primary btn-sm"
             onClick={() => setShowManualAddModal(true)}
           >
-            <Plus size={14} />
-            手動追加
+            <Plus size={18} />
+            <span>追加</span>
           </button>
           <button
             className="btn btn-danger btn-sm"
             onClick={() => setShowSpecialAddModal(true)}
           >
-            <Bug size={14} />
-            特殊検査追加
+            <Bug size={18} />
+            <span>特殊追加</span>
           </button>
           <button
-            className="btn btn-outline btn-sm"
+            className="btn btn-issue btn-sm"
             onClick={handleIssueSheet}
             disabled={isIssuing}
           >
-            <Printer size={14} />
-            {isIssuing ? '印刷中...' : '検査書印刷'}
+            <Printer size={18} />
+            <span>{isIssuing ? '印刷中...' : '検査書'}</span>
           </button>
           <button
-            className="btn btn-outline btn-sm"
+            className="btn btn-report btn-sm"
             onClick={handleIssueDailyReport}
             disabled={isIssuingDailyReport}
           >
-            <FileText size={14} />
-            {isIssuingDailyReport ? '発行中...' : '日報発行'}
+            <FileText size={18} />
+            <span>{isIssuingDailyReport ? '発行中...' : '日報'}</span>
           </button>
           <button
             className="btn btn-outline btn-sm"
             onClick={handleWriteHistory}
             disabled={isWritingHistory}
           >
-            <FileSpreadsheet size={14} />
-            {isWritingHistory ? '記入中...' : '履歴ファイルに記入'}
+            <Database size={18} />
+            <span>{isWritingHistory ? '記入中...' : '履歴'}</span>
           </button>
           <button
             className="btn btn-danger btn-sm"
             onClick={handleExecuteHide}
             disabled={hideChecked.size === 0 || isHiding}
           >
-            <EyeOff size={14} />
-            {isHiding ? '非表示中...' : '非表示実行'}
+            <EyeOff size={18} />
+            <span>{isHiding ? '非表示中...' : '非表示'}</span>
           </button>
         </div>
         {showManualAddModal && selectedDate && (

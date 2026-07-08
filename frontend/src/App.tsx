@@ -463,7 +463,6 @@ export const App: React.FC = () => {
           </button>
         </nav>
         <div className="header-right">
-          <span className="header-tagline">巡回検査計画・OCR取込ダッシュボード</span>
           <button
             type="button"
             className="theme-toggle-btn"
