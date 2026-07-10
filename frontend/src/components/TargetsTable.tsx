@@ -98,16 +98,6 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
     }
   }, []);
 
-  useEffect(() => {
-    if (highlightedTargetId === null) return;
-    const el = document.getElementById(`target-row-${highlightedTargetId}`);
-    if (el) {
-      el.scrollIntoView({
-        behavior: 'smooth',
-        block: 'center',
-      });
-    }
-  }, [highlightedTargetId]);
   const [sortConfig, setSortConfig] = useState<{ key: keyof InspectionTarget | 'classLabel'; direction: 'asc' | 'desc' }>({ key: 'code', direction: 'asc' });
 
   // Drag-to-check state (A/B/C/D slots)
@@ -461,8 +451,8 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
       let bVal: string | number;
 
       if (sortConfig.key === 'classLabel') {
-        aVal = a.class_name ?? getClassLabel(a.category);
-        bVal = b.class_name ?? getClassLabel(b.category);
+        aVal = a.category ?? 9999;
+        bVal = b.category ?? 9999;
       } else {
         const key = sortConfig.key;
         const aRaw = a[key];
@@ -674,13 +664,13 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
         )}
       </div>
       <div className="table-responsive" ref={containerRef}>
-        <table className="targets-table">
+        <table className={`targets-table ${isPaneCollapsed ? 'collapsed' : ''}`}>
           <thead>
             <tr>
               <th style={{ width: '40px' }}></th>
               {renderSortableTh('code', '品目コード')}
               {renderSortableTh('name', '品目名')}
-              {renderSortableTh('classLabel', '検査分類')}
+              {renderSortableTh('classLabel', isPaneCollapsed ? '検査' : '検査分類')}
               <th>検査書</th>
               <th className="text-center" style={{ width: '48px' }}>A</th>
               <th className="text-center" style={{ width: '48px' }}>B</th>
@@ -697,6 +687,7 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
               const isHideChecked = hideChecked.has(target.target_id);
               const classNum = target.category;
               const classLabel = target.class_name ?? getClassLabel(classNum);
+              const displayClassLabel = isPaneCollapsed ? classLabel.slice(0, 2) : classLabel;
               const classColor = getClassColor(classNum);
 
               return (
@@ -707,6 +698,7 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
                       isExpanded ? 'row-expanded' : ''
                     } ${isHighlighted ? 'row-highlight' : ''}`}
                     onClick={() => onTargetClick(target)}
+                    onMouseDown={(e) => e.preventDefault()}
                     style={{ cursor: 'pointer' }}
                   >
                     <td onClick={(e) => { e.stopPropagation(); toggleRow(target.target_id); }}>
@@ -734,7 +726,7 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
                           color: classColor.text,
                         }}
                       >
-                        {classLabel}
+                        {displayClassLabel}
                       </span>
                     </td>
                     <td>
@@ -812,41 +804,57 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
                   <tr className="target-detail-row">
                     <td colSpan={10}>
                       <div className={`target-detail-container ${isExpanded ? 'expanded' : ''}`}>
-                        <div className="target-detail-grid">
-                          <div className="target-detail-item">
-                            <div className="target-detail-label">
-                              <Package size={14} />
-                              商品カテゴリ
-                            </div>
-                            <div className="target-detail-value">
-                              {target.product_category ?? '-'}
-                            </div>
+                        <div className="target-detail-inline">
+                          <div className="target-detail-badges">
+                            <span className="gh-badge gh-badge-category">
+                              <span className="gh-badge-label"><Package size={12} />商品カテゴリ</span>
+                              <span className="gh-badge-value">{target.product_category ?? '-'}</span>
+                            </span>
+                            <span className="gh-badge gh-badge-source">
+                              <span className="gh-badge-label"><Database size={12} />取込元</span>
+                              <span className="gh-badge-value">{getSourceFlags(target)}</span>
+                            </span>
+                            {hasWarnings && (
+                              <span
+                                className="gh-badge gh-badge-warning warning-detail-trigger"
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                <span className="gh-badge-label"><AlertTriangle size={12} className="text-rose" />警告</span>
+                                <span className="gh-badge-value">{target.warnings.length}件</span>
+                              </span>
+                            )}
                           </div>
-                          <div className="target-detail-item">
-                            <div className="target-detail-label">
-                              <Database size={14} />
-                              取込元
-                            </div>
-                            <div className="target-detail-value">
-                              <div className="source-flags-container">
-                                {getSourceFlags(target)}
-                              </div>
-                            </div>
+                          <div className={`target-detail-actions ${isPaneCollapsed ? 'collapsed' : ''}`}>
+                            {target.has_inspection_file && (
+                              <>
+                                <button
+                                  className="btn btn-outline btn-sm"
+                                  onClick={(e) => { e.stopPropagation(); handleOpenFile(target.target_id); }}
+                                >
+                                  <FileText size={14} />
+                                  <span>検査書</span>
+                                </button>
+                                <button
+                                  className="btn btn-outline btn-sm"
+                                  disabled={printingTargetId === target.target_id}
+                                  onClick={(e) => { e.stopPropagation(); handlePrintFile(target.target_id); }}
+                                >
+                                  <Printer size={14} />
+                                  <span>{printingTargetId === target.target_id ? '印刷中...' : '印刷'}</span>
+                                </button>
+                              </>
+                            )}
+                            <button
+                              className="btn btn-outline btn-sm"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setStructureModalCode(target.code);
+                              }}
+                            >
+                              <ListTree size={14} />
+                              <span>構成</span>
+                            </button>
                           </div>
-                          {hasWarnings && (
-                            <div className="target-detail-item warning-detail-trigger">
-                              <div className="target-detail-label">
-                                <AlertTriangle size={14} className="text-rose" />
-                                警告 ({target.warnings.length}件)
-                              </div>
-                              <div className="target-detail-value">
-                                <span className="warning-count-badge">
-                                  <AlertTriangle size={12} />
-                                  {target.warnings.length}件 - クリックで展開
-                                </span>
-                              </div>
-                            </div>
-                          )}
                         </div>
 
                         {hasWarnings && isExpanded && (
@@ -876,38 +884,6 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
                             </ul>
                           </div>
                         )}
-
-                        <div className="target-detail-actions">
-                          {target.has_inspection_file && (
-                            <>
-                              <button
-                                className="btn btn-outline btn-sm"
-                                onClick={(e) => { e.stopPropagation(); handleOpenFile(target.target_id); }}
-                              >
-                                <FileText size={14} />
-                                検査書表示
-                              </button>
-                              <button
-                                className="btn btn-outline btn-sm"
-                                disabled={printingTargetId === target.target_id}
-                                onClick={(e) => { e.stopPropagation(); handlePrintFile(target.target_id); }}
-                              >
-                                <Printer size={14} />
-                                {printingTargetId === target.target_id ? '印刷中...' : '印刷'}
-                              </button>
-                            </>
-                          )}
-                          <button
-                            className="btn btn-outline btn-sm"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setStructureModalCode(target.code);
-                            }}
-                          >
-                            <ListTree size={14} />
-                            組立構成図
-                          </button>
-                        </div>
                       </div>
                     </td>
                   </tr>

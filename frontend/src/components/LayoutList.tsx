@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { MapPin } from 'lucide-react';
 import type { FactoryMapResponse, FactoryMapMachine, InspectionTarget, LayoutSummary, LayoutObject, LayoutObjectType } from '../types';
 import { MachinePopup } from './MachinePopup';
@@ -62,7 +62,6 @@ export const LayoutList: React.FC<LayoutListProps> = ({
 }) => {
   const [layoutMaps, setLayoutMaps] = useState<LayoutMapData[]>([]);
   const [selectedMachine, setSelectedMachine] = useState<FactoryMapMachine | null>(null);
-  const lastAutoSwitchCode = useRef<string | null>(null);
 
   useEffect(() => {
     if (!selectedDate) {
@@ -123,16 +122,22 @@ export const LayoutList: React.FC<LayoutListProps> = ({
   // so manual segment button clicks are never overridden.
   useEffect(() => {
     if (!highlightedTargetCode || layoutMaps.length === 0) return;
-    if (highlightedTargetCode === lastAutoSwitchCode.current) return;
 
-    const foundLayoutMap = layoutMaps.find(lm => 
-      lm.mapData?.machines?.some(m => m.target_codes?.includes(highlightedTargetCode))
-    );
+    const foundLayoutMap = layoutMaps.find(lm => {
+      if (!lm.mapData?.layout?.objects) return false;
+      const machineIdsOnLayout = new Set(
+        lm.mapData.layout.objects
+          .filter((obj) => obj.type === 'machine' && obj.machine_id != null)
+          .map((obj) => obj.machine_id)
+      );
+      return lm.mapData.machines?.some(
+        (m) => machineIdsOnLayout.has(m.machine_id) && m.target_codes?.includes(highlightedTargetCode)
+      );
+    });
     if (foundLayoutMap && foundLayoutMap.layout.id !== activeLayoutId) {
       setActiveLayoutId(foundLayoutMap.layout.id);
-      lastAutoSwitchCode.current = highlightedTargetCode;
     }
-  }, [highlightedTargetCode, layoutMaps]);
+  }, [highlightedTargetCode, layoutMaps, activeLayoutId, setActiveLayoutId]);
 
   if (layoutMaps.length === 0) {
     return (

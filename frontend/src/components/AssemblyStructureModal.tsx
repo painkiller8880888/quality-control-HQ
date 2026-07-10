@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { createPortal } from 'react-dom';
-import { X, ChevronRight, ChevronDown, Crown, Folder, FileText, Package, Maximize2, Minimize2, Printer } from 'lucide-react';
+import { X, ChevronRight, ChevronDown, Crown, Folder, FileText, Package, Maximize2, Minimize2, Printer, Eye, ZoomIn, ZoomOut } from 'lucide-react';
 
 interface StructureEdge {
   parent_code: string;
@@ -173,6 +173,11 @@ export const AssemblyStructureView: React.FC<AssemblyStructureModalProps> = ({ c
   const [reverseRoots, setReverseRoots] = useState<ReverseRoot[]>([]);
   const [selectedRoot, setSelectedRoot] = useState<string>('');
   const [highlightCode, setHighlightCode] = useState<string | null>(null);
+  const [viewerUrl, setViewerUrl] = useState<string | null>(null);
+  const [viewerLoading, setViewerLoading] = useState(false);
+  const [viewerError, setViewerError] = useState<string | null>(null);
+  const [zoom, setZoom] = useState(1);
+  const viewerUrlRef = React.useRef<string | null>(null);
 
   const loadStructure = useCallback(async (rootCode: string, highlight: string | null) => {
     setLoading(true);
@@ -342,6 +347,44 @@ export const AssemblyStructureView: React.FC<AssemblyStructureModalProps> = ({ c
     }
   }, []);
 
+  const handleViewFile = useCallback(async (nodeCode: string) => {
+    setViewerLoading(true);
+    setViewerError(null);
+    if (viewerUrlRef.current) {
+      URL.revokeObjectURL(viewerUrlRef.current);
+      viewerUrlRef.current = null;
+    }
+    setViewerUrl(null);
+    setZoom(1);
+    try {
+      const res = await fetch(`/api/inspection-file/pdf/?code=${encodeURIComponent(nodeCode)}`);
+      const contentType = res.headers.get('Content-Type') || '';
+      if (contentType.includes('application/json')) {
+        const data = await res.json();
+        throw new Error(data.message || 'PDFの取得に失敗しました');
+      }
+      if (!res.ok) {
+        throw new Error('PDFの取得に失敗しました');
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      viewerUrlRef.current = url;
+      setViewerUrl(url);
+    } catch (err) {
+      setViewerError(err instanceof Error ? err.message : 'PDFの取得に失敗しました');
+    } finally {
+      setViewerLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (viewerUrlRef.current) {
+        URL.revokeObjectURL(viewerUrlRef.current);
+      }
+    };
+  }, []);
+
   const renderNodeType = (meta: NodeMeta): string => {
     const parts: string[] = [];
     if (meta.node_type_1) parts.push(meta.node_type_1);
@@ -404,8 +447,9 @@ export const AssemblyStructureView: React.FC<AssemblyStructureModalProps> = ({ c
             </button>
           </div>
 
-          <div className="ast-main-area">
-            <div className="ast-tree-area">
+              <div className="ast-main-area">
+                <div className="ast-diagram-wrapper">
+                <div className="ast-tree-area ast-diagram-area">
               {loading && (
                 <div className="ast-loading">構成データを読み込んでいます...</div>
               )}
@@ -464,6 +508,13 @@ export const AssemblyStructureView: React.FC<AssemblyStructureModalProps> = ({ c
                           <span className="ast-node-actions">
                             <button
                               className="ast-file-btn"
+                              title="表示"
+                              onClick={e => { e.stopPropagation(); handleViewFile(node.code); }}
+                            >
+                              <Eye size={12} />
+                            </button>
+                            <button
+                              className="ast-file-btn"
                               title="検査書表示"
                               onClick={e => { e.stopPropagation(); handleOpenFile(node.code); }}
                             >
@@ -488,43 +539,95 @@ export const AssemblyStructureView: React.FC<AssemblyStructureModalProps> = ({ c
                 </div>
               )}
             </div>
-            <div className="ast-legend-area">
-              <div className="ast-legend-title">凡例</div>
-              <div className="ast-legend-item">
-                <Crown size={14} className="ast-legend-icon" />
-                <span>組立 (レベル1)</span>
-              </div>
-              <div className="ast-legend-item">
-                <Folder size={14} className="ast-legend-icon" />
-                <span>部品グループ (レベル2)</span>
-              </div>
-              <div className="ast-legend-item">
-                <FileText size={14} className="ast-legend-icon" />
-                <span>部品・材料 (レベル3+)</span>
-              </div>
-              <div className="ast-legend-divider" />
-              <div className="ast-legend-title">グループ色</div>
-              {[0, 1, 2].map(i => (
-                <div className="ast-legend-item" key={i}>
-                  <span className={`ast-color-swatch ast-swatch-${i}`} />
-                  <span>グループ {i + 1}</span>
+              <div className="ast-legend-area">
+                <div className="ast-legend-title">凡例</div>
+                <div className="ast-legend-item">
+                  <Crown size={14} className="ast-legend-icon" />
+                  <span>組立 (レベル1)</span>
                 </div>
-              ))}
-              <div className="ast-legend-divider" />
-              <div className="ast-legend-title">逆展開</div>
-              <div className="ast-legend-item">
-                <span className="ast-color-swatch ast-swatch-target" />
-                <span>対象ノード（{code}）</span>
+                <div className="ast-legend-item">
+                  <Folder size={14} className="ast-legend-icon" />
+                  <span>部品グループ (レベル2)</span>
+                </div>
+                <div className="ast-legend-item">
+                  <FileText size={14} className="ast-legend-icon" />
+                  <span>部品・材料 (レベル3+)</span>
+                </div>
+                <div className="ast-legend-divider" />
+                <div className="ast-legend-title">グループ色</div>
+                {[0, 1, 2].map(i => (
+                  <div className="ast-legend-item" key={i}>
+                    <span className={`ast-color-swatch ast-swatch-${i}`} />
+                    <span>グループ {i + 1}</span>
+                  </div>
+                ))}
+                <div className="ast-legend-divider" />
+                <div className="ast-legend-title">逆展開</div>
+                <div className="ast-legend-item">
+                  <span className="ast-color-swatch ast-swatch-target" />
+                  <span>対象ノード（{code}）</span>
+                </div>
+                <div className="ast-legend-divider" />
+                <div className="ast-legend-title">操作</div>
+                <div className="ast-legend-item">
+                  <ChevronRight size={12} /> <span>クリックで展開</span>
+                </div>
+                <div className="ast-legend-item">
+                  <ChevronDown size={12} /> <span>クリックで折りたたみ</span>
+                </div>
               </div>
-              <div className="ast-legend-divider" />
-              <div className="ast-legend-title">操作</div>
-              <div className="ast-legend-item">
-                <ChevronRight size={12} /> <span>クリックで展開</span>
+                </div>
+              <div className="ast-viewer-area">
+                <div className="ast-viewer-header">
+                  <span className="ast-viewer-title">検査書ビューア</span>
+                  <span className="ast-viewer-toolbar">
+                    <button
+                      className="ast-file-btn"
+                      title="縮小"
+                      disabled={!viewerUrl}
+                      onClick={() => setZoom(z => Math.max(0.5, +(z - 0.2).toFixed(2)))}
+                    >
+                      <ZoomOut size={14} />
+                    </button>
+                    <span className="ast-viewer-zoom">{Math.round(zoom * 100)}%</span>
+                    <button
+                      className="ast-file-btn"
+                      title="拡大"
+                      disabled={!viewerUrl}
+                      onClick={() => setZoom(z => Math.min(3, +(z + 0.2).toFixed(2)))}
+                    >
+                      <ZoomIn size={14} />
+                    </button>
+                    <button
+                      className="ast-file-btn"
+                      title="印刷"
+                      disabled={!viewerUrl}
+                      onClick={() => { if (viewerUrl) window.open(viewerUrl, '_blank'); }}
+                    >
+                      <Printer size={14} />
+                    </button>
+                  </span>
+                </div>
+                <div className="ast-viewer-body">
+                  {viewerLoading && (
+                    <div className="ast-loading">検査書をPDF化しています...</div>
+                  )}
+                  {viewerError && (
+                    <div className="ast-error">{viewerError}</div>
+                  )}
+                  {!viewerLoading && !viewerError && !viewerUrl && (
+                    <div className="ast-empty">「表示」ボタンで検査書を表示できます</div>
+                  )}
+                  {viewerUrl && (
+                    <iframe
+                      className="ast-viewer-frame"
+                      src={viewerUrl}
+                      style={{ transform: `scale(${zoom})`, transformOrigin: 'top left', width: `${100 / zoom}%`, height: `${100 / zoom}%` }}
+                      title="検査書ビューア"
+                    />
+                  )}
+                </div>
               </div>
-              <div className="ast-legend-item">
-                <ChevronDown size={12} /> <span>クリックで折りたたみ</span>
-              </div>
-            </div>
           </div>
         </div>
     </div>

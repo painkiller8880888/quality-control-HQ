@@ -1115,6 +1115,38 @@ def _excel_serial_date(d: date_type) -> int:
     return delta.days
 
 
+def convert_excel_to_pdf(file_path: str) -> str:
+    import os as os_mod
+    import pythoncom
+    import win32com.client
+
+    if not os_mod.path.exists(file_path):
+        raise FileNotFoundError(f"ファイルが存在しません: {file_path}")
+
+    ext = os_mod.path.splitext(file_path)[1].lower()
+    if ext not in (".xls", ".xlsx", ".xlsm"):
+        raise ValueError(f"Excelファイルではありません: {file_path}")
+
+    import tempfile
+    tmp_path = tempfile.mktemp(suffix=".pdf")
+    pythoncom.CoInitialize()
+    xl = None
+    try:
+        xl = win32com.client.DispatchEx("Excel.Application")
+        xl.DisplayAlerts = False
+        xl.Visible = False
+        wb = xl.Workbooks.Open(file_path)
+        try:
+            wb.ExportAsFixedFormat(0, tmp_path)
+        finally:
+            wb.Close(False)
+    finally:
+        if xl:
+            xl.Quit()
+        pythoncom.CoUninitialize()
+    return tmp_path
+
+
 def _print_file_direct(file_path: str):
     import os as os_mod
     import pythoncom
@@ -1373,24 +1405,41 @@ def _write_daily_report(template_path, output_path, target_date, keep_vba=True):
         6: 18,
         7: 22,
         1: 26,
+        9: 35,
     }
-    row_offsets = {slot: {category: 0 for category in category_start_rows} for slot in CHECK_SLOTS}
     category_45_counts = {slot: 0 for slot in CHECK_SLOTS}
 
-    histories = (
+    histories = list(
         History.objects.filter(date=target_date)
         .select_related("master")
         .order_by("time_slot", "master__code")
     )
 
-    master_ids = list(histories.values_list("master_id", flat=True).distinct())
+    master_ids = list({h.master_id for h in histories})
     master_classes = {}
     for mc in MasterClass.objects.filter(master_id__in=master_ids).select_related("class_master"):
         master_classes[mc.master_id] = mc.class_master.class_no if mc.class_master else None
 
+    def _category_of(history):
+        return master_classes.get(history.master_id) or history.master.category
+
+    # Classes sharing a start row (2, 3, 8 all start at row 4) must share a
+    # single contiguous offset, otherwise they overwrite each other in the same
+    # cells. Place them in spec order so class 2 (半自動機) fills from row 4.
+    top_block_priority = {2: 0, 3: 1, 8: 2}
+    histories.sort(
+        key=lambda h: (
+            h.time_slot,
+            top_block_priority.get(_category_of(h), 9),
+            h.master.code,
+        )
+    )
+
+    row_offsets = {slot: {} for slot in CHECK_SLOTS}
+
     for history in histories:
         slot = history.time_slot
-        category = master_classes.get(history.master_id) or history.master.category
+        category = _category_of(history)
         column = slot_columns[slot]
 
         if category in (4, 5):
@@ -1401,9 +1450,10 @@ def _write_daily_report(template_path, output_path, target_date, keep_vba=True):
         if start_row is None:
             continue
 
-        row = start_row + row_offsets[slot][category]
+        offset = row_offsets[slot].get(start_row, 0)
+        row = start_row + offset
         sheet[f"{column}{row}"] = history.master.name
-        row_offsets[slot][category] += 1
+        row_offsets[slot][start_row] = offset + 1
 
     for slot, count in category_45_counts.items():
         sheet[f"{slot_columns[slot]}38"] = count

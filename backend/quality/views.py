@@ -938,6 +938,47 @@ class InspectionFileOpenByCodeView(APIView):
         return response
 
 
+class InspectionFilePdfByCodeView(APIView):
+    def get(self, request):
+        code = request.query_params.get("code", "").strip().upper()
+        if not code:
+            return error_response("INVALID_REQUEST", "code is required.")
+
+        insp_file = InspectionFile.objects.filter(master__code=code).first()
+        if not insp_file:
+            return error_response("FILE_NOT_FOUND", "検査書ファイルが見つかりません")
+
+        file_path = insp_file.file_path
+        if not os.path.exists(file_path):
+            return error_response("FILE_NOT_FOUND", f"ファイルが存在しません: {file_path}")
+
+        ext = os.path.splitext(file_path)[1].lower()
+        try:
+            if ext in (".xls", ".xlsx", ".xlsm"):
+                from quality.services import convert_excel_to_pdf
+                pdf_path = convert_excel_to_pdf(file_path)
+                cleanup = True
+            elif ext == ".pdf":
+                pdf_path = file_path
+                cleanup = False
+            else:
+                return error_response("UNSUPPORTED", "対応していないファイル形式です")
+        except Exception as exc:
+            return error_response("CONVERT_FAILED", str(exc), status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        response = FileResponse(open(pdf_path, "rb"), content_type="application/pdf")
+        response["Content-Disposition"] = f'inline; filename="{os.path.basename(file_path)}.pdf"'
+        if cleanup:
+            def _cleanup(resp):
+                try:
+                    os.unlink(pdf_path)
+                except OSError:
+                    pass
+                return resp
+            response["X-Cleanup-Path"] = pdf_path
+        return response
+
+
 class InspectionFilePrintByCodeView(APIView):
     def post(self, request):
         code = request.query_params.get("code", "").strip().upper()
@@ -1044,18 +1085,32 @@ class StructureReverseRootsView(APIView):
         if not code:
             return error_response("INVALID_REQUEST", "code query parameter is required.")
 
-        root_codes = (
-            Structure.objects.filter(db_models.Q(child_code=code) | db_models.Q(parent_code=code))
-            .exclude(root_code=code)
-            .values_list("root_code", flat=True)
-            .distinct()
-        )
-        roots = []
-        for root_code in root_codes:
-            master = Master.objects.filter(code=root_code).first()
-            roots.append({
-                "root_code": root_code,
-                "root_name": master.name if master else root_code,
-            })
-        roots.sort(key=lambda r: r["root_code"])
-        return Response({"code": code, "roots": roots})
+        roots: set[str] = set()
+        visited_nodes: set[str] = set()
+        queue = [code]
+
+        while queue:
+            cur = queue.pop(0)
+            if cur in visited_nodes:
+                continue
+            visited_nodes.add(cur)
+            parents = list(
+                Structure.objects.filter(child_code=cur).values_list("parent_code", flat=True)
+            )
+            if not parents:
+                roots.add(cur)
+                continue
+            for p in parents:
+                if p in visited_nodes:
+                    continue
+                if not Structure.objects.filter(child_code=p).exists():
+                    roots.add(p)
+                else:
+                    queue.append(p)
+
+        roots = sorted(roots)
+        data = []
+        for rc in roots:
+            m = Master.objects.filter(code=rc).first()
+            data.append({"root_code": rc, "root_name": m.name if m else rc})
+        return Response({"code": code, "roots": data})

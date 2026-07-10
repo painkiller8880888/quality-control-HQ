@@ -12,6 +12,7 @@ from .views import (
     FactoryMapView,
     HistoryWriteToFileView,
     InspectionFileOpenByCodeView,
+    InspectionFilePdfByCodeView,
     InspectionFilePrintByCodeView,
     InspectionSheetIssueView,
     InspectionTargetDetailView,
@@ -68,5 +69,6 @@ urlpatterns = [
     path("structure/", StructureView.as_view()),
     path("structure/reverse-roots/", StructureReverseRootsView.as_view()),
     path("inspection-file/open/", InspectionFileOpenByCodeView.as_view()),
+    path("inspection-file/pdf/", InspectionFilePdfByCodeView.as_view()),
     path("inspection-file/print/", InspectionFilePrintByCodeView.as_view()),
 ]
