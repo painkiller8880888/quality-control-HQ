@@ -983,8 +983,13 @@ def run_job(job, fn):
     except Exception as exc:
         job.status = Job.Status.FAILED
         job.error_message = str(exc)
+        job.result = {
+            "status": "failed",
+            "error_message": str(exc),
+            "exception_type": type(exc).__name__,
+        }
         job.finished_at = timezone.now()
-        job.save(update_fields=["status", "error_message", "finished_at"])
+        job.save(update_fields=["status", "error_message", "result", "finished_at"])
         raise
 
     job.status = Job.Status.SUCCEEDED
@@ -1128,7 +1133,8 @@ def convert_excel_to_pdf(file_path: str) -> str:
         raise ValueError(f"Excelファイルではありません: {file_path}")
 
     import tempfile
-    tmp_path = tempfile.mktemp(suffix=".pdf")
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp_file:
+        tmp_path = tmp_file.name
     pythoncom.CoInitialize()
     xl = None
     try:
@@ -1140,6 +1146,12 @@ def convert_excel_to_pdf(file_path: str) -> str:
             wb.ExportAsFixedFormat(0, tmp_path)
         finally:
             wb.Close(False)
+    except Exception:
+        try:
+            os_mod.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
     finally:
         if xl:
             xl.Quit()
@@ -1280,10 +1292,29 @@ def issue_inspection_sheets(target_date: date_type | None = None):
         except ImportError:
             raise RuntimeError("pywin32 is required for COM Excel automation")
 
-        pythoncom.CoInitialize()
+        com_initialized = False
         xl = None
+        wb = None
+        owns_excel = False
+        original_settings = {}
         try:
-            xl = win32com.client.DispatchEx("Excel.Application")
+            pythoncom.CoInitialize()
+            com_initialized = True
+            try:
+                xl = win32com.client.GetActiveObject("Excel.Application")
+            except pythoncom.com_error:
+                xl = win32com.client.Dispatch("Excel.Application")
+                owns_excel = True
+            if not owns_excel:
+                for setting_name in (
+                    "DisplayAlerts",
+                    "EnableEvents",
+                    "Visible",
+                    "AskToUpdateLinks",
+                    "Calculation",
+                    "ScreenUpdating",
+                ):
+                    original_settings[setting_name] = getattr(xl, setting_name)
             xl.DisplayAlerts = False
             xl.EnableEvents = False
             xl.Visible = False
@@ -1306,30 +1337,31 @@ def issue_inspection_sheets(target_date: date_type | None = None):
             wb.Save()
 
             wb.Application.Run("RunBatch")
+        except pythoncom.com_error as exc:
+            raise RuntimeError(
+                "Excel COM operation failed. Start the backend from the logged-in interactive "
+                f"Windows user session with Excel available. Original error: {exc}"
+            ) from exc
         finally:
             if xl is not None:
-                try:
-                    xl.ScreenUpdating = True
-                except pythoncom.com_error:
-                    pass
-                try:
-                    xl.EnableEvents = True
-                except pythoncom.com_error:
-                    pass
-                try:
-                    xl.Calculation = -4105  # xlAutomatic
-                except pythoncom.com_error:
-                    pass
-                try:
-                    for w in xl.Workbooks:
+                if wb is not None:
+                    try:
+                        wb.Close(False)
+                    except pythoncom.com_error:
+                        pass
+                if not owns_excel:
+                    for setting_name, original_value in original_settings.items():
                         try:
-                            w.Close(False)
+                            setattr(xl, setting_name, original_value)
                         except pythoncom.com_error:
                             pass
-                except pythoncom.com_error:
-                    pass
-                xl.Quit()
-            pythoncom.CoUninitialize()
+                if owns_excel:
+                    try:
+                        xl.Quit()
+                    except pythoncom.com_error:
+                        logger.warning("Excel could not be quit cleanly")
+            if com_initialized:
+                pythoncom.CoUninitialize()
 
     all_issued = target_history_ids + class9_history_ids
     History.objects.filter(history_id__in=all_issued).update(is_sheet_issued=True)

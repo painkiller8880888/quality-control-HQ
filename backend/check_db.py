@@ -1,10 +1,37 @@
-import sqlite3
-conn = sqlite3.connect('db.sqlite3')
-c = conn.cursor()
-c.execute("SELECT name FROM sqlite_master WHERE type='table'")
-tables = c.fetchall()
+import os
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
+
+import django
+from django.db import connection
+
+django.setup()
+
+with connection.cursor() as cursor:
+    cursor.execute(
+        """
+        SELECT table_name
+        FROM information_schema.tables
+        WHERE table_schema = 'public'
+        ORDER BY table_name
+        """
+    )
+    tables = [row[0] for row in cursor.fetchall()]
+
 print("Tables:", tables)
-for t in tables:
-    if 'machine' in t[0].lower():
-        c.execute(f"PRAGMA table_info({t[0]})")
-        print(f"\n{t[0]} columns:", c.fetchall())
+
+for table in tables:
+    if "machine" not in table.lower():
+        continue
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT column_name, data_type, is_nullable
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = %s
+            ORDER BY ordinal_position
+            """,
+            [table],
+        )
+        print(f"\n{table} columns:", cursor.fetchall())

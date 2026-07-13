@@ -1,6 +1,33 @@
 from django.db import models
 
 
+class User(models.Model):
+    class Role(models.TextChoices):
+        ADMIN = "admin", "Admin"
+        WORKER = "worker", "Worker"
+
+    user_id = models.BigAutoField(primary_key=True)
+    login_name = models.CharField(max_length=150, unique=True)
+    display_name = models.CharField(max_length=255)
+    password_hash = models.TextField()
+    role = models.CharField(max_length=16, choices=Role.choices)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "users"
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(role__in=["admin", "worker"]),
+                name="users_role_check",
+            )
+        ]
+
+    def __str__(self):
+        return self.display_name or self.login_name
+
+
 class Master(models.Model):
     code = models.CharField(max_length=32, unique=True)
     name = models.CharField(max_length=255)
@@ -28,7 +55,7 @@ class ClassMaster(models.Model):
 
 
 class MasterClass(models.Model):
-    master = models.ForeignKey(Master, on_delete=models.CASCADE, related_name="master_classes")
+    master = models.ForeignKey(Master, on_delete=models.PROTECT, related_name="master_classes")
     class_master = models.ForeignKey(ClassMaster, on_delete=models.PROTECT, null=True, blank=True, related_name="master_classes")
     inspection_sheet_path = models.TextField(blank=True, default="")
     updated_at = models.DateTimeField(auto_now=True)
@@ -48,7 +75,7 @@ class MasterClass(models.Model):
 class SpecialInspectionClass9(models.Model):
     master = models.OneToOneField(
         Master,
-        on_delete=models.CASCADE,
+        on_delete=models.PROTECT,
         related_name="special_inspection_class9",
     )
     inspection_sheet_path = models.TextField(blank=True, default="")
@@ -92,7 +119,7 @@ class Structure(models.Model):
 
 
 class InspectionFile(models.Model):
-    master = models.ForeignKey(Master, on_delete=models.CASCADE, related_name="inspection_files")
+    master = models.ForeignKey(Master, on_delete=models.PROTECT, related_name="inspection_files")
     file_name = models.CharField(max_length=255)
     file_path = models.TextField()
     discovered_at = models.DateTimeField(auto_now_add=True)
@@ -109,8 +136,21 @@ class InspectionSession(models.Model):
     target_date = models.DateField(unique=True)
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.OPEN)
     history = models.BooleanField(default=False)
+    owner_user = models.ForeignKey(User, on_delete=models.PROTECT, null=True, blank=True, related_name="owned_inspection_sessions")
+    created_by = models.ForeignKey(User, on_delete=models.PROTECT, null=True, blank=True, related_name="created_inspection_sessions")
+    updated_by = models.ForeignKey(User, on_delete=models.PROTECT, null=True, blank=True, related_name="updated_inspection_sessions")
+    deleted_at = models.DateTimeField(null=True, blank=True)
+    deleted_by = models.ForeignKey(User, on_delete=models.PROTECT, null=True, blank=True, related_name="deleted_inspection_sessions")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(status__in=["open", "closed"]),
+                name="inspection_session_status_check",
+            )
+        ]
 
     def __str__(self):
         return f"{self.target_date} ({self.status})"
@@ -126,12 +166,12 @@ class InspectionTarget(models.Model):
 
     session = models.ForeignKey(
         InspectionSession,
-        on_delete=models.CASCADE,
+        on_delete=models.PROTECT,
         related_name="targets",
     )
     master = models.ForeignKey(
         Master,
-        on_delete=models.SET_NULL,
+        on_delete=models.PROTECT,
         null=True,
         blank=True,
         related_name="inspection_targets",
@@ -149,6 +189,10 @@ class InspectionTarget(models.Model):
     )
     visible = models.BooleanField(default=True)
     class_override = models.PositiveSmallIntegerField(null=True, blank=True)
+    created_by = models.ForeignKey(User, on_delete=models.PROTECT, null=True, blank=True, related_name="created_inspection_targets")
+    updated_by = models.ForeignKey(User, on_delete=models.PROTECT, null=True, blank=True, related_name="updated_inspection_targets")
+    deleted_at = models.DateTimeField(null=True, blank=True)
+    deleted_by = models.ForeignKey(User, on_delete=models.PROTECT, null=True, blank=True, related_name="deleted_inspection_targets")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -157,10 +201,17 @@ class InspectionTarget(models.Model):
             models.UniqueConstraint(
                 fields=["session", "normalized_code", "class_override"],
                 name="unique_target_per_session_code",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(issue_status__in=["not_required", "pending", "issued", "missing_file", "skipped"]),
+                name="inspection_target_issue_status_check",
             )
         ]
         indexes = [
             models.Index(fields=["session", "normalized_code"]),
+            models.Index(fields=["normalized_code"]),
+            models.Index(fields=["master"]),
+            models.Index(fields=["session"]),
             models.Index(fields=["issue_status"]),
         ]
 
@@ -172,7 +223,7 @@ class InspectionTarget(models.Model):
 class InspectionTargetWarning(models.Model):
     target = models.ForeignKey(
         InspectionTarget,
-        on_delete=models.CASCADE,
+        on_delete=models.PROTECT,
         related_name="warnings",
     )
     error_code = models.CharField(max_length=64)
@@ -190,10 +241,14 @@ class History(models.Model):
 
     history_id = models.BigAutoField(primary_key=True, db_column='history_id')
     date = models.DateField()
-    master = models.ForeignKey(Master, on_delete=models.CASCADE, related_name="histories")
+    master = models.ForeignKey(Master, on_delete=models.PROTECT, related_name="histories")
     time_slot = models.CharField(max_length=1, choices=TimeSlot.choices)
     class_override = models.PositiveSmallIntegerField(null=True, blank=True)
     is_sheet_issued = models.BooleanField(default=False)
+    created_by = models.ForeignKey(User, on_delete=models.PROTECT, null=True, blank=True, related_name="created_histories")
+    updated_by = models.ForeignKey(User, on_delete=models.PROTECT, null=True, blank=True, related_name="updated_histories")
+    deleted_at = models.DateTimeField(null=True, blank=True)
+    deleted_by = models.ForeignKey(User, on_delete=models.PROTECT, null=True, blank=True, related_name="deleted_histories")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -202,9 +257,19 @@ class History(models.Model):
             models.UniqueConstraint(
                 fields=["date", "master", "time_slot", "class_override"],
                 name="unique_history_date_master_slot",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(time_slot__in=["A", "B", "C", "D"]),
+                name="history_time_slot_check",
             )
         ]
-        indexes = [models.Index(fields=["date", "time_slot"])]
+        indexes = [
+            models.Index(fields=["date", "time_slot"]),
+            models.Index(fields=["date"]),
+            models.Index(fields=["master"]),
+            models.Index(fields=["class_override"]),
+            models.Index(fields=["date", "class_override"]),
+        ]
 
 
 class Machine(models.Model):
@@ -223,13 +288,25 @@ class Machine(models.Model):
     height = models.FloatField()
     is_active = models.BooleanField(default=True)
 
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(machine_class__in=[1, 2, 3, 4, 5, 6, 10]) | models.Q(machine_class__isnull=True),
+                name="machine_class_check",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(shape_type__in=["circle", "ellipse", "rectangle"]),
+                name="machine_shape_type_check",
+            ),
+        ]
+
     def __str__(self):
         return f"{self.machine_no} {self.machine_name}"
 
 
 class MachineAssignment(models.Model):
-    machine = models.ForeignKey(Machine, on_delete=models.CASCADE, related_name="assignments")
-    code = models.ForeignKey(Master, to_field="code", on_delete=models.CASCADE, related_name="machine_assignments")
+    machine = models.ForeignKey(Machine, on_delete=models.PROTECT, related_name="assignments")
+    code = models.ForeignKey(Master, to_field="code", on_delete=models.PROTECT, related_name="machine_assignments")
     assignment_class = models.PositiveSmallIntegerField(null=True, blank=True)
 
     class Meta:
@@ -246,6 +323,7 @@ class LayoutMaster(models.Model):
     background_image_path = models.TextField(blank=True)
     grid_width = models.PositiveIntegerField(default=50)
     grid_height = models.PositiveIntegerField(default=50)
+    owner_user = models.ForeignKey(User, on_delete=models.PROTECT, null=True, blank=True, related_name="owned_layouts")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -261,14 +339,22 @@ class LayoutObjectType(models.Model):
     selectable = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(code__in=["machine", "wall", "path", "area", "stairs", "entrance"]),
+                name="layout_object_type_code_check",
+            )
+        ]
+
     def __str__(self):
         return self.display_name
 
 
 class LayoutObject(models.Model):
-    layout = models.ForeignKey(LayoutMaster, on_delete=models.CASCADE, related_name="layout_objects")
+    layout = models.ForeignKey(LayoutMaster, on_delete=models.PROTECT, related_name="layout_objects")
     object_type = models.ForeignKey(LayoutObjectType, on_delete=models.PROTECT, related_name="layout_objects")
-    machine = models.ForeignKey(Machine, on_delete=models.SET_NULL, null=True, blank=True, related_name="layout_objects")
+    machine = models.ForeignKey(Machine, on_delete=models.PROTECT, null=True, blank=True, related_name="layout_objects")
     object_name = models.CharField(max_length=255, blank=True)
     grid_x = models.PositiveIntegerField(default=0)
     grid_y = models.PositiveIntegerField(default=0)
@@ -307,3 +393,54 @@ class Job(models.Model):
     error_message = models.TextField(blank=True)
     started_at = models.DateTimeField(null=True, blank=True)
     finished_at = models.DateTimeField(null=True, blank=True)
+    created_by = models.ForeignKey(User, on_delete=models.PROTECT, null=True, blank=True, related_name="created_jobs")
+    updated_by = models.ForeignKey(User, on_delete=models.PROTECT, null=True, blank=True, related_name="updated_jobs")
+    deleted_at = models.DateTimeField(null=True, blank=True)
+    deleted_by = models.ForeignKey(User, on_delete=models.PROTECT, null=True, blank=True, related_name="deleted_jobs")
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(job_type__in=["master_update", "plans_import", "inspection_sheet_issue", "daily_report_generate"]),
+                name="job_type_check",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(status__in=["queued", "running", "succeeded", "failed"]),
+                name="job_status_check",
+            ),
+        ]
+
+
+class UserSetting(models.Model):
+    user = models.OneToOneField(User, on_delete=models.PROTECT, primary_key=True, related_name="settings")
+    theme = models.CharField(max_length=32, default="light")
+
+    class Meta:
+        db_table = "user_settings"
+
+
+class SystemSetting(models.Model):
+    setting_key = models.CharField(max_length=128, primary_key=True)
+    setting_value = models.TextField(blank=True, default="")
+    updated_by = models.ForeignKey(User, on_delete=models.PROTECT, null=True, blank=True, related_name="updated_system_settings")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "system_settings"
+
+
+class AuditLog(models.Model):
+    log_id = models.BigAutoField(primary_key=True)
+    user = models.ForeignKey(User, on_delete=models.PROTECT, related_name="audit_logs")
+    operation = models.CharField(max_length=64)
+    table_name = models.CharField(max_length=128)
+    record_id = models.CharField(max_length=128)
+    logged_at = models.DateTimeField(auto_now_add=True)
+    details_json = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        db_table = "audit_logs"
+        indexes = [
+            models.Index(fields=["user", "logged_at"]),
+            models.Index(fields=["table_name", "record_id"]),
+        ]

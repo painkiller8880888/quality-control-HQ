@@ -766,6 +766,7 @@ class PhaseTwoMasterUpdateTests(TestCase):
         from quality.services import issue_inspection_sheets, _excel_serial_date
         from datetime import date
         from unittest.mock import MagicMock, patch, PropertyMock
+        import pythoncom
 
         cm = ClassMaster.objects.get(class_no=1)
         master = Master.objects.create(code="CDP0028", name="TestItem")
@@ -820,11 +821,16 @@ class PhaseTwoMasterUpdateTests(TestCase):
             mock_xl = MagicMock()
             mock_xl.Workbooks.Open.return_value = mock_wb
 
-            with patch("win32com.client.Dispatch", return_value=mock_xl):
+            with patch(
+                "win32com.client.GetActiveObject",
+                side_effect=pythoncom.com_error(-2147023584, "No active Excel instance", None, None),
+            ), patch("win32com.client.Dispatch", return_value=mock_xl) as mocked_dispatch:
                 with override_settings(DAILY_REPORT_TEMPLATE=template_path):
                     result = issue_inspection_sheets(target_date=date(2026, 6, 26))
 
             self.assertEqual(result["issued_count"], 1)
+            mocked_dispatch.assert_called_once_with("Excel.Application")
+            mock_xl.Workbooks.Open.assert_called_once()
 
             cells_calls = mock_ws.Cells.call_args_list
             row_col_calls = [ca[0] for ca in cells_calls]
@@ -836,6 +842,40 @@ class PhaseTwoMasterUpdateTests(TestCase):
 
             h.refresh_from_db()
             self.assertTrue(h.is_sheet_issued)
+
+    def test_issue_inspection_sheets_keeps_shared_excel_open(self):
+        from quality.services import issue_inspection_sheets
+        from datetime import date
+        from unittest.mock import MagicMock, patch
+
+        cm = ClassMaster.objects.get(class_no=1)
+        master = Master.objects.create(code="CDP0029", name="Shared Excel item")
+        MasterClass.objects.create(master=master, class_master=cm)
+        InspectionFile.objects.create(master=master, file_name="test.xls", file_path=r"C:\test\test.xls")
+        History.objects.create(date=date(2026, 6, 26), master=master, time_slot="A")
+
+        with TemporaryDirectory() as tmp:
+            template_path = Path(tmp) / "daily.xlsm"
+            Workbook().save(template_path)
+
+            mock_ws = MagicMock()
+            mock_ws.Name = "data"
+            mock_wb = MagicMock()
+            mock_wb.Sheets.return_value = mock_ws
+            mock_wb.Sheets.__iter__.return_value = iter([mock_ws])
+            shared_xl = MagicMock()
+            shared_xl.Workbooks.Open.return_value = mock_wb
+
+            with patch("win32com.client.GetActiveObject", return_value=shared_xl) as active_excel, \
+                 patch("win32com.client.Dispatch") as mocked_dispatch, \
+                 override_settings(DAILY_REPORT_TEMPLATE=template_path):
+                result = issue_inspection_sheets(target_date=date(2026, 6, 26))
+
+            self.assertEqual(result["issued_count"], 1)
+            active_excel.assert_called_once_with("Excel.Application")
+            mocked_dispatch.assert_not_called()
+            mock_wb.Close.assert_called_once_with(False)
+            shared_xl.Quit.assert_not_called()
 
     def test_issue_inspection_sheets_filters_non_target_class(self):
         from quality.services import issue_inspection_sheets
@@ -907,3 +947,73 @@ class PhaseTwoMasterUpdateTests(TestCase):
         response = self._upload_csv(csv_bytes)
         self.assertEqual(response.status_code, 202)
         self.assertTrue(Master.objects.filter(code="BA0061").exists())
+
+
+class InspectionFileViewTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.master = Master.objects.create(code="PDF001", name="PDF test")
+
+    def _create_inspection_file(self, path):
+        return InspectionFile.objects.create(master=self.master, file_name=Path(path).name, file_path=str(path))
+
+    def test_pdf_endpoint_streams_converted_file_and_cleans_it_up(self):
+        with TemporaryDirectory() as tmp:
+            source_path = Path(tmp) / "PDF001.xlsx"
+            converted_path = Path(tmp) / "converted.pdf"
+            source_path.write_bytes(b"spreadsheet")
+            converted_path.write_bytes(b"%PDF-test")
+            self._create_inspection_file(source_path)
+            with patch("quality.services.convert_excel_to_pdf", return_value=str(converted_path)):
+                response = self.client.get("/api/inspection-file/pdf/?code=PDF001")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response["Content-Type"], "application/pdf")
+            self.assertEqual(b"".join(response.streaming_content), b"%PDF-test")
+            response.close()
+            self.assertFalse(converted_path.exists())
+
+    def test_pdf_endpoint_returns_conversion_error(self):
+        with TemporaryDirectory() as tmp:
+            source_path = Path(tmp) / "PDF001.xlsx"
+            source_path.write_bytes(b"spreadsheet")
+            self._create_inspection_file(source_path)
+            with patch("quality.services.convert_excel_to_pdf", side_effect=RuntimeError("conversion failed")):
+                response = self.client.get("/api/inspection-file/pdf/?code=PDF001")
+            self.assertEqual(response.status_code, 500)
+            self.assertEqual(response.json()["error_code"], "CONVERT_FAILED")
+
+    def test_open_endpoint_returns_open_failed(self):
+        with TemporaryDirectory() as tmp:
+            source_path = Path(tmp) / "PDF001.xlsx"
+            source_path.write_bytes(b"spreadsheet")
+            self._create_inspection_file(source_path)
+            with patch("quality.views.os.startfile", side_effect=OSError("no association"), create=True):
+                response = self.client.get("/api/inspection-file/open/?code=PDF001")
+            self.assertEqual(response.status_code, 500)
+            self.assertEqual(response.json()["error_code"], "OPEN_FAILED")
+
+
+class JobServiceTests(TestCase):
+    def test_run_job_persists_json_safe_failure_result(self):
+        from quality.services import run_job
+
+        job = Job.objects.create(
+            job_id="job_test_failure",
+            job_type=Job.JobType.INSPECTION_SHEET_ISSUE,
+            request_payload={},
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "Excel unavailable"):
+            run_job(job, lambda: (_ for _ in ()).throw(RuntimeError("Excel unavailable")))
+
+        job.refresh_from_db()
+        self.assertEqual(job.status, Job.Status.FAILED)
+        self.assertEqual(job.error_message, "Excel unavailable")
+        self.assertEqual(
+            job.result,
+            {
+                "status": "failed",
+                "error_message": "Excel unavailable",
+                "exception_type": "RuntimeError",
+            },
+        )

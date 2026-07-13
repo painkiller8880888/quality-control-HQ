@@ -358,7 +358,12 @@ class TargetInspectionFileView(APIView):
 
         ext = os.path.splitext(file_path)[1].lower()
         if ext in (".xls", ".xlsx", ".xlsm"):
-            os.startfile(file_path)
+            try:
+                os.startfile(file_path)
+            except OSError as exc:
+                return error_response(
+                    "OPEN_FAILED", str(exc), http_status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
             return success_response(message="ファイルを起動しました")
 
         content_type = (
@@ -929,7 +934,12 @@ class InspectionFileOpenByCodeView(APIView):
 
         ext = os.path.splitext(file_path)[1].lower()
         if ext in (".xls", ".xlsx", ".xlsm"):
-            os.startfile(file_path)
+            try:
+                os.startfile(file_path)
+            except OSError as exc:
+                return error_response(
+                    "OPEN_FAILED", str(exc), http_status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
             return success_response(message="ファイルを起動しました")
 
         content_type = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
@@ -964,18 +974,25 @@ class InspectionFilePdfByCodeView(APIView):
             else:
                 return error_response("UNSUPPORTED", "対応していないファイル形式です")
         except Exception as exc:
-            return error_response("CONVERT_FAILED", str(exc), status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return error_response("CONVERT_FAILED", str(exc), http_status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-        response = FileResponse(open(pdf_path, "rb"), content_type="application/pdf")
-        response["Content-Disposition"] = f'inline; filename="{os.path.basename(file_path)}.pdf"'
-        if cleanup:
-            def _cleanup(resp):
+        try:
+            response = FileResponse(open(pdf_path, "rb"), content_type="application/pdf")
+        except OSError as exc:
+            if cleanup:
                 try:
                     os.unlink(pdf_path)
                 except OSError:
                     pass
-                return resp
-            response["X-Cleanup-Path"] = pdf_path
+            return error_response("OPEN_FAILED", str(exc), http_status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        response["Content-Disposition"] = f'inline; filename="{os.path.basename(file_path)}.pdf"'
+        if cleanup:
+            def _cleanup():
+                try:
+                    os.unlink(pdf_path)
+                except OSError:
+                    pass
+            response._resource_closers.append(_cleanup)
         return response
 
 
@@ -997,7 +1014,7 @@ class InspectionFilePrintByCodeView(APIView):
             os.startfile(file_path, "print")
             return success_response(message="印刷を開始しました")
         except Exception as exc:
-            return error_response("PRINT_FAILED", str(exc), status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return error_response("PRINT_FAILED", str(exc), http_status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 class StructureView(APIView):
