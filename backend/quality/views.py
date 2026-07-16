@@ -1,16 +1,17 @@
 import mimetypes
 import os
 import sys
-import uuid
+import csv
+from collections import Counter, defaultdict
+from datetime import date, timedelta
+from io import StringIO
 
-from django.conf import settings
-from django.http import FileResponse
+from django.http import FileResponse, HttpResponse
 from django.shortcuts import get_object_or_404
 from django.db import transaction
 from django.db import models as db_models
 from django.utils import timezone
 from rest_framework import status
-from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -31,7 +32,9 @@ from .models import (
     MasterClass,
     SpecialInspectionClass9,
     Structure,
+    AuditLog,
 )
+from .permissions import IsAdmin
 from .serializers import (
     AppSettingSerializer,
     AssignmentInputSerializer,
@@ -41,6 +44,7 @@ from .serializers import (
     Class9SettingSerializer,
     CreateLayoutSerializer,
     DailyReportGenerateRequestSerializer,
+    FactoryMapTargetRequestSerializer,
     InspectionTargetSerializer,
     JobSerializer,
     LayoutMasterListSerializer,
@@ -54,13 +58,17 @@ from .serializers import (
     MasterImportRequestSerializer,
     PlanImportRequestSerializer,
     SingleHistoryRequestSerializer,
+    SpecialTargetsRequestSerializer,
 )
 import subprocess
 from pathlib import Path
 
 from rest_framework import serializers
 from .services import (
+    ClassificationError,
+    add_factory_map_target,
     add_manual_targets,
+    add_special_targets,
     bulk_upsert_history,
     create_job,
     generate_daily_report,
@@ -74,6 +82,8 @@ from .services import (
     set_check,
     sync_master_class_from_assignment,
     write_history_to_excel,
+    resolve_inspection_file,
+    resolve_unambiguous_inspection_file,
 )
 
 
@@ -130,7 +140,7 @@ def serialize_layout(layout):
     return {
         "layout_id": layout.id,
         "layout_name": layout.layout_name,
-        "background_image_path": layout.background_image_path,
+        "background_image_path": "",
         "grid_width": layout.grid_width,
         "grid_height": layout.grid_height,
         "object_types": LayoutObjectTypeSerializer(object_types, many=True).data,
@@ -140,11 +150,12 @@ def serialize_layout(layout):
 
 class JobDetailView(APIView):
     def get(self, request, job_id):
-        job = get_object_or_404(Job, job_id=job_id)
+        job = get_object_or_404(Job, job_id=job_id, created_by=request.user)
         return Response(JobSerializer(job).data)
 
 
 class MasterUpdateView(APIView):
+    permission_classes = [IsAdmin]
     def post(self, request):
         serializer = MasterImportRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -157,16 +168,18 @@ class MasterUpdateView(APIView):
                 csv_path = setting.csv_path
 
         folder_paths = []
+        folder_priorities = {}
         setting = AppSetting.objects.first()
         if setting and setting.inspection_folder_paths:
             folder_paths = setting.inspection_folder_paths
+            folder_priorities = setting.inspection_folder_priorities or {}
 
         payload = {
             "force": serializer.validated_data["force"],
             "master_file": getattr(master_file, "name", None),
             "csv_path": csv_path,
         }
-        job = create_job(Job.JobType.MASTER_UPDATE, payload)
+        job = create_job(Job.JobType.MASTER_UPDATE, payload, request.user)
         try:
             run_job(
                 job,
@@ -174,10 +187,13 @@ class MasterUpdateView(APIView):
                     master_file=master_file,
                     csv_path=csv_path,
                     inspection_folder_paths=folder_paths,
+                    inspection_folder_priorities=folder_priorities,
                 ),
             )
-        except FileNotFoundError as exc:
-            return error_response("FILE_NOT_FOUND", str(exc), status.HTTP_404_NOT_FOUND)
+        except FileNotFoundError:
+            return error_response("FILE_NOT_FOUND", "マスタ取込ファイルが保存場所に存在しません。", status.HTTP_404_NOT_FOUND)
+        except ClassificationError as exc:
+            return classification_error_response(exc)
         except Exception as exc:
             return error_response("ERP_AUTOMATION_FAILED", str(exc), status.HTTP_500_INTERNAL_SERVER_ERROR)
         return Response({"status": "accepted", "job_id": job.job_id}, status=status.HTTP_202_ACCEPTED)
@@ -198,6 +214,7 @@ class MasterSearchView(APIView):
 
 
 class SettingsView(APIView):
+    permission_classes = [IsAdmin]
     def get(self, request):
         setting = AppSetting.objects.first()
         if setting is None:
@@ -215,6 +232,7 @@ class SettingsView(APIView):
 
 
 class ErpAutomationView(APIView):
+    permission_classes = [IsAdmin]
     def post(self, request):
         csv_path = request.data.get("csv_path") or ""
         erp_path = request.data.get("erp_path") or ""
@@ -231,7 +249,7 @@ class ErpAutomationView(APIView):
         if not script.exists():
             return error_response("SCRIPT_NOT_FOUND", f"スクリプトが見つかりません: {script}", status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-        job = create_job(Job.JobType.MASTER_UPDATE, {"erp_path": erp_path, "csv_path": csv_path})
+        job = create_job(Job.JobType.MASTER_UPDATE, {"erp_path": erp_path, "csv_path": csv_path}, request.user)
 
         def run():
             try:
@@ -271,6 +289,7 @@ class PlansImportView(APIView):
                 "excel_file": getattr(excel_file, "name", None),
                 "sheet_name": sheet_name,
             },
+            request.user,
         )
         try:
             run_job(
@@ -280,10 +299,13 @@ class PlansImportView(APIView):
                     scan_file=scan_file,
                     excel_file=excel_file,
                     sheet_name=sheet_name,
+                    user=request.user,
                 ),
             )
-        except FileNotFoundError as exc:
-            return error_response("FILE_NOT_FOUND", str(exc), status.HTTP_404_NOT_FOUND)
+        except FileNotFoundError:
+            return error_response("FILE_NOT_FOUND", "取込ファイルが保存場所に存在しません。", status.HTTP_404_NOT_FOUND)
+        except ClassificationError as exc:
+            return classification_error_response(exc)
         except Exception as exc:
             return error_response("JOB_FAILED", str(exc), status.HTTP_500_INTERNAL_SERVER_ERROR)
         return Response({"status": "accepted", "job_id": job.job_id}, status=status.HTTP_202_ACCEPTED)
@@ -291,13 +313,54 @@ class PlansImportView(APIView):
 
 class ManualTargetsView(APIView):
     def post(self, request):
+        if "class_override" in request.data:
+            return error_response("INVALID_REQUEST", "class_overrideは指定できません。")
         serializer = ManualTargetsRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        session, added_count = add_manual_targets(
-            serializer.validated_data["date"],
-            serializer.validated_data["codes"],
-            class_override=serializer.validated_data.get("class_override"),
-        )
+        try:
+            session, added_count = add_manual_targets(
+                serializer.validated_data["date"], serializer.validated_data["codes"], user=request.user
+            )
+        except ClassificationError as exc:
+            return classification_error_response(exc)
+        return success_response(session_id=session.id, added_count=added_count)
+
+
+def classification_error_response(exc):
+    http_status = status.HTTP_409_CONFLICT if exc.error_code in ("CLASS_1_2_CONFLICT", "CLASS_6_7_CONFLICT") else status.HTTP_400_BAD_REQUEST
+    return error_response(exc.error_code, exc.message, http_status=http_status, details=exc.details)
+
+
+class FactoryMapTargetsView(APIView):
+    def post(self, request):
+        if "class_override" in request.data:
+            return error_response("INVALID_REQUEST", "class_overrideは指定できません。")
+        serializer = FactoryMapTargetRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            session, added_count = add_factory_map_target(
+                serializer.validated_data["date"],
+                serializer.validated_data["machine_id"],
+                serializer.validated_data["code"],
+                user=request.user,
+            )
+        except ClassificationError as exc:
+            return classification_error_response(exc)
+        return success_response(session_id=session.id, added_count=added_count)
+
+
+class SpecialTargetsView(APIView):
+    def post(self, request):
+        if "class_override" in request.data:
+            return error_response("INVALID_REQUEST", "class_overrideは指定できません。")
+        serializer = SpecialTargetsRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            session, added_count = add_special_targets(
+                serializer.validated_data["date"], serializer.validated_data["codes"], user=request.user
+            )
+        except ClassificationError as exc:
+            return classification_error_response(exc)
         return success_response(session_id=session.id, added_count=added_count)
 
 
@@ -307,7 +370,7 @@ class InspectionTargetsView(APIView):
         if not target_date:
             return error_response("INVALID_REQUEST", "date query parameter is required.")
 
-        session = InspectionSession.objects.filter(target_date=target_date).first()
+        session = InspectionSession.objects.filter(target_date=target_date, owner_user=request.user).first()
         if session is None:
             return Response([])
 
@@ -320,40 +383,241 @@ class InspectionTargetsView(APIView):
         serializer = InspectionTargetSerializer(
             targets,
             many=True,
-            context={"histories": history_map_for_date(target_date)},
+            context={"histories": history_map_for_date(target_date, request.user)},
         )
         return Response(serializer.data)
 
 
+def _parse_summary_period(request):
+    try:
+        start = date.fromisoformat(request.query_params.get("start", ""))
+        end = date.fromisoformat(request.query_params.get("end", ""))
+    except ValueError:
+        return None, None, error_response("INVALID_PERIOD", "start and end must be valid ISO dates.")
+    if start > end:
+        return None, None, error_response("INVALID_PERIOD", "start must not be after end.")
+    if (end - start).days > 366:
+        return None, None, error_response("INVALID_PERIOD", "The selected period must be 367 days or less.")
+    return start, end, None
+
+
+def _history_class_map(histories):
+    master_ids = {row.master_id for row in histories if not row.class_override}
+    mapping = {}
+    for master_id, class_no in (
+        MasterClass.objects.filter(master_id__in=master_ids, class_master__isnull=False)
+        .exclude(class_master__class_no=9)
+        .order_by("id")
+        .values_list("master_id", "class_master__class_no")
+    ):
+        mapping.setdefault(master_id, class_no)
+    return {row.history_id: row.class_override or mapping.get(row.master_id) for row in histories}
+
+
+def _summary_source(start, end):
+    histories = list(
+        History.objects.filter(date__range=(start, end), deleted_at__isnull=True)
+        .select_related("master", "created_by")
+        .order_by("date", "history_id")
+    )
+    sessions = list(
+        InspectionSession.objects.filter(target_date__range=(start, end), deleted_at__isnull=True)
+        .select_related("owner_user")
+        .order_by("target_date", "owner_user__display_name")
+    )
+    return histories, sessions, _history_class_map(histories)
+
+
+class InspectionNoteView(APIView):
+    def get(self, request):
+        try:
+            target_date = date.fromisoformat(request.query_params.get("date", ""))
+        except ValueError:
+            return error_response("INVALID_DATE", "date must be a valid ISO date.")
+        session = InspectionSession.objects.filter(
+            owner_user=request.user, target_date=target_date, deleted_at__isnull=True
+        ).first()
+        return Response({"date": str(target_date), "note": session.note if session else ""})
+
+    def put(self, request):
+        try:
+            target_date = date.fromisoformat(str(request.data.get("date", "")))
+        except ValueError:
+            return error_response("INVALID_DATE", "date must be a valid ISO date.")
+        note = request.data.get("note", "")
+        if not isinstance(note, str):
+            return error_response("INVALID_REQUEST", "note must be a string.")
+        session, _ = InspectionSession.objects.get_or_create(
+            owner_user=request.user,
+            target_date=target_date,
+            defaults={"created_by": request.user, "updated_by": request.user},
+        )
+        session.note = note
+        session.updated_by = request.user
+        session.deleted_at = None
+        session.deleted_by = None
+        session.save(update_fields=["note", "updated_by", "deleted_at", "deleted_by", "updated_at"])
+        return Response({"date": str(target_date), "note": session.note})
+
+
+class InspectionSummaryView(APIView):
+    permission_classes = [IsAdmin]
+
+    def get(self, request):
+        start, end, invalid = _parse_summary_period(request)
+        if invalid:
+            return invalid
+        histories, sessions, class_map = _summary_source(start, end)
+        class_totals = Counter()
+        item_totals = Counter()
+        daily = defaultdict(lambda: {"total": 0, "classes": Counter(), "inspectors": defaultdict(lambda: {"name": "不明", "total": 0, "classes": Counter()})})
+        requested_classes = request.query_params.get("classes")
+        try:
+            top_classes = set(range(1, 10)) if requested_classes is None else {
+                int(value) for value in requested_classes.split(",") if value
+            }
+        except ValueError:
+            return error_response("INVALID_CLASSES", "classes must be comma-separated integers.")
+        requested_inspectors = request.query_params.get("inspectors")
+        top_inspectors = None
+        if requested_inspectors is not None:
+            top_inspectors = set()
+            if requested_inspectors:
+                for value in requested_inspectors.split(","):
+                    token = value.strip()
+                    if token == "unknown":
+                        top_inspectors.add(None)
+                    else:
+                        try:
+                            top_inspectors.add(int(token))
+                        except ValueError:
+                            return error_response("INVALID_INSPECTORS", "inspectors must be comma-separated integer IDs or unknown.")
+        for row in histories:
+            class_no = class_map.get(row.history_id)
+            inspector_id = row.created_by_id
+            inspector = row.created_by.display_name if row.created_by else "不明"
+            day = daily[str(row.date)]
+            day["total"] += 1
+            day["inspectors"][inspector_id]["name"] = inspector
+            day["inspectors"][inspector_id]["total"] += 1
+            if class_no in range(1, 10):
+                class_totals[class_no] += 1
+                day["classes"][class_no] += 1
+                day["inspectors"][inspector_id]["classes"][class_no] += 1
+            if class_no in top_classes and (top_inspectors is None or inspector_id in top_inspectors):
+                item_totals[(row.master.code, row.master.name)] += 1
+        notes_by_day = defaultdict(list)
+        for session in sessions:
+            if session.note.strip():
+                inspector_id = session.owner_user_id
+                inspector = session.owner_user.display_name if session.owner_user else "不明"
+                notes_by_day[str(session.target_date)].append({
+                    "user_id": inspector_id,
+                    "inspector": inspector,
+                    "note": session.note,
+                })
+                daily[str(session.target_date)]["inspectors"][inspector_id]["name"] = inspector
+        rows = []
+        cursor = start
+        while cursor <= end:
+            key = str(cursor)
+            value = daily[key]
+            rows.append({
+                "date": key,
+                "total": value["total"],
+                "classes": {str(no): value["classes"][no] for no in range(1, 10)},
+                "inspectors": [
+                    {"user_id": user_id, "name": detail["name"], "total": detail["total"], "classes": {str(no): detail["classes"][no] for no in range(1, 10)}}
+                    for user_id, detail in sorted(value["inspectors"].items(), key=lambda item: (item[1]["name"], item[0] or 0))
+                ],
+                "notes": notes_by_day[key],
+            })
+            cursor += timedelta(days=1)
+        months = {date.today().strftime("%Y-%m")}
+        months.update(value.strftime("%Y-%m") for value in History.objects.filter(deleted_at__isnull=True).dates("date", "month"))
+        months.update(value.strftime("%Y-%m") for value in InspectionSession.objects.filter(deleted_at__isnull=True).dates("target_date", "month"))
+        return Response({
+            "start": str(start), "end": str(end), "months": sorted(months, reverse=True),
+            "class_totals": {str(no): class_totals[no] for no in range(1, 10)},
+            "top_items": [{"code": code, "name": name, "count": count} for (code, name), count in item_totals.most_common(10)],
+            "days": rows,
+        })
+
+
+class InspectionSummaryCsvView(APIView):
+    permission_classes = [IsAdmin]
+
+    def get(self, request, csv_type):
+        start, end, invalid = _parse_summary_period(request)
+        if invalid:
+            return invalid
+        histories, sessions, class_map = _summary_source(start, end)
+        output = StringIO(newline="")
+        output.write("\ufeff")
+        writer = csv.writer(output, lineterminator="\r\n")
+        if csv_type == "counts":
+            writer.writerow(["日付", "総数", *[f"クラス{no}" for no in range(1, 10)]])
+            counts = defaultdict(Counter)
+            for row in histories:
+                counts[row.date]["total"] += 1
+                class_no = class_map.get(row.history_id)
+                if class_no in range(1, 10):
+                    counts[row.date][class_no] += 1
+            cursor = start
+            while cursor <= end:
+                writer.writerow([cursor, counts[cursor]["total"], *[counts[cursor][no] for no in range(1, 10)]])
+                cursor += timedelta(days=1)
+            prefix = "inspection-counts"
+        elif csv_type == "notes":
+            writer.writerow(["日付", "検査者名", "ノート内容"])
+            for session in sessions:
+                if session.note.strip():
+                    writer.writerow([session.target_date, session.owner_user.display_name if session.owner_user else "不明", session.note])
+            prefix = "inspection-notes"
+        else:
+            return error_response("INVALID_CSV_TYPE", "csv_type must be counts or notes.")
+        response = HttpResponse(output.getvalue(), content_type="text/csv; charset=utf-8")
+        response["Content-Disposition"] = f'attachment; filename="{prefix}_{start}_{end}.csv"'
+        return response
+
+
 class InspectionTargetDetailView(APIView):
     def delete(self, request, target_id):
-        target = get_object_or_404(InspectionTarget, id=target_id)
+        target = get_object_or_404(InspectionTarget, id=target_id, session__owner_user=request.user)
         target.visible = False
-        target.save()
+        target.deleted_at = timezone.now()
+        target.deleted_by = request.user
+        target.updated_by = request.user
+        target.save(update_fields=["visible", "deleted_at", "deleted_by", "updated_by", "updated_at"])
         return success_response()
 
 
 class TargetInspectionFileView(APIView):
     def get(self, request, target_id):
         target = get_object_or_404(
-            InspectionTarget.objects.select_related("master"), id=target_id
+            InspectionTarget.objects.select_related("master"), id=target_id, session__owner_user=request.user
         )
         if not target.master:
             return error_response(
                 "NO_MASTER", "検査対象にマスターが登録されていません"
             )
 
-        insp_file = InspectionFile.objects.filter(master=target.master).first()
+        try:
+            insp_file = resolve_inspection_file(target.master, target.class_override)
+            if insp_file is None and target.class_override is None:
+                insp_file = resolve_unambiguous_inspection_file(target.master)
+        except ClassificationError as exc:
+            return classification_error_response(exc)
         if not insp_file:
             return error_response(
                 "FILE_NOT_FOUND", "検査書ファイルが見つかりません"
             )
 
-        file_path = insp_file.file_path
+        file_path = insp_file["file_path"] if isinstance(insp_file, dict) else insp_file.file_path
         if not os.path.exists(file_path):
             return error_response(
                 "FILE_NOT_FOUND",
-                f"ファイルが存在しません: {file_path}",
+                "検査書ファイルが保存場所に存在しません。",
             )
 
         ext = os.path.splitext(file_path)[1].lower()
@@ -379,25 +643,27 @@ class TargetInspectionFileView(APIView):
 class TargetInspectionFilePrintView(APIView):
     def post(self, request, target_id):
         try:
-            print_inspection_file(target_id)
+            print_inspection_file(target_id, request.user)
             return success_response(message="印刷を開始しました")
         except InspectionTarget.DoesNotExist:
             return error_response(
                 "NOT_FOUND",
                 "検査対象が見つかりません",
-                status=status.HTTP_404_NOT_FOUND,
+                http_status=status.HTTP_404_NOT_FOUND,
             )
-        except FileNotFoundError as exc:
+        except ClassificationError as exc:
+            return classification_error_response(exc)
+        except FileNotFoundError:
             return error_response(
                 "FILE_NOT_FOUND",
-                str(exc),
-                status=status.HTTP_404_NOT_FOUND,
+                "検査書ファイルが保存場所に存在しません。",
+                http_status=status.HTTP_404_NOT_FOUND,
             )
         except ValueError as exc:
             return error_response("INVALID_REQUEST", str(exc))
-        except Exception as exc:
+        except Exception:
             return error_response(
-                "PRINT_FAILED", str(exc), status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                "PRINT_FAILED", "検査書の印刷に失敗しました。", http_status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
 
@@ -406,11 +672,14 @@ class BulkHideTargetsView(APIView):
         serializer = BulkHideTargetsRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         date = serializer.validated_data["date"]
-        session = InspectionSession.objects.filter(target_date=date).first()
+        session = InspectionSession.objects.filter(target_date=date, owner_user=request.user).first()
         if session is None:
             return success_response(hidden_count=0)
         ids = serializer.validated_data["target_ids"]
-        hidden = InspectionTarget.objects.filter(session=session, id__in=ids).update(visible=False)
+        hidden = InspectionTarget.objects.filter(session=session, id__in=ids).update(
+            visible=False, deleted_at=timezone.now(), deleted_by=request.user,
+            updated_by=request.user, updated_at=timezone.now()
+        )
         return success_response(hidden_count=hidden)
 
 
@@ -422,9 +691,10 @@ class BulkHistoryView(APIView):
             updated_count = bulk_upsert_history(
                 serializer.validated_data["date"],
                 serializer.validated_data["items"],
+                user=request.user,
             )
-        except ValueError as exc:
-            return error_response("UNKNOWN_CODE", str(exc))
+        except ClassificationError as exc:
+            return classification_error_response(exc)
         return success_response(updated_count=updated_count)
 
 
@@ -435,13 +705,13 @@ class SingleHistoryView(APIView):
         try:
             set_check(
                 serializer.validated_data["date"],
-                serializer.validated_data["code"],
+                serializer.validated_data["target_id"],
                 serializer.validated_data["time"],
                 serializer.validated_data["checked"],
-                class_override=serializer.validated_data.get("class_override"),
+                user=request.user,
             )
-        except ValueError as exc:
-            return error_response("UNKNOWN_CODE", str(exc))
+        except ClassificationError as exc:
+            return classification_error_response(exc)
         return success_response()
 
     def get(self, request):
@@ -450,7 +720,7 @@ class SingleHistoryView(APIView):
             return error_response("INVALID_REQUEST", "date query parameter is required.")
 
         rows = (
-            History.objects.filter(date=target_date)
+            History.objects.filter(date=target_date, created_by=request.user, deleted_at__isnull=True)
             .select_related("master")
             .order_by("master__code", "time_slot")
         )
@@ -476,9 +746,9 @@ class HistoryWriteToFileView(APIView):
             if isinstance(target_date, str):
                 from datetime import datetime
                 target_date = datetime.strptime(target_date, "%Y-%m-%d").date()
-            written_count = write_history_to_excel(target_date)
-        except FileNotFoundError as exc:
-            return error_response("FILE_NOT_FOUND", str(exc), status.HTTP_404_NOT_FOUND)
+            written_count = write_history_to_excel(target_date, request.user)
+        except FileNotFoundError:
+            return error_response("FILE_NOT_FOUND", "履歴ファイルが保存場所に存在しません。", status.HTTP_404_NOT_FOUND)
         except Exception as exc:
             return error_response("HISTORY_WRITE_FAILED", str(exc), status.HTTP_500_INTERNAL_SERVER_ERROR)
         return success_response(written_count=written_count)
@@ -497,9 +767,11 @@ class FactoryMapView(APIView):
         warnings = []
 
         if target_date:
-            session = InspectionSession.objects.filter(target_date=target_date).first()
+            session = InspectionSession.objects.filter(target_date=target_date, owner_user=request.user).first()
             if session:
-                targets = InspectionTarget.objects.filter(session=session, visible=True).select_related("master")
+                targets = InspectionTarget.objects.filter(session=session, visible=True).filter(
+                    db_models.Q(class_override__range=(1, 5)) | db_models.Q(master__isnull=True)
+                ).select_related("master")
                 target_codes = {target.normalized_code for target in targets}
                 assigned_codes = set(
                     MachineAssignment.objects.filter(code__code__in=target_codes).values_list("code__code", flat=True)
@@ -540,7 +812,7 @@ class FactoryMapView(APIView):
 
         return Response(
             {
-                "image_url": layout.background_image_path or "",
+                "image_url": "",
                 "layout": serialize_layout(layout),
                 "machines": machines,
                 "warnings": warnings,
@@ -549,6 +821,8 @@ class FactoryMapView(APIView):
 
 
 class FactoryMapLayoutView(APIView):
+    def get_permissions(self):
+        return [IsAdmin()] if self.request.method in ("PUT", "DELETE") else super().get_permissions()
     def get(self, request, layout_id=None):
         if layout_id:
             layout = get_object_or_404(LayoutMaster, id=layout_id)
@@ -574,7 +848,6 @@ class FactoryMapLayoutView(APIView):
         else:
             layout, _ = LayoutMaster.objects.get_or_create(layout_name=data["layout_name"])
 
-        layout.background_image_path = data["background_image_path"]
         layout.grid_width = data["grid_width"]
         layout.grid_height = data["grid_height"]
         layout.save()
@@ -619,6 +892,8 @@ class FactoryMapLayoutView(APIView):
 
 
 class FactoryMapLayoutsView(APIView):
+    def get_permissions(self):
+        return [IsAdmin()] if self.request.method == "POST" else super().get_permissions()
     def get(self, request):
         layouts = LayoutMaster.objects.all().order_by("id")
         serializer = LayoutMasterListSerializer(layouts, many=True)
@@ -630,28 +905,8 @@ class FactoryMapLayoutsView(APIView):
         name = serializer.validated_data["layout_name"]
         if LayoutMaster.objects.filter(layout_name=name).exists():
             return error_response("DUPLICATE_NAME", f"レイアウト名 '{name}' は既に存在します。")
-        layout = LayoutMaster.objects.create(layout_name=name)
+        layout = LayoutMaster.objects.create(layout_name=name, owner_user=request.user)
         return Response(LayoutMasterListSerializer(layout).data, status=status.HTTP_201_CREATED)
-
-
-class UploadBackgroundImageView(APIView):
-    parser_classes = [MultiPartParser, FormParser]
-
-    def post(self, request):
-        file = request.FILES.get("image")
-        if not file:
-            return error_response("NO_FILE", "画像ファイルが指定されていません。")
-        ext = os.path.splitext(file.name)[1] or ".png"
-        filename = f"bg_{uuid.uuid4().hex}{ext}"
-        subdir = "uploads"
-        upload_dir = settings.MEDIA_ROOT / subdir
-        upload_dir.mkdir(parents=True, exist_ok=True)
-        filepath = upload_dir / filename
-        with open(filepath, "wb") as f:
-            for chunk in file.chunks():
-                f.write(chunk)
-        url = f"{settings.MEDIA_URL}{subdir}/{filename}"
-        return Response({"url": url, "filename": filename})
 
 
 class MachineListView(APIView):
@@ -662,6 +917,7 @@ class MachineListView(APIView):
 
 
 class MachineMasterView(APIView):
+    permission_classes = [IsAdmin]
     def get(self, request):
         machines = Machine.objects.all().order_by("machine_no").prefetch_related("assignments__code")
         result = []
@@ -691,8 +947,10 @@ class MachineMasterView(APIView):
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
 
+        previous_master_ids = set()
         if data.get("id"):
             machine = get_object_or_404(Machine, id=data["id"])
+            previous_master_ids = set(machine.assignments.values_list("code_id", flat=True))
             machine.machine_no = data["machine_no"]
             machine.machine_name = data["machine_name"]
             machine.machine_class = data.get("machine_class")
@@ -732,7 +990,13 @@ class MachineMasterView(APIView):
                     code=master,
                     assignment_class=ac,
                 )
+        affected_master_ids = previous_master_ids | set(machine.assignments.values_list("code_id", flat=True))
+        try:
+            for master in Master.objects.filter(code__in=affected_master_ids):
                 sync_master_class_from_assignment(master)
+        except ClassificationError as exc:
+            transaction.set_rollback(True)
+            return classification_error_response(exc)
 
         return Response({
             "id": machine.id,
@@ -755,11 +1019,11 @@ class MachineMasterView(APIView):
 class InspectionSheetIssueView(APIView):
     def post(self, request):
         target_date = request.data.get("date")
-        job = create_job(Job.JobType.INSPECTION_SHEET_ISSUE, request.data)
+        job = create_job(Job.JobType.INSPECTION_SHEET_ISSUE, request.data, request.user)
         try:
-            run_job(job, lambda: issue_inspection_sheets(target_date=target_date))
-        except FileNotFoundError as exc:
-            return error_response("FILE_NOT_FOUND", str(exc), status.HTTP_500_INTERNAL_SERVER_ERROR)
+            run_job(job, lambda: issue_inspection_sheets(target_date=target_date, user=request.user))
+        except FileNotFoundError:
+            return error_response("FILE_NOT_FOUND", "検査書テンプレートが保存場所に存在しません。", status.HTTP_500_INTERNAL_SERVER_ERROR)
         except RuntimeError as exc:
             return error_response("COM_FAILED", str(exc), status.HTTP_500_INTERNAL_SERVER_ERROR)
         except Exception as exc:
@@ -779,12 +1043,13 @@ class DailyReportGenerateView(APIView):
         job = create_job(
             Job.JobType.DAILY_REPORT_GENERATE,
             {"date": str(target_date)},
+            request.user,
         )
 
         try:
-            run_job(job, lambda: generate_daily_report(target_date))
-        except FileNotFoundError as exc:
-            return error_response("FILE_NOT_FOUND", str(exc), status.HTTP_500_INTERNAL_SERVER_ERROR)
+            run_job(job, lambda: generate_daily_report(target_date, request.user))
+        except FileNotFoundError:
+            return error_response("FILE_NOT_FOUND", "日報テンプレートが保存場所に存在しません。", status.HTTP_500_INTERNAL_SERVER_ERROR)
         except PermissionError as exc:
             return error_response("FILE_IN_USE", str(exc), status.HTTP_409_CONFLICT)
         except Exception as exc:
@@ -805,12 +1070,13 @@ class DailyReportIssueView(APIView):
         job = create_job(
             Job.JobType.DAILY_REPORT_GENERATE,
             {"date": str(target_date)},
+            request.user,
         )
 
         try:
-            run_job(job, lambda: issue_daily_report(target_date))
-        except FileNotFoundError as exc:
-            return error_response("FILE_NOT_FOUND", str(exc), status.HTTP_500_INTERNAL_SERVER_ERROR)
+            run_job(job, lambda: issue_daily_report(target_date, request.user))
+        except FileNotFoundError:
+            return error_response("FILE_NOT_FOUND", "日報テンプレートが保存場所に存在しません。", status.HTTP_500_INTERNAL_SERVER_ERROR)
         except PermissionError as exc:
             return error_response("FILE_IN_USE", str(exc), status.HTTP_409_CONFLICT)
         except Exception as exc:
@@ -828,6 +1094,7 @@ class LayoutObjectTypeColorUpdateSerializer(serializers.Serializer):
 
 
 class LayoutObjectTypeColorUpdateView(APIView):
+    permission_classes = [IsAdmin]
     def patch(self, request, code):
         try:
             obj_type = LayoutObjectType.objects.get(code=code)
@@ -842,6 +1109,7 @@ class LayoutObjectTypeColorUpdateView(APIView):
 
 
 class Class9SettingsView(APIView):
+    permission_classes = [IsAdmin]
     def get(self, request):
         qs = SpecialInspectionClass9.objects.select_related("master").all()
         return Response([
@@ -889,6 +1157,7 @@ class Class9SettingsView(APIView):
 
 
 class SeedMasterView(APIView):
+    permission_classes = [IsAdmin]
     def post(self, request):
         items = request.data.get("items", [])
         if not isinstance(items, list):
@@ -924,13 +1193,17 @@ class InspectionFileOpenByCodeView(APIView):
         if not code:
             return error_response("INVALID_REQUEST", "code is required.")
 
-        insp_file = InspectionFile.objects.filter(master__code=code).first()
+        master = Master.objects.filter(code=code).first()
+        try:
+            insp_file = resolve_unambiguous_inspection_file(master) if master else None
+        except ClassificationError as exc:
+            return classification_error_response(exc)
         if not insp_file:
             return error_response("FILE_NOT_FOUND", "検査書ファイルが見つかりません")
 
-        file_path = insp_file.file_path
+        file_path = insp_file["file_path"] if isinstance(insp_file, dict) else insp_file.file_path
         if not os.path.exists(file_path):
-            return error_response("FILE_NOT_FOUND", f"ファイルが存在しません: {file_path}")
+            return error_response("FILE_NOT_FOUND", "検査書ファイルが保存場所に存在しません。")
 
         ext = os.path.splitext(file_path)[1].lower()
         if ext in (".xls", ".xlsx", ".xlsm"):
@@ -954,13 +1227,17 @@ class InspectionFilePdfByCodeView(APIView):
         if not code:
             return error_response("INVALID_REQUEST", "code is required.")
 
-        insp_file = InspectionFile.objects.filter(master__code=code).first()
+        master = Master.objects.filter(code=code).first()
+        try:
+            insp_file = resolve_unambiguous_inspection_file(master) if master else None
+        except ClassificationError as exc:
+            return classification_error_response(exc)
         if not insp_file:
             return error_response("FILE_NOT_FOUND", "検査書ファイルが見つかりません")
 
-        file_path = insp_file.file_path
+        file_path = insp_file["file_path"] if isinstance(insp_file, dict) else insp_file.file_path
         if not os.path.exists(file_path):
-            return error_response("FILE_NOT_FOUND", f"ファイルが存在しません: {file_path}")
+            return error_response("FILE_NOT_FOUND", "検査書ファイルが保存場所に存在しません。")
 
         ext = os.path.splitext(file_path)[1].lower()
         try:
@@ -1002,13 +1279,17 @@ class InspectionFilePrintByCodeView(APIView):
         if not code:
             return error_response("INVALID_REQUEST", "code is required.")
 
-        insp_file = InspectionFile.objects.filter(master__code=code).first()
+        master = Master.objects.filter(code=code).first()
+        try:
+            insp_file = resolve_unambiguous_inspection_file(master) if master else None
+        except ClassificationError as exc:
+            return classification_error_response(exc)
         if not insp_file:
             return error_response("FILE_NOT_FOUND", "検査書ファイルが見つかりません")
 
-        file_path = insp_file.file_path
+        file_path = insp_file["file_path"] if isinstance(insp_file, dict) else insp_file.file_path
         if not os.path.exists(file_path):
-            return error_response("FILE_NOT_FOUND", f"ファイルが存在しません: {file_path}")
+            return error_response("FILE_NOT_FOUND", "検査書ファイルが保存場所に存在しません。")
 
         try:
             os.startfile(file_path, "print")

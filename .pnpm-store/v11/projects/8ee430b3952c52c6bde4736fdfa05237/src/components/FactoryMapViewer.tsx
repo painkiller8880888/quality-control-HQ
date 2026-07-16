@@ -42,7 +42,6 @@ export const FactoryMapViewer: React.FC<FactoryMapViewerProps> = ({ mapData, isL
   const objects = layout?.objects ?? [];
   const objectTypes = layout?.object_types ?? [];
   const machines = mapData?.machines ?? [];
-  const [bgImageError, setBgImageError] = React.useState(false);
 
   const machineTargets = new window.Map<number, string[]>();
   machines.forEach((machine) => {
@@ -76,15 +75,6 @@ export const FactoryMapViewer: React.FC<FactoryMapViewerProps> = ({ mapData, isL
         </div>
       ) : (
         <div className="factory-map-canvas" style={{ aspectRatio: `${layout.grid_width} / ${layout.grid_height}` }}>
-          {layout.background_image_path && (
-            <img className="factory-map-bg" src={layout.background_image_path} alt=""
-              onError={() => setBgImageError(true)}
-              onLoad={() => setBgImageError(false)}
-            />
-          )}
-          {bgImageError && layout.background_image_path && (
-            <div className="map-bg-error">背景画像を読み込めませんでした</div>
-          )}
           {objects.length === 0 ? (
             <div className="map-empty-inset">
               <MapPin size={28} className="text-muted" />

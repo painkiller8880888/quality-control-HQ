@@ -1,4 +1,6 @@
 import csv
+import os
+import shutil
 import logging
 import re
 from pathlib import Path
@@ -6,6 +8,7 @@ from uuid import uuid4
 
 from django.conf import settings
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 import fitz
 from openpyxl import load_workbook
@@ -13,7 +16,7 @@ from pypdf import PdfReader
 from rapidocr_onnxruntime import RapidOCR
 import xlrd
 
-from datetime import date as date_type
+from datetime import date as date_type, datetime
 from .constants import CHECK_SLOTS
 from .models import (
     ClassMaster,
@@ -47,6 +50,18 @@ def inspection_sheet_required(master):
         return False
     mc = MasterClass.objects.filter(master=master).exclude(class_master__class_no=9).first()
     return mc is not None and mc.class_master is not None and mc.class_master.class_no in (1, 6, 7)
+
+
+class ClassificationError(Exception):
+    def __init__(self, error_code, message, details=None):
+        super().__init__(message)
+        self.error_code = error_code
+        self.message = message
+        self.details = details or {}
+
+
+def inspection_sheet_required_for_class(class_no):
+    return class_no in (1, 6, 7, 9)
 
 
 # PRODUCT.md classification table
@@ -361,6 +376,135 @@ def get_assignment_class_for_master(master):
     return ma.assignment_class if ma else None
 
 
+def _assignment_classes(master):
+    if master is None:
+        return set()
+    classes = set()
+    for assignment_class, machine_class in MachineAssignment.objects.filter(code=master).values_list(
+        "assignment_class", "machine__machine_class"
+    ):
+        value = assignment_class if assignment_class is not None else machine_class
+        if value is not None:
+            classes.add(int(value))
+    return classes
+
+
+def _conflicting_machine_numbers(master):
+    machine_numbers = []
+    assignments = MachineAssignment.objects.filter(code=master).select_related("machine").order_by("machine__machine_no")
+    for assignment in assignments:
+        assignment_class = assignment.assignment_class
+        effective_class = assignment_class if assignment_class is not None else assignment.machine.machine_class
+        if effective_class in (1, 2):
+            machine_numbers.append(assignment.machine.machine_no)
+    return machine_numbers
+
+
+def _safe_file_name(file_path):
+    return Path(str(file_path).replace("\\", "/")).name
+
+
+def resolve_process_class(master):
+    if master is None:
+        raise ClassificationError("PROCESS_CLASS_NOT_FOUND", "工程分類に必要な品目マスターがありません。")
+    classes = _assignment_classes(master)
+    process_12 = classes & {1, 2}
+    if process_12 == {1, 2}:
+        raise ClassificationError(
+            "CLASS_1_2_CONFLICT",
+            "クラス1と2の機械設定が重複しています。機械設定を確認してください。",
+            {
+                "code": master.code,
+                "detected_classes": [1, 2],
+                "machine_numbers": _conflicting_machine_numbers(master),
+            },
+        )
+    if process_12:
+        return next(iter(process_12))
+    if 3 in classes:
+        return 3
+    n1 = (master.node_type_1 or "").strip()
+    dept = (master.department or "").strip()
+    if n1 == "プレス":
+        return 4
+    if n1 == "加工" and dept in ("製造管理部", "生産技術部"):
+        return 5
+    raise ClassificationError(
+        "PROCESS_CLASS_NOT_FOUND",
+        "工程クラスを判定できません。機械または品目設定を確認してください。",
+        {"code": master.code},
+    )
+
+
+def resolve_ocr_class(master):
+    process_not_found = None
+    try:
+        return resolve_process_class(master)
+    except ClassificationError as exc:
+        if exc.error_code != "PROCESS_CLASS_NOT_FOUND":
+            raise
+        process_not_found = exc
+    if MasterClass.objects.filter(master=master, class_master__class_no=8).exists():
+        return 8
+    raise process_not_found
+
+
+def resolve_product_inspection_class(master):
+    if master is None:
+        raise ClassificationError("PRODUCT_INSPECTION_FILE_NOT_FOUND", "製品検査の品目マスターがありません。")
+    folder_classes = {
+        classify_folder(path)
+        for path in InspectionFile.objects.filter(master=master).values_list("file_path", flat=True)
+    }
+    matched = folder_classes & {"product1", "product2"}
+    if matched == {"product1", "product2"}:
+        candidate_file_names = [
+            _safe_file_name(path)
+            for path in InspectionFile.objects.filter(master=master).order_by("id").values_list("file_path", flat=True)
+            if classify_folder(path) in matched
+        ]
+        raise ClassificationError(
+            "CLASS_6_7_CONFLICT",
+            "製品検査(1)と製品検査(2)の両方に検査書があります。保存場所を確認してください。",
+            {
+                "code": master.code,
+                "detected_classes": [6, 7],
+                "candidate_file_names": candidate_file_names,
+            },
+        )
+    if "product1" in matched:
+        return 6
+    if "product2" in matched:
+        return 7
+    raise ClassificationError(
+        "PRODUCT_INSPECTION_FILE_NOT_FOUND",
+        "製品検査用の検査書が見つかりません。",
+        {"code": master.code},
+    )
+
+
+def resolve_special_class(master):
+    if master is None or not SpecialInspectionClass9.objects.filter(master=master).exists():
+        raise ClassificationError(
+            "CLASS_9_SETTING_NOT_FOUND",
+            "特殊検査の設定が見つかりません。",
+            {"code": master.code if master else None},
+        )
+    return 9
+
+
+def resolve_class_for_route(master, registration_route):
+    if registration_route == InspectionTarget.RegistrationRoute.OCR:
+        return resolve_ocr_class(master)
+    if registration_route == InspectionTarget.RegistrationRoute.FACTORY_MAP:
+        return resolve_process_class(master)
+    if registration_route in (InspectionTarget.RegistrationRoute.EXCEL, InspectionTarget.RegistrationRoute.MANUAL_CODE):
+        return resolve_product_inspection_class(master)
+    if registration_route == InspectionTarget.RegistrationRoute.SPECIAL:
+        return resolve_special_class(master)
+    raise ClassificationError("INVALID_REGISTRATION_ROUTE", "登録経路が不正です。")
+
+
 def assigned_to_machine_class(master, machine_class):
     if master is None:
         return False
@@ -372,7 +516,19 @@ def assigned_to_machine_class(master, machine_class):
 def sync_master_class_from_assignment(master):
     if master is None:
         return
-    ac = get_assignment_class_for_master(master)
+    classes = _assignment_classes(master)
+    if classes & {1, 2} == {1, 2}:
+        raise ClassificationError(
+            "CLASS_1_2_CONFLICT",
+            "クラス1と2の機械設定が重複しています。機械設定を確認してください。",
+            {
+                "code": master.code,
+                "detected_classes": [1, 2],
+                "machine_numbers": _conflicting_machine_numbers(master),
+            },
+        )
+    MasterClass.objects.filter(master=master, class_master__class_no__in=[1, 2]).delete()
+    ac = next(iter(classes & {1, 2}), None)
     if ac is not None and ac in (1, 2):
         cm = ClassMaster.objects.filter(class_no=ac).first()
         if cm:
@@ -434,8 +590,12 @@ def get_ocr_engine():
 
 
 @transaction.atomic
-def upsert_targets(target_date, codes, source, class_override=None):
-    session, _ = InspectionSession.objects.get_or_create(target_date=target_date)
+def upsert_targets(target_date, codes, registration_route, user=None):
+    session, _ = InspectionSession.objects.get_or_create(
+        target_date=target_date,
+        owner_user=user,
+        defaults={"created_by": user, "updated_by": user},
+    )
     added_count = 0
     duplicate_count = 0
 
@@ -445,17 +605,15 @@ def upsert_targets(target_date, codes, source, class_override=None):
             continue
         master = Master.objects.filter(code=normalized_code).first()
 
+        if master is None and registration_route == InspectionTarget.RegistrationRoute.SPECIAL:
+            resolve_special_class(master)
+        resolved_class = None if master is None else resolve_class_for_route(master, registration_route)
         lookup_kwargs = {
             "session": session,
             "normalized_code": normalized_code,
+            "class_override": resolved_class,
         }
-        if class_override:
-            lookup_kwargs["class_override"] = class_override
-        else:
-            lookup_kwargs["class_override__isnull"] = True
-
-        is_class_9 = class_override == 9
-        requires_sheet = True if is_class_9 else inspection_sheet_required(master)
+        requires_sheet = inspection_sheet_required_for_class(resolved_class)
         issue_status = (
             InspectionTarget.IssueStatus.PENDING
             if requires_sheet
@@ -467,10 +625,13 @@ def upsert_targets(target_date, codes, source, class_override=None):
             defaults={
                 "master": master,
                 "raw_code": raw_code,
-                "class_override": class_override,
-                "source_ocr": source == "ocr",
-                "source_excel": source == "excel",
-                "source_manual": source == "manual",
+                "class_override": resolved_class,
+                "registration_route": registration_route,
+                "created_by": user,
+                "updated_by": user,
+                "source_ocr": registration_route == "ocr",
+                "source_excel": registration_route == "excel",
+                "source_manual": registration_route in ("manual_code", "factory_map", "special"),
                 "requires_inspection_sheet": requires_sheet,
                 "issue_status": issue_status,
             },
@@ -478,22 +639,17 @@ def upsert_targets(target_date, codes, source, class_override=None):
 
         if not created:
             duplicate_count += 1
-            if source == "ocr":
+            if registration_route == "ocr":
                 target.source_ocr = True
-            elif source == "excel":
+            elif registration_route == "excel":
                 target.source_excel = True
-            elif source == "manual":
+            else:
                 target.source_manual = True
             if master and not target.master:
                 target.master = master
-            if is_class_9:
-                target.requires_inspection_sheet = True
-                if target.issue_status == InspectionTarget.IssueStatus.NOT_REQUIRED:
-                    target.issue_status = InspectionTarget.IssueStatus.PENDING
-            else:
-                target.requires_inspection_sheet = inspection_sheet_required(target.master)
-                if target.requires_inspection_sheet and target.issue_status == InspectionTarget.IssueStatus.NOT_REQUIRED:
-                    target.issue_status = InspectionTarget.IssueStatus.PENDING
+            target.requires_inspection_sheet = requires_sheet
+            if requires_sheet and target.issue_status == InspectionTarget.IssueStatus.NOT_REQUIRED:
+                target.issue_status = InspectionTarget.IssueStatus.PENDING
             target.save(
                 update_fields=[
                     "source_manual",
@@ -521,8 +677,21 @@ def upsert_targets(target_date, codes, source, class_override=None):
     return session, added_count, duplicate_count
 
 
-def add_manual_targets(target_date, codes, class_override=None):
-    session, added_count, _ = upsert_targets(target_date, codes, "manual", class_override=class_override)
+def add_manual_targets(target_date, codes, user=None):
+    session, added_count, _ = upsert_targets(target_date, codes, "manual_code", user=user)
+    return session, added_count
+
+
+def add_factory_map_target(target_date, machine_id, code, user=None):
+    master = Master.objects.filter(code=normalize_code(code)).first()
+    if master is None or not MachineAssignment.objects.filter(machine_id=machine_id, code=master).exists():
+        raise ClassificationError("INVALID_REQUEST", "指定した機械に品目が割り当てられていません。", {"code": normalize_code(code)})
+    session, added_count, _ = upsert_targets(target_date, [code], "factory_map", user=user)
+    return session, added_count
+
+
+def add_special_targets(target_date, codes, user=None):
+    session, added_count, _ = upsert_targets(target_date, codes, "special", user=user)
     return session, added_count
 
 
@@ -735,9 +904,82 @@ def classify_folder(file_path):
     return None
 
 
-def scan_and_classify_files(folder_paths):
+def resolve_inspection_file(master, class_no):
+    if master is None:
+        return None
+    if class_no == 9:
+        setting = SpecialInspectionClass9.objects.filter(master=master).first()
+        if not setting or not setting.inspection_sheet_path:
+            return None
+        return {"file_path": setting.inspection_sheet_path, "file_name": Path(setting.inspection_sheet_path).name}
+    wanted_folder = {1: "auto1", 6: "product1", 7: "product2"}.get(class_no)
+    if wanted_folder is None:
+        return None
+    matches = [
+        row
+        for row in InspectionFile.objects.filter(master=master).order_by("id")
+        if classify_folder(row.file_path) == wanted_folder
+    ]
+    return select_preferred_inspection_file(matches)
+
+
+def _normalized_file_path(file_path):
+    return os.path.normpath(str(file_path)).replace("\\", "/").casefold()
+
+
+def select_preferred_inspection_file(inspection_files):
+    return min(
+        inspection_files,
+        key=lambda row: (
+            -row.priority,
+            0 if row.file_created is not None else 1,
+            -row.file_created.timestamp() if row.file_created is not None else 0,
+            _normalized_file_path(row.file_path),
+            row.id,
+        ),
+        default=None,
+    )
+
+
+def resolve_unambiguous_inspection_file(master):
+    candidate_classes = set()
+    inspection_files = list(InspectionFile.objects.filter(master=master).order_by("id"))
+    for file_path in (row.file_path for row in inspection_files):
+        folder_class = classify_folder(file_path)
+        class_no = {"auto1": 1, "product1": 6, "product2": 7}.get(folder_class)
+        if class_no:
+            candidate_classes.add(class_no)
+    if SpecialInspectionClass9.objects.filter(master=master).exclude(inspection_sheet_path="").exists():
+        candidate_classes.add(9)
+    if len(candidate_classes) > 1:
+        raise ClassificationError(
+            "AMBIGUOUS_INSPECTION_FILE",
+            "複数クラスの検査書があります。対象一覧から検査を選択してください。",
+            {"code": master.code, "detected_classes": sorted(candidate_classes)},
+        )
+    if candidate_classes:
+        return resolve_inspection_file(master, next(iter(candidate_classes)))
+    return select_preferred_inspection_file(inspection_files)
+
+
+def _file_created_at(path):
+    try:
+        file_stat = path.stat()
+        if hasattr(file_stat, "st_birthtime"):
+            timestamp = file_stat.st_birthtime
+        elif os.name == "nt":
+            timestamp = file_stat.st_ctime
+        else:
+            return None
+        return datetime.fromtimestamp(timestamp, tz=timezone.get_current_timezone())
+    except (OSError, OverflowError, ValueError):
+        return None
+
+
+def scan_and_classify_files(folder_paths, folder_priorities=None):
     code_file_map = {}
     folder_warnings = []
+    priorities = folder_priorities or {}
     for path_str in folder_paths:
         path_str = path_str.strip()
         if not path_str:
@@ -755,12 +997,19 @@ def scan_and_classify_files(folder_paths):
                     code_file_map.setdefault(code, []).append({
                         "file_name": name,
                         "file_path": fpath,
+                        "priority": priorities.get(path_str, 0),
+                        "file_created": _file_created_at(f),
                     })
     return code_file_map, folder_warnings
 
 
 @transaction.atomic
-def import_master_csv(master_file=None, csv_path=None, inspection_folder_paths=None):
+def import_master_csv(
+    master_file=None,
+    csv_path=None,
+    inspection_folder_paths=None,
+    inspection_folder_priorities=None,
+):
     if master_file:
         rows = load_master_rows_from_csv(master_file)
         source = getattr(master_file, "name", "uploaded")
@@ -773,7 +1022,7 @@ def import_master_csv(master_file=None, csv_path=None, inspection_folder_paths=N
         source = str(source_path)
 
     folder_paths = inspection_folder_paths or []
-    code_file_map, folder_warnings = scan_and_classify_files(folder_paths)
+    code_file_map, folder_warnings = scan_and_classify_files(folder_paths, inspection_folder_priorities)
 
     processed_codes = set()
     master_count = 0
@@ -799,9 +1048,41 @@ def import_master_csv(master_file=None, csv_path=None, inspection_folder_paths=N
         )
         master_count += 1
 
-        insp_class = determine_inspection_class(master, code_file_map)
-        if insp_class is not None:
+        resolved_classes = []
+        try:
+            resolved_classes.append(resolve_process_class(master))
+        except ClassificationError as exc:
+            if exc.error_code != "PROCESS_CLASS_NOT_FOUND":
+                raise
+
+        file_folder_classes = {
+            classify_folder(info["file_path"])
+            for info in code_file_map.get(code, [])
+        } & {"product1", "product2"}
+        if file_folder_classes == {"product1", "product2"}:
+            candidate_file_names = [
+                _safe_file_name(info.get("file_name") or info["file_path"])
+                for info in code_file_map.get(code, [])
+                if classify_folder(info["file_path"]) in file_folder_classes
+            ]
+            raise ClassificationError(
+                "CLASS_6_7_CONFLICT",
+                "製品検査(1)と製品検査(2)の両方に検査書があります。保存場所を確認してください。",
+                {
+                    "code": code,
+                    "detected_classes": [6, 7],
+                    "candidate_file_names": candidate_file_names,
+                },
+            )
+        if "product1" in file_folder_classes:
+            resolved_classes.append(6)
+        elif "product2" in file_folder_classes:
+            resolved_classes.append(7)
+
+        for insp_class in resolved_classes:
             cm = ClassMaster.objects.filter(class_no=insp_class).first()
+            if cm is None:
+                continue
             MasterClass.objects.update_or_create(
                 master=master,
                 class_master=cm,
@@ -836,6 +1117,8 @@ def import_master_csv(master_file=None, csv_path=None, inspection_folder_paths=N
                 master=master,
                 file_name=fi["file_name"],
                 file_path=fi["file_path"],
+                priority=fi["priority"],
+                file_created=fi["file_created"],
             )
             file_count += 1
 
@@ -852,7 +1135,7 @@ def import_master_csv(master_file=None, csv_path=None, inspection_folder_paths=N
 
 
 @transaction.atomic
-def import_plan_targets(target_date, scan_file=None, excel_file=None, sheet_name=None):
+def import_plan_targets(target_date, scan_file=None, excel_file=None, sheet_name=None, user=None):
     sources = []
     warning_summary = {
         "UNKNOWN_CODE": 0,
@@ -882,7 +1165,7 @@ def import_plan_targets(target_date, scan_file=None, excel_file=None, sheet_name
                 "mode": "text",
             }
 
-        _, added_count, duplicate_count = upsert_targets(target_date, ocr_codes, "ocr")
+        _, added_count, duplicate_count = upsert_targets(target_date, ocr_codes, "ocr", user=user)
         warning_summary["DUPLICATE_TARGET"] += duplicate_count
         sources.append(
             {
@@ -894,7 +1177,7 @@ def import_plan_targets(target_date, scan_file=None, excel_file=None, sheet_name
 
     if excel_file:
         excel_codes = extract_codes_from_plan_excel(excel_file, sheet_name, excel_file.name)
-        _, added_count, duplicate_count = upsert_targets(target_date, excel_codes, "excel")
+        _, added_count, duplicate_count = upsert_targets(target_date, excel_codes, "excel", user=user)
         warning_summary["DUPLICATE_TARGET"] += duplicate_count
         sources.append(
             {
@@ -905,7 +1188,10 @@ def import_plan_targets(target_date, scan_file=None, excel_file=None, sheet_name
             }
         )
 
-    session, _ = InspectionSession.objects.get_or_create(target_date=target_date)
+    session, _ = InspectionSession.objects.get_or_create(
+        target_date=target_date, owner_user=user,
+        defaults={"created_by": user, "updated_by": user},
+    )
     warning_count = InspectionTargetWarning.objects.filter(target__session=session).count()
     warning_summary["UNKNOWN_CODE"] = warning_count
     imported_count = InspectionTarget.objects.filter(session=session).count()
@@ -920,22 +1206,26 @@ def import_plan_targets(target_date, scan_file=None, excel_file=None, sheet_name
     return result
 
 
-def history_map_for_date(target_date):
-    rows = History.objects.filter(date=target_date).values_list("master_id", "time_slot", "class_override")
+def history_map_for_date(target_date, user=None):
+    rows = History.objects.filter(date=target_date, created_by=user, deleted_at__isnull=True).values_list("master_id", "time_slot", "class_override")
     history_map = {}
     for master_id, time_slot, co in rows:
-        history_map.setdefault(master_id, set()).add(time_slot)
+        history_map.setdefault((master_id, co), set()).add(time_slot)
     return history_map
 
 
 @transaction.atomic
-def set_check(target_date, code, time_slot, checked, class_override=None):
-    normalized_code = normalize_code(code)
-    master = Master.objects.filter(code=normalized_code).first()
-    if master is None:
-        raise ValueError(f"Unknown code: {normalized_code}")
+def set_check(target_date, target_id, time_slot, checked, user=None):
+    target = InspectionTarget.objects.select_related("master", "session").filter(
+        id=target_id, session__target_date=target_date, session__owner_user=user, deleted_at__isnull=True
+    ).first()
+    if target is None or target.master is None:
+        raise ClassificationError("TARGET_NOT_FOUND", "検査対象が見つかりません。")
+    master = target.master
+    class_override = target.class_override
 
     lookup = {
+        "created_by": user,
         "date": target_date,
         "master": master,
         "time_slot": time_slot,
@@ -945,58 +1235,119 @@ def set_check(target_date, code, time_slot, checked, class_override=None):
     else:
         lookup["class_override__isnull"] = True
 
+    history = History.objects.filter(**lookup).first()
     if checked:
-        History.objects.update_or_create(
-            **lookup,
-            defaults={},
-        )
-    else:
-        History.objects.filter(**lookup).delete()
+        if history:
+            history.deleted_at = None
+            history.deleted_by = None
+            history.updated_by = user
+            history.save(update_fields=["deleted_at", "deleted_by", "updated_by", "updated_at"])
+        else:
+            create_data = {key: value for key, value in lookup.items() if not key.endswith("__isnull")}
+            create_data.setdefault("class_override", class_override)
+            History.objects.create(**create_data, updated_by=user)
+    elif history and history.deleted_at is None:
+        history.deleted_at = timezone.now()
+        history.deleted_by = user
+        history.updated_by = user
+        history.save(update_fields=["deleted_at", "deleted_by", "updated_by", "updated_at"])
 
 
 @transaction.atomic
-def bulk_upsert_history(target_date, items):
+def bulk_upsert_history(target_date, items, user=None):
     updated = 0
     for item in items:
-        co = item.get("class_override")
         for slot, checked in item["checks"].items():
-            set_check(target_date, item["code"], slot, checked, class_override=co)
+            set_check(target_date, item["target_id"], slot, checked, user=user)
         updated += 1
     return updated
 
 
-def create_job(job_type, payload):
+def create_job(job_type, payload, user=None):
     timestamp = timezone.localtime().strftime("%Y%m%d%H%M%S")
     return Job.objects.create(
         job_id=f"job_{timestamp}_{uuid4().hex[:8]}",
         job_type=job_type,
         request_payload=payload,
+        created_by=user,
+        updated_by=user,
     )
 
 
 def run_job(job, fn):
     job.status = Job.Status.RUNNING
     job.started_at = timezone.now()
-    job.save(update_fields=["status", "started_at"])
+    job.updated_by = job.created_by
+    job.save(update_fields=["status", "started_at", "updated_by", "updated_at"])
     try:
         result = fn()
     except Exception as exc:
         job.status = Job.Status.FAILED
-        job.error_message = str(exc)
-        job.result = {
+        error_message = str(exc)
+        failure_result = {
             "status": "failed",
-            "error_message": str(exc),
+            "error_message": error_message,
             "exception_type": type(exc).__name__,
         }
+        if isinstance(exc, ClassificationError):
+            safe_details = _safe_classification_details(exc.details)
+            failure_result["error_code"] = exc.error_code
+            failure_result["details"] = safe_details
+            error_message = _classification_job_error_message(error_message, safe_details)
+        job.error_message = error_message
+        job.result = failure_result
         job.finished_at = timezone.now()
-        job.save(update_fields=["status", "error_message", "result", "finished_at"])
+        job.updated_by = job.created_by
+        job.save(update_fields=["status", "error_message", "result", "finished_at", "updated_by", "updated_at"])
         raise
 
     job.status = Job.Status.SUCCEEDED
     job.result = result
     job.finished_at = timezone.now()
-    job.save(update_fields=["status", "result", "finished_at"])
+    job.updated_by = job.created_by
+    job.save(update_fields=["status", "result", "finished_at", "updated_by", "updated_at"])
     return result
+
+
+def _safe_classification_details(details):
+    details = details if isinstance(details, dict) else {}
+    safe_details = {}
+    if isinstance(details.get("code"), str):
+        safe_details["code"] = details["code"]
+    if isinstance(details.get("class"), int):
+        safe_details["class"] = details["class"]
+    if isinstance(details.get("candidate_count"), int):
+        safe_details["candidate_count"] = details["candidate_count"]
+    for key in ("detected_classes",):
+        values = details.get(key)
+        if isinstance(values, (list, tuple)):
+            safe_details[key] = [value for value in values if isinstance(value, int)]
+    candidate_file_names = details.get("candidate_file_names")
+    if isinstance(candidate_file_names, (list, tuple)):
+        safe_details["candidate_file_names"] = [
+            _safe_file_name(value) for value in candidate_file_names if isinstance(value, str)
+        ]
+    machine_numbers = details.get("machine_numbers")
+    if isinstance(machine_numbers, (list, tuple)):
+        safe_details["machine_numbers"] = [value for value in machine_numbers if isinstance(value, str)]
+    return safe_details
+
+
+def _classification_job_error_message(message, details):
+    parts = []
+    if details.get("code"):
+        parts.append(f"品番: {details['code']}")
+    if details.get("class") is not None:
+        parts.append(f"class: {details['class']}")
+    elif details.get("detected_classes"):
+        parts.append("class: " + "/".join(str(value) for value in details["detected_classes"]))
+    if details.get("candidate_count") is not None:
+        parts.append(f"候補: {details['candidate_count']}件")
+    if details.get("candidate_file_names"):
+        parts.append("検査書: " + ", ".join(details["candidate_file_names"]))
+    if details.get("machine_numbers"):
+        parts.append("機械: " + ", ".join(details["machine_numbers"]))
+    return f"{message} {' / '.join(parts)}" if parts else message
 
 
 def _period_for_date(d: date_type) -> int:
@@ -1009,7 +1360,7 @@ def _time_slot_to_am_pm(slot: str) -> str:
     return "AM" if slot in ("A", "B") else "PM"
 
 
-def write_history_to_excel(target_date: date_type) -> int:
+def write_history_to_excel(target_date: date_type, user=None) -> int:
     from .models import AppSetting, InspectionSession
 
     setting = AppSetting.objects.first()
@@ -1018,14 +1369,15 @@ def write_history_to_excel(target_date: date_type) -> int:
 
     history_path = Path(setting.history_file_path)
     if not history_path.exists():
-        raise FileNotFoundError(f"履歴ファイルが見つかりません: {history_path}")
+        raise FileNotFoundError("履歴ファイルが保存場所に存在しません。")
 
     master_ids_class_1 = MasterClass.objects.filter(
         class_master__class_no=1
     ).values_list("master_id", flat=True)
 
     qs = (
-        History.objects.filter(date=target_date, master_id__in=master_ids_class_1)
+        History.objects.filter(date=target_date, created_by=user, deleted_at__isnull=True)
+        .filter(Q(class_override=1) | Q(class_override__isnull=True, master_id__in=master_ids_class_1))
         .select_related("master")
         .order_by("master__code", "time_slot")
     )
@@ -1107,7 +1459,7 @@ def write_history_to_excel(target_date: date_type) -> int:
                 pass
         pythoncom.CoUninitialize()
 
-    session = InspectionSession.objects.filter(target_date=target_date).first()
+    session = InspectionSession.objects.filter(target_date=target_date, owner_user=user).first()
     if session:
         session.history = True
         session.save(update_fields=["history", "updated_at"])
@@ -1126,7 +1478,7 @@ def convert_excel_to_pdf(file_path: str) -> str:
     import win32com.client
 
     if not os_mod.path.exists(file_path):
-        raise FileNotFoundError(f"ファイルが存在しません: {file_path}")
+        raise FileNotFoundError("検査書ファイルが保存場所に存在しません。")
 
     ext = os_mod.path.splitext(file_path)[1].lower()
     if ext not in (".xls", ".xlsx", ".xlsm"):
@@ -1166,7 +1518,7 @@ def _print_file_direct(file_path: str):
     import win32api
 
     if not os_mod.path.exists(file_path):
-        raise FileNotFoundError(f"ファイルが存在しません: {file_path}")
+        raise FileNotFoundError("検査書ファイルが保存場所に存在しません。")
 
     ext = os_mod.path.splitext(file_path)[1].lower()
 
@@ -1215,12 +1567,12 @@ def _print_file_direct(file_path: str):
         pythoncom.CoUninitialize()
 
 
-def issue_inspection_sheets(target_date: date_type | None = None):
+def issue_inspection_sheets(target_date: date_type | None = None, user=None):
     template_path = Path(settings.DAILY_REPORT_TEMPLATE)
     if not template_path.exists():
-        raise FileNotFoundError(f"Excel template not found: {template_path}")
+        raise FileNotFoundError("検査書テンプレートが保存場所に存在しません。")
 
-    qs = History.objects.filter(is_sheet_issued=False)
+    qs = History.objects.filter(is_sheet_issued=False, created_by=user, deleted_at__isnull=True)
     if target_date:
         qs = qs.filter(date=target_date)
     qs = qs.select_related("master").order_by("date", "master__code", "time_slot")
@@ -1228,41 +1580,30 @@ def issue_inspection_sheets(target_date: date_type | None = None):
     if not qs.exists():
         return {"issued_count": 0, "message": "No unissued entries found."}
 
-    master_ids = list(qs.values_list("master_id", flat=True).distinct())
-    class_map: dict[int, int | None] = {}
-    sheet_target_master_ids: set[int] = set()
-    class9_master_map: dict[int, str] = {}
-    for mc in MasterClass.objects.filter(master_id__in=master_ids).select_related("class_master"):
-        cn = mc.class_master.class_no if mc.class_master else None
-        if mc.master_id not in class_map:
-            class_map[mc.master_id] = cn
-        if cn in (1, 6, 7):
-            sheet_target_master_ids.add(mc.master_id)
-    for sic in SpecialInspectionClass9.objects.filter(master_id__in=master_ids):
-        if sic.inspection_sheet_path:
-            class9_master_map[sic.master_id] = sic.inspection_sheet_path
-
-    file_map: dict[int, str] = {}
-    for fi in InspectionFile.objects.filter(master_id__in=master_ids):
-        if fi.master_id not in file_map:
-            file_map[fi.master_id] = fi.file_path
+    legacy_class_map = {}
+    for master_id, class_no in MasterClass.objects.filter(
+        master_id__in=qs.values_list("master_id", flat=True), class_master__isnull=False
+    ).exclude(class_master__class_no=9).values_list("master_id", "class_master__class_no"):
+        legacy_class_map.setdefault(master_id, class_no)
 
     rows = []
     target_history_ids: list[int] = []
     class9_history_ids: list[int] = []
     for h in qs:
-        if h.class_override == 9:
+        class_no = h.class_override or legacy_class_map.get(h.master_id)
+        if class_no == 9:
             class9_history_ids.append(h.history_id)
             continue
-        if h.master_id not in sheet_target_master_ids:
+        if class_no not in (1, 6, 7):
             continue
-        file_path = file_map.get(h.master_id)
-        if not file_path:
+        resolved_file = resolve_inspection_file(h.master, class_no)
+        if resolved_file is None and h.class_override is None:
+            resolved_file = resolve_unambiguous_inspection_file(h.master)
+        if not resolved_file:
             continue
-        class_no = class_map.get(h.master_id)
         serial_date = _excel_serial_date(h.date)
         rows.append([
-            file_path,
+            resolved_file.file_path,
             h.time_slot,
             class_no if class_no is not None else "",
             serial_date,
@@ -1271,21 +1612,53 @@ def issue_inspection_sheets(target_date: date_type | None = None):
         ])
         target_history_ids.append(h.history_id)
 
-    class9_printed = 0
+    class9_successful_ids: list[int] = []
+    class9_warnings: list[dict] = []
     if class9_history_ids:
         for h in qs.filter(history_id__in=class9_history_ids).select_related("master"):
-            file_path = class9_master_map.get(h.master_id)
-            if file_path:
-                try:
-                    _print_file_direct(file_path)
-                    class9_printed += 1
-                except Exception as exc:
-                    logger.warning("Class 9 print failed for %s: %s", h.master.code if h.master else "?", exc)
+            resolved_file = resolve_inspection_file(h.master, 9)
+            if not resolved_file:
+                class9_warnings.append({
+                    "history_id": h.history_id,
+                    "code": h.master.code if h.master else "",
+                    "error_code": "FILE_NOT_FOUND",
+                    "message": "特殊検査の検査書ファイルが設定されていません。",
+                })
+                continue
+            try:
+                _print_file_direct(resolved_file["file_path"])
+                class9_successful_ids.append(h.history_id)
+            except Exception:
+                logger.exception("Class 9 print failed for history_id=%s", h.history_id)
+                class9_warnings.append({
+                    "history_id": h.history_id,
+                    "code": h.master.code if h.master else "",
+                    "error_code": "PRINT_FAILED",
+                    "message": "特殊検査の印刷に失敗しました。",
+                })
 
-    if not rows and not class9_history_ids:
-        return {"issued_count": 0, "message": "No printable entries found (no valid file paths or non-target classes)."}
+    if class9_successful_ids:
+        History.objects.filter(history_id__in=class9_successful_ids).update(
+            is_sheet_issued=True, updated_by=user, updated_at=timezone.now()
+        )
 
+    if not rows and not class9_successful_ids:
+        return {
+            "issued_count": 0,
+            "class9_printed": 0,
+            "class9_failed": len(class9_warnings),
+            "warnings": class9_warnings,
+            "message": "No printable entries found (no valid file paths or non-target classes).",
+        }
+
+    output_path = None
     if rows:
+        output_dir = Path(settings.DAILY_REPORT_OUTPUT_DIR)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        owner_suffix = f"u{user.pk}" if user is not None else "legacy"
+        date_suffix = str(target_date).replace("-", "") if target_date else "all"
+        output_path = output_dir / f"inspection_sheets_{date_suffix}_{owner_suffix}.xlsm"
+        shutil.copy2(template_path, output_path)
         try:
             import win32com.client
             import pythoncom
@@ -1325,7 +1698,7 @@ def issue_inspection_sheets(target_date: date_type | None = None):
                 logger.warning("Excel Calculation property could not be set")
             xl.ScreenUpdating = False
 
-            wb = xl.Workbooks.Open(str(template_path.resolve()), UpdateLinks=False)
+            wb = xl.Workbooks.Open(str(output_path.resolve()), UpdateLinks=False)
             ws_data = wb.Sheets("data") if "data" in [s.Name for s in wb.Sheets] else wb.Sheets[0]
 
             ws_data.Cells.ClearContents()
@@ -1363,37 +1736,43 @@ def issue_inspection_sheets(target_date: date_type | None = None):
             if com_initialized:
                 pythoncom.CoUninitialize()
 
-    all_issued = target_history_ids + class9_history_ids
-    History.objects.filter(history_id__in=all_issued).update(is_sheet_issued=True)
+    History.objects.filter(history_id__in=target_history_ids).update(
+        is_sheet_issued=True, updated_by=user, updated_at=timezone.now()
+    )
 
     return {
-        "issued_count": len(rows) + class9_printed,
-        "class9_printed": class9_printed,
+        "issued_count": len(rows) + len(class9_successful_ids),
+        "class9_printed": len(class9_successful_ids),
+        "class9_failed": len(class9_warnings),
+        "warnings": class9_warnings,
         "date": str(target_date) if target_date else "all",
+        "excel_path": str(output_path) if output_path else "",
     }
 
 
-def generate_daily_report(target_date):
+def generate_daily_report(target_date, user=None):
     template_path = Path(settings.DAILY_REPORT_TEMPLATE)
     if not template_path.exists():
-        raise FileNotFoundError(f"Daily report template not found: {template_path}")
+        raise FileNotFoundError("日報テンプレートが保存場所に存在しません。")
 
     output_dir = Path(settings.DAILY_REPORT_OUTPUT_DIR)
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / f"{target_date}.xlsm"
-    return _write_daily_report(template_path, output_path, target_date)
+    owner_suffix = f"u{user.pk}" if user is not None else "legacy"
+    output_path = output_dir / f"{target_date}_{owner_suffix}.xlsm"
+    return _write_daily_report(template_path, output_path, target_date, user=user)
 
 
-def issue_daily_report(target_date):
+def issue_daily_report(target_date, user=None):
     template_path = Path(settings.DAILY_REPORT_TEMPLATE)
     if not template_path.exists():
-        raise FileNotFoundError(f"Daily report template not found: {template_path}")
+        raise FileNotFoundError("日報テンプレートが保存場所に存在しません。")
 
     output_dir = Path(settings.DAILY_REPORT_OUTPUT_DIR)
     output_dir.mkdir(parents=True, exist_ok=True)
     date_str = target_date.strftime("%Y%m%d")
-    output_path = output_dir / f"{date_str}.xlsx"
-    result = _write_daily_report(template_path, output_path, target_date, keep_vba=False)
+    owner_suffix = f"u{user.pk}" if user is not None else "legacy"
+    output_path = output_dir / f"{date_str}_{owner_suffix}.xlsx"
+    result = _write_daily_report(template_path, output_path, target_date, keep_vba=False, user=user)
 
     import win32com.client
     import pythoncom
@@ -1425,7 +1804,7 @@ def issue_daily_report(target_date):
     return result
 
 
-def _write_daily_report(template_path, output_path, target_date, keep_vba=True):
+def _write_daily_report(template_path, output_path, target_date, keep_vba=True, user=None):
     workbook = load_workbook(template_path, keep_vba=keep_vba)
     sheet = workbook["日報"] if "日報" in workbook.sheetnames else workbook.active
 
@@ -1442,7 +1821,7 @@ def _write_daily_report(template_path, output_path, target_date, keep_vba=True):
     category_45_counts = {slot: 0 for slot in CHECK_SLOTS}
 
     histories = list(
-        History.objects.filter(date=target_date)
+        History.objects.filter(date=target_date, created_by=user, deleted_at__isnull=True)
         .select_related("master")
         .order_by("time_slot", "master__code")
     )
@@ -1453,7 +1832,7 @@ def _write_daily_report(template_path, output_path, target_date, keep_vba=True):
         master_classes[mc.master_id] = mc.class_master.class_no if mc.class_master else None
 
     def _category_of(history):
-        return master_classes.get(history.master_id) or history.master.category
+        return history.class_override or master_classes.get(history.master_id) or history.master.category
 
     # Classes sharing a start row (2, 3, 8 all start at row 4) must share a
     # single contiguous offset, otherwise they overwrite each other in the same
@@ -1497,24 +1876,26 @@ def _write_daily_report(template_path, output_path, target_date, keep_vba=True):
     }
 
 
-def print_inspection_file(target_id):
+def print_inspection_file(target_id, user=None):
     import os as os_mod
     import tempfile
     import pythoncom
     import win32com.client
     import win32api
 
-    target = InspectionTarget.objects.select_related("master").get(id=target_id)
+    target = InspectionTarget.objects.select_related("master").get(id=target_id, session__owner_user=user)
     if not target.master:
         raise ValueError("検査対象にマスターが登録されていません")
 
-    insp_file = InspectionFile.objects.filter(master=target.master).first()
+    insp_file = resolve_inspection_file(target.master, target.class_override)
+    if insp_file is None and target.class_override is None:
+        insp_file = resolve_unambiguous_inspection_file(target.master)
     if not insp_file:
         raise FileNotFoundError(f"検査書ファイルが見つかりません（コード: {target.normalized_code}）")
 
-    file_path = insp_file.file_path
+    file_path = insp_file["file_path"] if isinstance(insp_file, dict) else insp_file.file_path
     if not os_mod.path.exists(file_path):
-        raise FileNotFoundError(f"ファイルが存在しません: {file_path}")
+        raise FileNotFoundError("検査書ファイルが保存場所に存在しません。")
 
     ext = os_mod.path.splitext(file_path)[1].lower()
 
@@ -1624,7 +2005,7 @@ def sync_targets_inspection_sheet_required():
     targets = InspectionTarget.objects.filter(master__isnull=False).select_related("master")
     updated_count = 0
     for target in targets:
-        required = inspection_sheet_required(target.master)
+        required = inspection_sheet_required_for_class(target.class_override) if target.class_override else inspection_sheet_required(target.master)
         if target.requires_inspection_sheet != required:
             target.requires_inspection_sheet = required
             if required and target.issue_status == InspectionTarget.IssueStatus.NOT_REQUIRED:

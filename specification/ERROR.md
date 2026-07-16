@@ -1,11 +1,24 @@
 # エラーハンドリング
 
+## 0. 現行実装と正式リリース要件（2026-07-15）
+
+現行APIは概ね `{ "error_code": string, "message": string, "details": object }` を返すが、DRF標準の `detail` やフィールド別エラーも併存する。認証は 401、権限不足は 403、競合は 409、未検出は 404 を使用する。
+
+| priority | 不足・リスク | 受入基準 |
+|---|---|---|
+| Critical | `error_response` に `status=` を渡す経路で TypeError の可能性 | 全異常系テストで意図したHTTP statusとJSONが返り、500/TypeErrorにならない |
+| Critical | 例外文字列・内部ファイルパスのクライアント返却 | 5xx応答に内部パス、スタック、認証情報を含めず、相関IDのみ返す |
+| High | エラースキーマが統一されていない | 認証/serializer/業務例外を含め、公開スキーマを文書化して契約テストを通す |
+| High | 本番ログ、監視、health check がない | 構造化ログ、相関ID、死活/依存先監視、通知先が検証済み |
+| High | ERP/Excel/印刷の失敗時再実行・排他が不明確 | 多重実行を防ぎ、失敗後に安全に再実行でき、結果を監査できる |
+
+利用者向け文言と運用ログは分離する。ログへのパスワード、セッションID、個人情報、ファイル内容の記録は禁止する。
+
 ## 1. 共通エラースキーマ
-全てのAPIは以下の形式でエラーを返す。
+`error_response` を使う業務エラーは以下の形式で返す。DRF標準の認証エラー、`detail`、serializerのフィールド別エラーは現状この形式に統一されていない。
 
 ```json
 {
-  "status": "error",
   "error_code": "UNKNOWN_CODE",
   "message": "Unknown code: X9999",
   "details": {}
@@ -14,7 +27,7 @@
 
 補足
 - 発生したエラーはサーバーログに保存する。
-- 非同期ジョブの失敗も同じ `error_code` を内部的に保持する。
+- 同期実行中に作成される Job の失敗も同じ `error_code` を内部的に保持する。真の非同期ジョブは未実装。
 
 ## 2. エラーコード一覧
 
@@ -29,12 +42,10 @@
   同一日の同一コードが重複登録された。
 
 ### 2.2 ERP更新系
-- `CIRCULAR_REFERENCE`
-  構成データに循環参照がある。
 - `ERP_AUTOMATION_FAILED`
   ERP自動操作そのものに失敗した。
-- `MASTER_REFRESH_ABORTED`
-  staging 検証失敗により本番更新を中止した。
+
+`CIRCULAR_REFERENCE` と `MASTER_REFRESH_ABORTED` は現行コードから返されない。staging検証や循環参照検証を将来実装する場合の候補コードであり、現行エラー一覧には含めない。
 
 ### 2.3 検査書発行系
 - `FILE_NOT_FOUND`
@@ -53,10 +64,10 @@
   対応機械が未登録である。
 
 ### 2.6 ジョブ系
-- `JOB_NOT_FOUND`
-  指定されたジョブが存在しない。
 - `JOB_FAILED`
   ジョブが失敗状態で終了した。
+
+現行の `GET /api/jobs/{job_id}/` は、本人が作成した該当Jobがない場合に `get_object_or_404` によるHTTP 404とDRF標準の `{ "detail": "..." }` 応答を返す。`JOB_NOT_FOUND` はエラースキーマ統一を将来実装する場合の候補コードであり、現行コード一覧には含めない。
 
 ## 3. 取り込み時の扱い
 
@@ -95,3 +106,25 @@
 - 致命エラーはトーストまたはダイアログで表示する。
 - 業務継続可能なものは警告一覧として表示する。
 - ジョブ失敗時は対象ジョブと原因コードを明示する。
+
+## 9. 登録経路別分類
+
+- `CLASS_1_2_CONFLICT`（409）: class 1と2の機械設定が同時に存在する。
+- `CLASS_6_7_CONFLICT`（409）: 製品検査(1)と(2)の両方に検査書が存在する。
+- `PROCESS_CLASS_NOT_FOUND`（400）: 見取り図で工程class 1〜5を判定できない、またはOCRで工程class 1〜5を判定できず明示class 8も存在しない。
+- `PRODUCT_INSPECTION_FILE_NOT_FOUND`（400）: Excel／コード追加用の製品検査書がない。
+- `CLASS_9_SETTING_NOT_FOUND`（400）: 特殊検査設定がない。
+- `INVALID_REGISTRATION_ROUTE`（400）: サーバー内部で未定義の登録経路が指定された。
+- `TARGET_NOT_FOUND`（400）: 履歴更新対象が本人の当日対象として存在しない。
+- `AMBIGUOUS_INSPECTION_FILE`（400）: 確定クラスに対応する検査書候補が複数ある。
+
+公開レスポンスには内部ファイルのフルパスを含めない。
+
+## 10. 検査サマリー関連
+
+- `INVALID_DATE`: ノートAPIの日付がISO日付として不正。
+- `INVALID_PERIOD`: `start` / `end` が不正、開始が終了より後、または期間が367日を超える。
+- `INVALID_CLASSES`: `classes` がカンマ区切り整数でない。
+- `INVALID_INSPECTORS`: `inspectors` がユーザーIDまたは `unknown` のカンマ区切りとして不正。
+- `INVALID_CSV_TYPE`: CSV種別が `counts` / `notes` 以外。
+- 管理者限定APIへ作業者がアクセスした場合はHTTP 403を返す。

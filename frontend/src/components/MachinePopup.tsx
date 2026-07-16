@@ -4,17 +4,19 @@ import type { AssignedItem, InspectionTarget } from '../types';
 
 interface MachinePopupProps {
   machineNo: string;
+  machineId: number;
   machineName: string;
   assignedItems: AssignedItem[];
   targetCodes: string[];
   targets: InspectionTarget[];
   onClose: () => void;
   onScrollToTarget: (targetId: number) => void;
-  onRegisterTarget: (code: string) => void;
+  onRegisterTarget: (machineId: number, code: string) => void;
 }
 
 export const MachinePopup: React.FC<MachinePopupProps> = ({
   machineNo,
+  machineId,
   machineName,
   assignedItems,
   targetCodes,
@@ -23,9 +25,12 @@ export const MachinePopup: React.FC<MachinePopupProps> = ({
   onScrollToTarget,
   onRegisterTarget,
 }) => {
-  const targetCodeSet = new Set(targetCodes);
+  const processTargets = targets.filter(
+    t => targetCodes.includes(t.code) && t.category !== null && t.category >= 1 && t.category <= 5,
+  );
+  const targetCodeSet = new Set(processTargets.map(t => t.code));
   const registeredTargetMap = new Map<string, InspectionTarget>();
-  for (const t of targets) {
+  for (const t of processTargets) {
     registeredTargetMap.set(t.code, t);
   }
 
@@ -69,7 +74,7 @@ export const MachinePopup: React.FC<MachinePopupProps> = ({
                       onScrollToTarget(registeredTarget.target_id);
                       onClose();
                     } else if (!isRegistered) {
-                      onRegisterTarget(item.code);
+                      onRegisterTarget(machineId, item.code);
                     }
                   }}
                 >

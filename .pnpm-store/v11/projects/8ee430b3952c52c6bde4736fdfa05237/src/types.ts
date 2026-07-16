@@ -18,6 +18,20 @@ export interface JobResult {
   warning_summary: Record<string, number>;
   sources: SourceSummary[];
   missing_plan_file?: boolean;
+  status?: 'failed';
+  error_code?: string;
+  error_message?: string;
+  exception_type?: string;
+  details?: JobErrorDetails;
+}
+
+export interface JobErrorDetails {
+  code?: string;
+  class?: number;
+  detected_classes?: number[];
+  candidate_count?: number;
+  candidate_file_names?: string[];
+  machine_numbers?: string[];
 }
 
 export interface Job {
@@ -60,6 +74,7 @@ export interface InspectionTarget {
     D: boolean;
   };
   class_override?: number | null;
+  registration_route: 'ocr' | 'excel' | 'manual_code' | 'factory_map' | 'special' | 'legacy';
 }
 
 export interface Class9Setting {
@@ -82,6 +97,7 @@ export interface AppSettings {
   id: number;
   csv_path: string;
   inspection_folder_paths: string[];
+  inspection_folder_priorities: Record<string, number>;
   erp_path: string;
   history_file_path: string;
   updated_at: string;

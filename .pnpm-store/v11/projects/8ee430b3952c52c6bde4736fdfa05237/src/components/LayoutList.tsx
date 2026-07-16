@@ -47,7 +47,7 @@ interface LayoutListProps {
   highlightedTargetCode: string | null;
   targets: InspectionTarget[];
   onScrollToTarget: (targetId: number) => void;
-  onRegisterTarget: (code: string) => void;
+  onRegisterTarget: (machineId: number, code: string) => void;
 }
 
 export const LayoutList: React.FC<LayoutListProps> = ({
@@ -151,20 +151,14 @@ export const LayoutList: React.FC<LayoutListProps> = ({
   }
 
   const activeMap = layoutMaps.find((item) => item.layout.id === activeLayoutId) || layoutMaps[0];
+  const activeMachineIds = new Set(activeMap.mapData?.layout?.objects.filter(object => object.type === 'machine' && object.machine_id != null).map(object => object.machine_id) ?? []);
+  const activeTargetCount = activeMap.mapData?.machines.filter(machine => activeMachineIds.has(machine.machine_id)).reduce((sum, machine) => sum + machine.target_codes.length, 0) ?? 0;
 
   return (
     <div className="layout-list-container" style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
       <div className="layout-list-item card" style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
         <div className="map-segment-control">
-          {layoutMaps.map(({ layout, mapData }) => {
-            const machineIdsOnLayout = new Set(
-              mapData?.layout?.objects
-                ?.filter((obj) => obj.type === 'machine' && obj.machine_id != null)
-                ?.map((obj) => obj.machine_id) ?? []
-            );
-            const targetCount = mapData?.machines
-              ?.filter((m) => machineIdsOnLayout.has(m.machine_id))
-              ?.reduce((sum, m) => sum + m.target_codes.length, 0) ?? 0;
+          {layoutMaps.map(({ layout }) => {
             return (
               <button
                 key={layout.id}
@@ -173,12 +167,12 @@ export const LayoutList: React.FC<LayoutListProps> = ({
                 onClick={() => setActiveLayoutId(layout.id)}
               >
                 {layout.layout_name}
-                {targetCount > 0 && <span className="map-segment-badge">{targetCount}</span>}
               </button>
             );
           })}
         </div>
         <div className="layout-list-header">
+          {activeTargetCount > 0 && <span className="map-segment-badge">{activeTargetCount}</span>}
           <h3 className="layout-list-title">{activeMap.layout.layout_name}</h3>
           {activeMap.isLoading && <div className="pulse-spinner small" />}
           {activeMap.error && <span className="layout-list-error">{activeMap.error}</span>}
@@ -209,9 +203,6 @@ export const LayoutList: React.FC<LayoutListProps> = ({
                 margin: '0 auto',
               }}
             >
-              {activeMap.mapData.layout.background_image_path && (
-                <img className="factory-map-bg" src={activeMap.mapData.layout.background_image_path} alt="" />
-              )}
               {activeMap.mapData.layout.objects.length === 0 ? (
                 <div className="map-empty-inset">
                   <MapPin size={28} className="text-muted" />
@@ -258,6 +249,7 @@ export const LayoutList: React.FC<LayoutListProps> = ({
       {selectedMachine && (
         <MachinePopup
           machineNo={selectedMachine.machine_no}
+          machineId={selectedMachine.machine_id}
           machineName={selectedMachine.machine_name}
           assignedItems={selectedMachine.assigned_items}
           targetCodes={selectedMachine.target_codes}

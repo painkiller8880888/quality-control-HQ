@@ -8,6 +8,7 @@ interface ImportSummaryProps {
 
 export const ImportSummary: React.FC<ImportSummaryProps> = ({ job }) => {
   if (!job) return null;
+  const errorDetails = job.result?.details;
 
   const getStatusBadge = (status: Job['status']) => {
     switch (status) {
@@ -56,7 +57,23 @@ export const ImportSummary: React.FC<ImportSummaryProps> = ({ job }) => {
             <AlertCircle size={18} />
             <h4>ジョブエラーが発生しました</h4>
           </div>
-          <p className="error-msg">{job.error_message}</p>
+          <p className="error-msg">{job.result?.error_message || job.error_message}</p>
+          {errorDetails && (
+            <dl className="error-details">
+              {errorDetails.code && <><dt>品番</dt><dd>{errorDetails.code}</dd></>}
+              {errorDetails.class !== undefined && <><dt>クラス</dt><dd>{errorDetails.class}</dd></>}
+              {errorDetails.detected_classes && errorDetails.detected_classes.length > 0 && (
+                <><dt>競合クラス</dt><dd>{errorDetails.detected_classes.join(' / ')}</dd></>
+              )}
+              {errorDetails.candidate_count !== undefined && <><dt>候補数</dt><dd>{errorDetails.candidate_count}件</dd></>}
+              {errorDetails.candidate_file_names && errorDetails.candidate_file_names.length > 0 && (
+                <><dt>検査書候補</dt><dd>{errorDetails.candidate_file_names.join(', ')}</dd></>
+              )}
+              {errorDetails.machine_numbers && errorDetails.machine_numbers.length > 0 && (
+                <><dt>機械番号</dt><dd>{errorDetails.machine_numbers.join(', ')}</dd></>
+              )}
+            </dl>
+          )}
         </div>
       )}
 

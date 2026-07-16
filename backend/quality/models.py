@@ -1,4 +1,5 @@
 from django.db import models
+from django.contrib.auth.hashers import check_password, make_password
 
 
 class User(models.Model):
@@ -9,9 +10,11 @@ class User(models.Model):
     user_id = models.BigAutoField(primary_key=True)
     login_name = models.CharField(max_length=150, unique=True)
     display_name = models.CharField(max_length=255)
+    avatar = models.ImageField(upload_to="avatars/", null=True, blank=True)
     password_hash = models.TextField()
     role = models.CharField(max_length=16, choices=Role.choices)
     is_active = models.BooleanField(default=True)
+    last_login = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -26,6 +29,37 @@ class User(models.Model):
 
     def __str__(self):
         return self.display_name or self.login_name
+
+    @property
+    def is_authenticated(self):
+        return True
+
+    @property
+    def is_anonymous(self):
+        return False
+
+    @property
+    def is_staff(self):
+        return self.role == self.Role.ADMIN and self.is_active
+
+    @property
+    def is_superuser(self):
+        return self.role == self.Role.ADMIN and self.is_active
+
+    def get_username(self):
+        return self.login_name
+
+    def set_password(self, raw_password):
+        self.password_hash = make_password(raw_password)
+
+    def check_password(self, raw_password):
+        return check_password(raw_password, self.password_hash)
+
+    def has_perm(self, perm, obj=None):
+        return self.is_superuser
+
+    def has_module_perms(self, app_label):
+        return self.is_superuser
 
 
 class Master(models.Model):
@@ -93,6 +127,7 @@ class SpecialInspectionClass9(models.Model):
 class AppSetting(models.Model):
     csv_path = models.TextField(blank=True, default="")
     inspection_folder_paths = models.JSONField(default=list, blank=True)
+    inspection_folder_priorities = models.JSONField(default=dict, blank=True)
     erp_path = models.TextField(blank=True, default="")
     history_file_path = models.TextField(blank=True, default="")
     updated_at = models.DateTimeField(auto_now=True)
@@ -122,6 +157,8 @@ class InspectionFile(models.Model):
     master = models.ForeignKey(Master, on_delete=models.PROTECT, related_name="inspection_files")
     file_name = models.CharField(max_length=255)
     file_path = models.TextField()
+    priority = models.IntegerField(default=0)
+    file_created = models.DateTimeField(null=True, blank=True)
     discovered_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -133,9 +170,10 @@ class InspectionSession(models.Model):
         OPEN = "open", "Open"
         CLOSED = "closed", "Closed"
 
-    target_date = models.DateField(unique=True)
+    target_date = models.DateField()
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.OPEN)
     history = models.BooleanField(default=False)
+    note = models.TextField(blank=True, default="")
     owner_user = models.ForeignKey(User, on_delete=models.PROTECT, null=True, blank=True, related_name="owned_inspection_sessions")
     created_by = models.ForeignKey(User, on_delete=models.PROTECT, null=True, blank=True, related_name="created_inspection_sessions")
     updated_by = models.ForeignKey(User, on_delete=models.PROTECT, null=True, blank=True, related_name="updated_inspection_sessions")
@@ -146,6 +184,10 @@ class InspectionSession(models.Model):
 
     class Meta:
         constraints = [
+            models.UniqueConstraint(
+                fields=["owner_user", "target_date"],
+                name="unique_inspection_session_owner_date",
+            ),
             models.CheckConstraint(
                 condition=models.Q(status__in=["open", "closed"]),
                 name="inspection_session_status_check",
@@ -157,6 +199,14 @@ class InspectionSession(models.Model):
 
 
 class InspectionTarget(models.Model):
+    class RegistrationRoute(models.TextChoices):
+        OCR = "ocr", "OCR"
+        EXCEL = "excel", "Excel"
+        MANUAL_CODE = "manual_code", "Manual code"
+        FACTORY_MAP = "factory_map", "Factory map"
+        SPECIAL = "special", "Special"
+        LEGACY = "legacy", "Legacy"
+
     class IssueStatus(models.TextChoices):
         NOT_REQUIRED = "not_required", "Not required"
         PENDING = "pending", "Pending"
@@ -181,6 +231,11 @@ class InspectionTarget(models.Model):
     source_ocr = models.BooleanField(default=False)
     source_excel = models.BooleanField(default=False)
     source_manual = models.BooleanField(default=False)
+    registration_route = models.CharField(
+        max_length=16,
+        choices=RegistrationRoute.choices,
+        default=RegistrationRoute.LEGACY,
+    )
     requires_inspection_sheet = models.BooleanField(default=False)
     issue_status = models.CharField(
         max_length=32,
@@ -201,11 +256,27 @@ class InspectionTarget(models.Model):
             models.UniqueConstraint(
                 fields=["session", "normalized_code", "class_override"],
                 name="unique_target_per_session_code",
+                nulls_distinct=False,
             ),
             models.CheckConstraint(
                 condition=models.Q(issue_status__in=["not_required", "pending", "issued", "missing_file", "skipped"]),
                 name="inspection_target_issue_status_check",
-            )
+            ),
+            models.CheckConstraint(
+                condition=models.Q(class_override__isnull=True) | models.Q(class_override__range=(1, 9)),
+                name="inspection_target_class_range_check",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(master__isnull=True)
+                    | models.Q(registration_route="legacy")
+                    | models.Q(registration_route="special", class_override=9)
+                    | models.Q(registration_route="ocr", class_override__in=[1, 2, 3, 4, 5, 8])
+                    | models.Q(registration_route="factory_map", class_override__range=(1, 5))
+                    | models.Q(registration_route__in=["excel", "manual_code"], class_override__in=[6, 7])
+                ),
+                name="inspection_target_route_class_check",
+            ),
         ]
         indexes = [
             models.Index(fields=["session", "normalized_code"]),
@@ -255,8 +326,9 @@ class History(models.Model):
     class Meta:
         constraints = [
             models.UniqueConstraint(
-                fields=["date", "master", "time_slot", "class_override"],
+                fields=["created_by", "date", "master", "time_slot", "class_override"],
                 name="unique_history_date_master_slot",
+                nulls_distinct=False,
             ),
             models.CheckConstraint(
                 condition=models.Q(time_slot__in=["A", "B", "C", "D"]),
@@ -397,6 +469,7 @@ class Job(models.Model):
     updated_by = models.ForeignKey(User, on_delete=models.PROTECT, null=True, blank=True, related_name="updated_jobs")
     deleted_at = models.DateTimeField(null=True, blank=True)
     deleted_by = models.ForeignKey(User, on_delete=models.PROTECT, null=True, blank=True, related_name="deleted_jobs")
+    updated_at = models.DateTimeField(auto_now=True, null=True)
 
     class Meta:
         constraints = [
@@ -414,6 +487,8 @@ class Job(models.Model):
 class UserSetting(models.Model):
     user = models.OneToOneField(User, on_delete=models.PROTECT, primary_key=True, related_name="settings")
     theme = models.CharField(max_length=32, default="light")
+    font_size = models.FloatField(default=17.33)
+    browser_settings_imported = models.BooleanField(default=False)
 
     class Meta:
         db_table = "user_settings"

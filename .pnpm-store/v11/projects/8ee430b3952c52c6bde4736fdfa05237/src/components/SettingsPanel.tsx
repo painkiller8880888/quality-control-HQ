@@ -1,15 +1,24 @@
 import React, { useState, useEffect, useRef } from 'react';
 import type { AppSettings, Job, ApiError, Class9Setting } from '../types';
-import { Save, Upload, FolderOpen, Loader2, Database, Plus, Trash2, CheckCircle2, AlertTriangle, Type, Play, Monitor, FileSpreadsheet, Bug } from 'lucide-react';
+import { Save, Upload, FolderOpen, Loader2, Database, Plus, Trash2, CheckCircle2, AlertTriangle, Play, Monitor, FileSpreadsheet, Bug } from 'lucide-react';
 
-interface SettingsPanelProps {
-  fontSize: number;
-  onFontSizeChange: (size: number) => void;
+interface InspectionFolderRow {
+  id: number;
+  path: string;
+  priority: number;
 }
 
-export const SettingsPanel: React.FC<SettingsPanelProps> = ({ fontSize, onFontSizeChange }) => {
+const folderPathComparisonKey = (path: string) => {
+  let normalized = path.trim().replace(/\//g, '\\');
+  while (normalized.length > 1 && normalized.endsWith('\\') && !/^[a-zA-Z]:\\$/.test(normalized)) {
+    normalized = normalized.slice(0, -1);
+  }
+  return normalized.toLocaleLowerCase();
+};
+
+export const SettingsPanel: React.FC = () => {
   const [csvPath, setCsvPath] = useState('');
-  const [folderPaths, setFolderPaths] = useState<string[]>(['']);
+  const [folderRows, setFolderRows] = useState<InspectionFolderRow[]>([]);
   const [erpPath, setErpPath] = useState('');
   const [historyFilePath, setHistoryFilePath] = useState('');
   const [isLoading, setIsLoading] = useState(true);
@@ -21,6 +30,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ fontSize, onFontSi
   const [erpResult, setErpResult] = useState<string | null>(null);
   const [jobResult, setJobResult] = useState<any>(null);
   const pollingTimerRef = useRef<any>(null);
+  const nextFolderRowId = useRef(1);
 
   // Class 9 settings
   const [class9Settings, setClass9Settings] = useState<Class9Setting[]>([]);
@@ -49,7 +59,12 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ fontSize, onFontSi
       if (!response.ok) throw new Error('設定の取得に失敗しました');
       const data: AppSettings = await response.json();
       setCsvPath(data.csv_path || '');
-      setFolderPaths(data.inspection_folder_paths?.length ? data.inspection_folder_paths : ['']);
+      const paths = data.inspection_folder_paths ?? [];
+      setFolderRows(paths.map((path) => ({
+        id: nextFolderRowId.current++,
+        path,
+        priority: data.inspection_folder_priorities?.[path] ?? 0,
+      })));
       setErpPath(data.erp_path || '');
       setHistoryFilePath(data.history_file_path || '');
     } catch (err: any) {
@@ -133,9 +148,20 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ fontSize, onFontSi
   };
 
   const handleSave = async () => {
-    setIsSaving(true);
     setSaveMessage(null);
-    const validFolders = folderPaths.filter((p) => p.trim() !== '');
+    const trimmedRows = folderRows.map((row) => ({ ...row, path: row.path.trim() }));
+    if (trimmedRows.some((row) => !row.path)) {
+      setSaveMessage('エラー: 空のフォルダパスは保存できません。不要な行は削除してください。');
+      return;
+    }
+    const comparisonKeys = trimmedRows.map((row) => folderPathComparisonKey(row.path));
+    if (new Set(comparisonKeys).size !== comparisonKeys.length) {
+      setSaveMessage('エラー: 同じフォルダパスが複数指定されています。');
+      return;
+    }
+    const validFolders = trimmedRows.map((row) => row.path);
+    const validPriorities = Object.fromEntries(trimmedRows.map((row) => [row.path, row.priority]));
+    setIsSaving(true);
     try {
       const response = await fetch('/api/settings/', {
         method: 'PUT',
@@ -143,11 +169,17 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ fontSize, onFontSi
         body: JSON.stringify({
           csv_path: csvPath,
           inspection_folder_paths: validFolders,
+          inspection_folder_priorities: validPriorities,
           erp_path: erpPath,
           history_file_path: historyFilePath,
         }),
       });
-      if (!response.ok) throw new Error('保存に失敗しました');
+      if (!response.ok) {
+        const error = await response.json().catch(() => null);
+        const detail = error?.inspection_folder_paths?.[0] || error?.inspection_folder_priorities?.[0];
+        throw new Error(detail || '保存に失敗しました');
+      }
+      setFolderRows(trimmedRows);
       setSaveMessage('設定を保存しました');
     } catch (err: any) {
       setSaveMessage('エラー: ' + err.message);
@@ -247,10 +279,16 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ fontSize, onFontSi
     }, 2500);
   };
 
-  const addFolderPath = () => setFolderPaths([...folderPaths, '']);
-  const removeFolderPath = (index: number) => {
-    const updated = folderPaths.filter((_, i) => i !== index);
-    setFolderPaths(updated.length ? updated : ['']);
+  const addFolderPath = () => setFolderRows((rows) => [
+    ...rows,
+    { id: nextFolderRowId.current++, path: '', priority: 0 },
+  ]);
+  const removeFolderPath = (id: number) => {
+    setFolderRows((rows) => rows.filter((row) => row.id !== id));
+  };
+
+  const updateFolderRow = (id: number, updates: Partial<Pick<InspectionFolderRow, 'path' | 'priority'>>) => {
+    setFolderRows((rows) => rows.map((row) => row.id === id ? { ...row, ...updates } : row));
   };
 
   if (isLoading) {
@@ -291,24 +329,34 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ fontSize, onFontSi
         </h2>
         <div className="form-group">
           <label className="form-label">フォルダパス一覧（複数指定可）</label>
-          {folderPaths.map((path, index) => (
-            <div key={index} className="folder-path-row">
+          <p className="form-hint">優先順位は数値が大きいフォルダほど先に選ばれます。</p>
+          <div className="folder-path-headings" aria-hidden="true">
+            <span>フォルダパス</span>
+            <span>優先順位</span>
+            <span></span>
+          </div>
+          {folderRows.map((row) => (
+            <div key={row.id} className="folder-path-row">
               <input
                 type="text"
                 className="form-control"
-                value={path}
-                onChange={(e) => {
-                  const updated = [...folderPaths];
-                  updated[index] = e.target.value;
-                  setFolderPaths(updated);
-                }}
+                value={row.path}
+                onChange={(e) => updateFolderRow(row.id, { path: e.target.value })}
                 placeholder="\\\\server\\share\\folder"
+              />
+              <input
+                type="number"
+                step="1"
+                className="form-control folder-priority-input"
+                value={row.priority}
+                onChange={(e) => updateFolderRow(row.id, { priority: Number.parseInt(e.target.value, 10) || 0 })}
+                aria-label={`${row.path || '新しいフォルダ'}の優先順位`}
+                title="優先順位（大きい数値ほど優先）"
               />
               <button
                 type="button"
                 className="btn btn-secondary btn-icon-only"
-                onClick={() => removeFolderPath(index)}
-                disabled={folderPaths.length <= 1}
+                onClick={() => removeFolderPath(row.id)}
                 title="削除"
               >
                 <Trash2 size={16} />
@@ -449,31 +497,6 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ fontSize, onFontSi
             <span>{class9Message}</span>
           </div>
         )}
-      </div>
-
-      <div className="card">
-        <h2 className="card-title">
-          <Type className="icon-title" size={20} />
-          表示設定
-        </h2>
-        <div className="form-group">
-          <label className="form-label">
-            フォントサイズ ({fontSize}px)
-          </label>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>小</span>
-            <input
-              type="range"
-              min="13"
-              max="22"
-              step="0.5"
-              value={fontSize}
-              onChange={(e) => onFontSizeChange(parseFloat(e.target.value))}
-              style={{ flex: 1, accentColor: 'var(--color-primary)' }}
-            />
-            <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>大</span>
-          </div>
-        </div>
       </div>
 
       <div className="settings-actions">

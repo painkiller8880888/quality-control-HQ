@@ -1,14 +1,14 @@
 import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import type { InspectionTarget } from '../types';
-import { AlertTriangle, ChevronDown, ChevronUp, FileCheck, CheckCircle2, Package, Database, ArrowUpDown, ArrowUp, ArrowDown, EyeOff, Plus, Printer, FileText, Bug, ListTree } from 'lucide-react';
+import { AlertTriangle, ChevronDown, ChevronUp, FileCheck, CheckCircle2, Package, Database, ArrowUpDown, ArrowUp, ArrowDown, EyeOff, Plus, Printer, FileText, ListTree, Pencil } from 'lucide-react';
 import { ManualAddModal } from './ManualAddModal';
 import { SpecialAddModal } from './SpecialAddModal';
 import { AssemblyStructureModal } from './AssemblyStructureModal';
+import { CLASS_COLORS, CLASS_LABELS } from '../classStyles';
 
 interface CheckUpdateItem {
-  code: string;
+  target_id: number;
   checks: Record<string, boolean>;
-  class_override?: number | null;
 }
 
 interface TargetsTableProps {
@@ -24,30 +24,6 @@ interface TargetsTableProps {
   onRefresh: () => void;
   isLoading?: boolean;
 }
-
-const CLASS_LABELS: Record<number, string> = {
-  1: '自動機',
-  2: '半自動機',
-  3: 'セッター',
-  4: 'プレス',
-  5: '二次加工',
-  6: '製品検査(1)',
-  7: '製品検査(2)',
-  8: '手動',
-  9: '特殊検査',
-};
-
-const CLASS_COLORS: Record<number, { bg: string; text: string }> = {
-  1: { bg: '#dbeafe', text: '#1e40af' },
-  2: { bg: '#fef3c7', text: '#92400e' },
-  3: { bg: '#dcfce7', text: '#166534' },
-  4: { bg: '#fae8ff', text: '#86198f' },
-  5: { bg: '#ffedd5', text: '#9a3412' },
-  6: { bg: '#e0e7ff', text: '#3730a3' },
-  7: { bg: '#fce7f3', text: '#9d174d' },
-  8: { bg: '#f1f5f9', text: '#334155' },
-  9: { bg: '#fff1f0', text: '#cf1322' },
-};
 
 const getClassColor = (classNum: number | null) => {
   if (classNum === null || classNum === undefined) return { bg: '#f1f5f9', text: '#64748b' };
@@ -75,7 +51,34 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
   const [isIssuing, setIsIssuing] = useState(false);
   const [isIssuingDailyReport, setIsIssuingDailyReport] = useState(false);
   const [isWritingHistory, setIsWritingHistory] = useState(false);
+  const [noteOpen, setNoteOpen] = useState(false);
+  const [note, setNote] = useState('');
+  const [noteError, setNoteError] = useState('');
+  const [noteSaving, setNoteSaving] = useState(false);
   const [isPaneCollapsed, setIsPaneCollapsed] = useState(false);
+  const openNote = async () => {
+    setNote('');
+    setNoteError('');
+    try {
+      const response = await fetch(`/api/inspection-note/?date=${encodeURIComponent(selectedDate)}`);
+      if (!response.ok) throw new Error('ノートを取得できませんでした');
+      setNote((await response.json()).note || '');
+      setNoteOpen(true);
+    } catch (error) {
+      setNoteError(error instanceof Error ? error.message : 'ノートを取得できませんでした');
+    }
+  };
+  const saveNote = async () => {
+    setNoteSaving(true);
+    setNoteError('');
+    try {
+      const response = await fetch('/api/inspection-note/', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ date: selectedDate, note }) });
+      if (!response.ok) throw new Error('ノートを保存できませんでした');
+      setNoteOpen(false);
+    } catch (error) {
+      setNoteError(error instanceof Error ? error.message : 'ノートを保存できませんでした');
+    } finally { setNoteSaving(false); }
+  };
   const observerRef = useRef<ResizeObserver | null>(null);
   const paneRef = useCallback((node: HTMLDivElement | null) => {
     if (observerRef.current) {
@@ -102,7 +105,7 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
 
   // Drag-to-check state (A/B/C/D slots)
   const containerRef = useRef<HTMLDivElement>(null);
-  interface AccumulatedData { code: string; checks: Record<string, boolean>; class_override: number | null; }
+  interface AccumulatedData { target_id: number; checks: Record<string, boolean>; }
   const dragRef = useRef<{
     isDragging: boolean; startX: number; startY: number; slot: string;
     setChecked: boolean;
@@ -157,10 +160,8 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
     const target = targets.find(t => t.target_id === cellData.targetId);
     if (target?.checks?.[cellData.slot as keyof typeof target.checks] === drag.setChecked) return;
 
-    const existing = drag.accumulated.get(cellData.targetId) || { code: target?.code ?? '', checks: {}, class_override: target?.class_override ?? null };
+    const existing = drag.accumulated.get(cellData.targetId) || { target_id: cellData.targetId, checks: {} };
     existing.checks[cellData.slot] = drag.setChecked;
-    existing.class_override = target?.class_override ?? null;
-    existing.code = target?.code ?? '';
     drag.accumulated.set(cellData.targetId, existing);
 
     if (drag.setChecked) {
@@ -234,9 +235,8 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
 
     if (drag.accumulated.size > 0 && selectedDate) {
       const items = Array.from(drag.accumulated.values()).map(data => ({
-        code: data.code,
+        target_id: data.target_id,
         checks: data.checks,
-        class_override: data.class_override,
       }));
       onCheckUpdate(selectedDate, items);
     }
@@ -320,9 +320,8 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
           }
 
           onCheckUpdate(selectedDate, [{
-            code: target.code,
+            target_id: target.target_id,
             checks: { [cellData.slot]: newChecked },
-            class_override: target.class_override ?? null,
           }]);
         }
       }
@@ -618,7 +617,7 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
             className="btn btn-danger btn-sm"
             onClick={() => setShowSpecialAddModal(true)}
           >
-            <Bug size={18} />
+            <Plus size={18} />
             <span>特殊追加</span>
           </button>
           <button
@@ -637,6 +636,10 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
             <FileText size={18} />
             <span>{isIssuingDailyReport ? '発行中...' : '日報'}</span>
           </button>
+          <button className="btn btn-note btn-sm" onClick={() => void openNote()}>
+            <Pencil size={18} /><span>ノート</span>
+          </button>
+          {noteError && !noteOpen && <span className="note-error" role="alert">{noteError}</span>}
           <button
             className="btn btn-outline btn-sm"
             onClick={handleWriteHistory}
@@ -667,6 +670,16 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
             onClose={() => setShowSpecialAddModal(false)}
             onAdded={onRefresh}
           />
+        )}
+        {noteOpen && (
+          <div className="modal-overlay" onClick={() => setNoteOpen(false)}>
+            <section className="card modal-content note-modal" role="dialog" aria-modal="true" aria-labelledby="note-title" onClick={event => event.stopPropagation()}>
+              <div className="modal-header"><h3 id="note-title"><Pencil size={18} />{selectedDate} のノート</h3></div>
+              <textarea autoFocus rows={8} value={note} onChange={event => setNote(event.target.value)} placeholder="当日の検査の感想・気づいたこと" />
+              {noteError && <p className="auth-error" role="alert">{noteError}</p>}
+              <div className="modal-actions"><button className="btn" onClick={() => setNoteOpen(false)}>キャンセル</button><button className="btn btn-primary" disabled={noteSaving} onClick={() => void saveNote()}>{noteSaving ? '保存中...' : '決定'}</button></div>
+            </section>
+          </div>
         )}
         {structureModalCode && (
           <AssemblyStructureModal
@@ -821,7 +834,7 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
                           <div className="target-detail-badges">
                             <span className="gh-badge gh-badge-category">
                               <span className="gh-badge-label"><Package size={12} />商品カテゴリ</span>
-                              <span className="gh-badge-value">{target.product_category ?? '-'}</span>
+                              <span className="gh-badge-value"><span className="category-flag">{target.product_category ?? '-'}</span></span>
                             </span>
                             <span className="gh-badge gh-badge-source">
                               <span className="gh-badge-label"><Database size={12} />取込元</span>

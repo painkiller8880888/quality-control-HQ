@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from django.core.exceptions import ImproperlyConfigured
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -75,9 +76,41 @@ USE_TZ = True
 
 STATIC_URL = "static/"
 MEDIA_URL = "/media/"
-MEDIA_ROOT = REPO_DIR / "media"
+MEDIA_ROOT = Path(os.environ.get("MEDIA_ROOT", str(REPO_DIR / "media")))
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+AUTHENTICATION_BACKENDS = ["quality.authentication.LoginNameBackend"]
+
+REST_FRAMEWORK = {
+    "DEFAULT_AUTHENTICATION_CLASSES": [
+        "quality.authentication.ApiSessionAuthentication",
+    ],
+    "DEFAULT_PERMISSION_CLASSES": [
+        "rest_framework.permissions.IsAuthenticated",
+    ],
+}
+
+SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SAMESITE = "Lax"
+CSRF_COOKIE_SAMESITE = "Lax"
+SESSION_COOKIE_SECURE = not DEBUG
+CSRF_COOKIE_SECURE = not DEBUG
+
+CSRF_TRUSTED_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
+for origin in os.environ.get("CSRF_TRUSTED_ORIGINS", "").split(","):
+    origin = origin.strip().rstrip("/")
+    if not origin:
+        continue
+    if "*" in origin or not origin.startswith(("http://", "https://")):
+        raise ImproperlyConfigured(
+            "CSRF_TRUSTED_ORIGINS must contain explicit http(s) origins without wildcards."
+        )
+    if origin not in CSRF_TRUSTED_ORIGINS:
+        CSRF_TRUSTED_ORIGINS.append(origin)
 
 DAILY_REPORT_TEMPLATE = REPO_DIR / "excel" / "daily.xlsm"
 DAILY_REPORT_OUTPUT_DIR = REPO_DIR / "reports"

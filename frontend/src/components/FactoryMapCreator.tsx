@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Grid3X3, Image, MousePointer2, Plus, Save, Trash2, Upload, Palette, X } from 'lucide-react';
+import { Grid3X3, MousePointer2, Plus, Save, Trash2, Palette, X } from 'lucide-react';
 import type { FactoryMapLayout, LayoutObject, LayoutObjectTypeCode, LayoutSummary, LayoutObjectType } from '../types';
 
 interface MachineOption {
@@ -45,13 +45,11 @@ export const FactoryMapCreator: React.FC = () => {
   const [isSaving, setIsSaving] = useState(false);
   const [draggingId, setDraggingId] = useState<number | null>(null);
   const [dragOffset, setDragOffset] = useState<{ x: number; y: number } | null>(null);
-  const [bgImageError, setBgImageError] = useState(false);
   const [newLayoutName, setNewLayoutName] = useState('');
   const [editingLayoutId, setEditingLayoutId] = useState<number | null>(null);
   const [machines, setMachines] = useState<MachineOption[]>([]);
   const [showColorModal, setShowColorModal] = useState(false);
   const canvasRef = useRef<HTMLDivElement | null>(null);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const selectedObject = useMemo(
     () => layout?.objects.find((object) => object.layout_object_id === selectedId) ?? null,
@@ -79,7 +77,6 @@ export const FactoryMapCreator: React.FC = () => {
       const data: FactoryMapLayout = await response.json();
       setLayout(data);
       setEditingLayoutId(data.layout_id);
-      setBgImageError(false);
     } catch (error: any) {
       setStatusMessage(error.message || '見取り図の取得に失敗しました。');
     } finally {
@@ -264,7 +261,7 @@ export const FactoryMapCreator: React.FC = () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           layout_name: layout.layout_name,
-          background_image_path: layout.background_image_path,
+          background_image_path: '',
           grid_width: layout.grid_width,
           grid_height: layout.grid_height,
           objects: layout.objects.map((object) => ({
@@ -292,29 +289,6 @@ export const FactoryMapCreator: React.FC = () => {
     } finally {
       setIsSaving(false);
     }
-  };
-
-  const handleBgImageUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    const formData = new FormData();
-    formData.append('image', file);
-    try {
-      const response = await fetch('/api/factory-map/upload-image/', {
-        method: 'POST',
-        body: formData,
-      });
-      if (response.ok) {
-        const data = await response.json();
-        updateLayout((current) => ({ ...current, background_image_path: data.url }));
-        setBgImageError(false);
-      } else {
-        setStatusMessage('画像のアップロードに失敗しました。');
-      }
-    } catch {
-      setStatusMessage('画像のアップロードに失敗しました。');
-    }
-    if (event.target) event.target.value = '';
   };
 
   const handleGlobalColorChange = async (code: string, color: string) => {
@@ -408,39 +382,6 @@ export const FactoryMapCreator: React.FC = () => {
         </button>
 
         <div className="tool-panel-divider"></div>
-
-        <div className="form-group">
-          <label className="form-label">
-            <Image size={16} className="label-icon" />
-            背景画像
-          </label>
-          <div className="bg-upload-wrapper">
-            <input
-              className="form-control"
-              value={layout?.background_image_path ?? ''}
-              onChange={(event) => updateLayout((current) => ({ ...current, background_image_path: event.target.value }))}
-              placeholder="画像URLまたは..."
-            />
-            <button
-              type="button"
-              className="btn btn-secondary"
-              onClick={() => fileInputRef.current?.click()}
-              title="ファイルを選択"
-            >
-              <Upload size={14} />
-            </button>
-            <input
-              ref={fileInputRef}
-              type="file"
-              className="bg-file-input-hidden"
-              accept="image/*"
-              onChange={handleBgImageUpload}
-            />
-          </div>
-          {bgImageError && layout?.background_image_path && (
-            <div className="editor-field-error">画像URLが正しくないか、アクセスできません</div>
-          )}
-        </div>
 
         <div className="editor-grid-controls">
           <div className="form-group">
@@ -556,15 +497,6 @@ export const FactoryMapCreator: React.FC = () => {
             onPointerUp={handlePointerUp}
             onPointerLeave={handlePointerUp}
           >
-            {layout.background_image_path && (
-              <img className="factory-map-bg" src={layout.background_image_path} alt=""
-                onError={() => setBgImageError(true)}
-                onLoad={() => setBgImageError(false)}
-              />
-            )}
-            {bgImageError && layout.background_image_path && (
-              <div className="map-bg-error">背景画像を読み込めませんでした</div>
-            )}
             {layout.objects.map((object) => {
               const color = objectFillColor(object, layout.object_types);
               return (

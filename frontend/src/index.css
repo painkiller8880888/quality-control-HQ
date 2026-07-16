@@ -25,8 +25,8 @@
   align-items: center;
   justify-content: center;
   gap: 8px;
-  min-height: 36px;
-  padding: 7px 10px;
+  height: 38px;
+  padding: 0 10px;
   border: 1px solid var(--card-border);
   border-radius: 6px;
   background: var(--card-bg);
@@ -51,13 +51,13 @@
 }
 
 .header-icon-btn:disabled { opacity: 0.55; cursor: not-allowed; }
-.header-search-trigger { width: 220px; justify-content: flex-start; }
+.header-search-trigger { width: 220px; justify-content: flex-start; font-size: 0.75rem; font-weight: 600; }
 
 .header-date-control {
   display: flex;
   align-items: center;
   gap: 7px;
-  min-height: 36px;
+  height: 38px;
   padding: 4px 8px;
   border: 1px solid var(--card-border);
   border-radius: 6px;
@@ -73,6 +73,7 @@
   background: transparent;
   color: var(--text-primary);
   font: inherit;
+  height: 100%;
 }
 
 .dashboard-grid { display: block; height: 100%; overflow: hidden; }
@@ -1133,6 +1134,23 @@ body {
   white-space: pre-wrap;
 }
 
+.error-details {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 4px 12px;
+  margin: 12px 0 0;
+  font-size: 0.8125rem;
+}
+
+.error-details dt {
+  font-weight: 600;
+}
+
+.error-details dd {
+  margin: 0;
+  word-break: break-word;
+}
+
 .warning-alert-box {
   background: var(--alert-warning-bg);
   border: 1px solid var(--alert-warning-border);
@@ -1694,6 +1712,13 @@ body {
   color: #fde047;
 }
 
+.category-flag {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
 /* Badge styling */
 .badge {
   font-size: 0.75rem;
@@ -2014,6 +2039,12 @@ body {
   font-weight: 700;
   padding: 2px 6px;
   border-radius: 4px;
+}
+
+.gh-badge-category .gh-badge-value .category-flag {
+  background: rgba(255, 255, 255, 0.25);
+  color: #ffffff;
+  font-weight: 700;
 }
 
 .gh-badge-warning {
@@ -2985,6 +3016,24 @@ button.editor-object {
   flex: 1;
 }
 
+.folder-path-row .folder-priority-input {
+  flex: 0 0 96px;
+}
+
+.folder-path-headings {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 96px 36px;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+
+.form-hint {
+  margin: -4px 0 8px;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+
 .settings-actions {
   display: flex;
   gap: 12px;
@@ -3003,13 +3052,14 @@ button.editor-object {
    ========================================== */
 
 .map-segment-control {
-  display: inline-flex;
-  background: rgba(0, 0, 0, 0.2);
-  padding: 4px;
+  display: flex;
+  background: var(--container-bg-secondary);
+  padding: 3px;
   border-radius: var(--radius-md);
   border: 1px solid var(--card-border);
-  gap: 4px;
-  width: fit-content;
+  gap: 0;
+  width: 100%;
+  box-sizing: border-box;
   flex-shrink: 0;
 }
 
@@ -3025,14 +3075,15 @@ button.editor-object {
   font-size: 0.8125rem;
   cursor: pointer;
   transition: var(--transition-smooth);
+  flex: 1;
+  min-width: 0;
 }
 
 .map-segment-badge {
-  position: absolute;
-  top: -4px;
-  right: -4px;
-  background: var(--color-danger, #f43f5e);
-  color: #fff;
+  position: static;
+  flex-shrink: 0;
+  background: var(--container-bg-secondary);
+  color: var(--text-secondary);
   font-size: 0.6rem;
   font-weight: 700;
   min-width: 16px;
@@ -3042,7 +3093,7 @@ button.editor-object {
   align-items: center;
   justify-content: center;
   padding: 0 4px;
-  box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+  box-shadow: none;
   line-height: 1;
 }
 
@@ -4166,11 +4217,12 @@ button.editor-object {
 .factory-map-canvas .map-object.highlighted { box-shadow: none !important; transform: none; border-width: 2px !important; }
 
 /* Final cascade overrides for quiet state controls and metadata badges. */
-.map-segment-button { border: 1px solid transparent; }
+.map-segment-control { display: flex; width: 100%; }
+.map-segment-button { border: 1px solid transparent; flex: 1; }
 .map-segment-button.active { background: var(--container-bg-secondary-hover); color: var(--text-primary); border-color: var(--text-muted); box-shadow: none; }
-.map-segment-badge { background: var(--color-danger-bg); color: var(--color-danger); border: 1px solid var(--color-danger); box-shadow: none; }
+.map-segment-badge { position: static; background: var(--container-bg-secondary); color: var(--text-secondary); border: 1px solid var(--card-border); box-shadow: none; }
 .factory-map-canvas .map-object-machine:hover { box-shadow: none; filter: none; transform: none; }
-.status-badge, .badge, .source-flag, .source-mode-badge, .gh-badge,
+.status-badge, .badge, .source-flag, .category-flag, .source-mode-badge, .gh-badge,
 .warning-summary-badge, .warning-count-badge, .warning-type-label-badge,
 .machine-popup-badge, .machine-master-assign-class-badge { box-shadow: none; border: 1px solid var(--card-border); }
 .ocr-flag, .excel-flag, .manual-flag, .status-not-required,
@@ -4180,6 +4232,7 @@ button.editor-object {
 .gh-badge-source .gh-badge-label, .gh-badge-source .gh-badge-value,
 .gh-badge-warning .gh-badge-label, .gh-badge-warning .gh-badge-value { background: var(--container-bg-secondary); color: var(--text-primary); }
 .gh-badge-source .gh-badge-value .source-flag { background: var(--card-bg); color: var(--text-secondary); border-color: var(--card-border); }
+.gh-badge-category .gh-badge-value .category-flag { background: var(--card-bg); color: var(--text-secondary); border-color: var(--card-border); }
 
 /* Side-by-side import workflow; keep this after the generic modal rules. */
 .modal-content.import-status-modal {

@@ -47,16 +47,18 @@ export const SpecialAddModal: React.FC<SpecialAddModalProps> = ({ selectedDate, 
     setIsAdding(true);
     setError(null);
     try {
-      const res = await fetch('/api/inspection-targets/manual/', {
+      const res = await fetch('/api/inspection-targets/special/', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           date: selectedDate,
           codes: Array.from(selectedCodes),
-          class_override: 9,
         }),
       });
-      if (!res.ok) throw new Error('追加に失敗しました');
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.message || '追加に失敗しました');
+      }
       onAdded();
       onClose();
     } catch (err: any) {

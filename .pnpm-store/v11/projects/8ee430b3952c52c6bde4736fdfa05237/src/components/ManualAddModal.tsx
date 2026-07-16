@@ -66,7 +66,10 @@ export const ManualAddModal: React.FC<ManualAddModalProps> = ({ selectedDate, on
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ date: selectedDate, codes: Array.from(selectedCodes) }),
       });
-      if (!res.ok) throw new Error('追加に失敗しました');
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.message || '追加に失敗しました');
+      }
       onAdded();
       onClose();
     } catch (err: any) {

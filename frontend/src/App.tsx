@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import './App.css';
 import { ImportForm } from './components/ImportForm';
 import { ImportSummary } from './components/ImportSummary';
 import { SettingsPanel } from './components/SettingsPanel';
@@ -8,8 +9,38 @@ import { LayoutList } from './components/LayoutList';
 import { FactoryMapCreator } from './components/FactoryMapCreator';
 import { MachineMasterPanel } from './components/MachineMasterPanel';
 import { AssemblyStructureModal } from './components/AssemblyStructureModal';
+import { InspectionSummary } from './components/InspectionSummary';
 import type { Job, InspectionTarget, ApiError, LayoutSummary } from './types';
-import { ShieldAlert, RefreshCw, Layers, Map as MapIcon, Cpu, Settings, Palette, Upload, CheckCircle2, Database, Menu, Search, X } from 'lucide-react';
+import { ShieldAlert, RefreshCw, Layers, Map as MapIcon, Cpu, Settings, Palette, Upload, CheckCircle2, Database, Menu, Search, X, CircleUserRound, LogOut, ClipboardList } from 'lucide-react';
+
+interface AuthUser {
+  id: number; login_name: string; display_name: string; avatar_url: string | null;
+  role: 'admin' | 'worker'; settings: { theme: ThemeMode; browser_settings_imported: boolean };
+}
+
+const AvatarImage: React.FC<{ src: string | null; alt: string; fallbackSize: number }> = ({ src, alt, fallbackSize }) => {
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
+  return src && failedSrc !== src
+    ? <img src={src} alt={alt} onError={() => setFailedSrc(src)} />
+    : <CircleUserRound size={fallbackSize} aria-hidden="true" />;
+};
+
+const csrfToken = () => document.cookie.match(/(?:^|; )csrftoken=([^;]+)/)?.[1] || '';
+const nativeFetch = window.fetch.bind(window);
+const apiFetch = (input: RequestInfo | URL, init: RequestInit = {}) => {
+  const method = (init.method || 'GET').toUpperCase();
+  const headers = new Headers(init.headers);
+  if (!['GET', 'HEAD', 'OPTIONS', 'TRACE'].includes(method)) headers.set('X-CSRFToken', csrfToken());
+  return nativeFetch(input, { ...init, headers, credentials: 'same-origin' });
+};
+window.fetch = apiFetch as typeof window.fetch;
+
+async function importBrowserSettings(user: AuthUser): Promise<AuthUser> {
+  localStorage.removeItem('fontSize');
+  if (user.settings.browser_settings_imported) return user;
+  const response = await apiFetch('/api/me/settings/', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ theme: localStorage.getItem('theme') || 'normal' }) });
+  return response.ok ? { ...user, settings: await response.json() } : user;
+}
 
 interface MasterSearchResult {
   code: string;
@@ -41,7 +72,22 @@ const getTodayString = () => {
 };
 
 export const App: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'mapCreator' | 'machineMaster' | 'settings'>('dashboard');
+  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+  const [authChecked, setAuthChecked] = useState(false);
+  const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
+  const [authId, setAuthId] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [profileModalOpen, setProfileModalOpen] = useState(false);
+  const [profileDisplayName, setProfileDisplayName] = useState('');
+  const [profileAvatar, setProfileAvatar] = useState<File | null>(null);
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [newPasswordConfirm, setNewPasswordConfirm] = useState('');
+  const [profileError, setProfileError] = useState<string | null>(null);
+  const [profileSaving, setProfileSaving] = useState(false);
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'summary' | 'mapCreator' | 'machineMaster' | 'settings'>('dashboard');
   const [isNavigationOpen, setIsNavigationOpen] = useState(false);
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
   const [isStructureSearchOpen, setIsStructureSearchOpen] = useState(false);
@@ -55,6 +101,9 @@ export const App: React.FC = () => {
   const navigationDialogRef = useRef<HTMLElement | null>(null);
   const importDialogRef = useRef<HTMLElement | null>(null);
   const searchDialogRef = useRef<HTMLElement | null>(null);
+  const profileDialogRef = useRef<HTMLElement | null>(null);
+  const userMenuRef = useRef<HTMLDivElement | null>(null);
+  const userMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
   const structureSearchTriggerRef = useRef<HTMLButtonElement | null>(null);
   const suppressDialogFocusRestoreRef = useRef(false);
   const [selectedDate, setSelectedDate] = useState<string>(getTodayString);
@@ -75,24 +124,46 @@ export const App: React.FC = () => {
   const [activeLayoutId, setActiveLayoutId] = useState<number | null>(null);
   const [highlightedTargetCode, setHighlightedTargetCode] = useState<string | null>(null);
   const [highlightedTargetId, setHighlightedTargetId] = useState<number | null>(null);
-  const [fontSize, setFontSize] = useState<number>(() => {
-    if (typeof window !== 'undefined') {
-      return parseFloat(localStorage.getItem('fontSize') || '17.33');
-    }
-    return 17.33;
-  });
-
   const pollingTimerRef = useRef<any>(null);
+  const profileAvatarPreview = React.useMemo(() => profileAvatar ? URL.createObjectURL(profileAvatar) : null, [profileAvatar]);
+
+  useEffect(() => () => { if (profileAvatarPreview) URL.revokeObjectURL(profileAvatarPreview); }, [profileAvatarPreview]);
+  useEffect(() => {
+    if (!userMenuOpen) return;
+    userMenuRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      setUserMenuOpen(false);
+      userMenuTriggerRef.current?.focus();
+    };
+    const closeOnOutsideClick = (event: PointerEvent) => {
+      if (!userMenuRef.current?.contains(event.target as Node)) setUserMenuOpen(false);
+    };
+    document.addEventListener('keydown', closeOnEscape);
+    document.addEventListener('pointerdown', closeOnOutsideClick);
+    return () => {
+      document.removeEventListener('keydown', closeOnEscape);
+      document.removeEventListener('pointerdown', closeOnOutsideClick);
+    };
+  }, [userMenuOpen]);
+
+  useEffect(() => {
+    apiFetch('/api/auth/session/').then(async response => {
+      const data = await response.json();
+      if (data.authenticated) {
+        const currentUser = await importBrowserSettings(data.user);
+        setAuthUser(currentUser); setTheme(currentUser.settings.theme);
+        void fetchLayouts(); void fetchTargets(getTodayString());
+      }
+    }).finally(() => setAuthChecked(true));
+    // Session bootstrap and its initial data fetch intentionally run only once.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
     localStorage.setItem('theme', theme);
   }, [theme]);
-
-  useEffect(() => {
-    document.documentElement.style.setProperty('--font-size-base', `${fontSize}px`);
-    localStorage.setItem('fontSize', String(fontSize));
-  }, [fontSize]);
 
   useEffect(() => {
     return () => {
@@ -109,10 +180,24 @@ export const App: React.FC = () => {
     };
   }, []);
 
-  useEffect(() => {
-    fetchLayouts();
-    fetchTargets(selectedDate);
-  }, []);
+  const submitAuthentication = async (event: React.FormEvent) => {
+    event.preventDefault(); setAuthError(null);
+    const response = await apiFetch(`/api/auth/${authMode}/`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ login_name: authId, password: authPassword }) });
+    const data = await response.json();
+    if (!response.ok) { setAuthError(data.detail || data.login_name?.[0] || '認証に失敗しました。'); return; }
+    const currentUser = await importBrowserSettings(data.user);
+    setAuthUser(currentUser); setTheme(currentUser.settings.theme); setAuthPassword(''); void fetchLayouts(); void fetchTargets(selectedDate);
+  };
+  const logoutUser = async () => { await apiFetch('/api/auth/logout/', { method: 'POST' }); setAuthUser(null); setUserMenuOpen(false); setActiveTab('dashboard'); };
+  const cycleTheme = () => { const next = getNextTheme(theme); setTheme(next); void apiFetch('/api/me/settings/', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ theme: next }) }); };
+  const openProfileModal = () => { userMenuTriggerRef.current?.focus(); setUserMenuOpen(false); setProfileDisplayName(authUser?.display_name || ''); setProfileAvatar(null); setCurrentPassword(''); setNewPassword(''); setNewPasswordConfirm(''); setProfileError(null); setProfileModalOpen(true); };
+  const saveProfile = async (event: React.FormEvent) => {
+    event.preventDefault(); setProfileSaving(true); setProfileError(null);
+    const body = new FormData(); body.set('display_name', profileDisplayName); if (profileAvatar) body.set('avatar', profileAvatar);
+    if (currentPassword || newPassword || newPasswordConfirm) { body.set('current_password', currentPassword); body.set('new_password', newPassword); body.set('new_password_confirm', newPasswordConfirm); }
+    try { const response = await apiFetch('/api/me/profile/', { method: 'PATCH', body }); const data = await response.json(); if (!response.ok) { const error = Object.values(data).flat().find(value => typeof value === 'string'); setProfileError(typeof error === 'string' ? error : 'プロフィールを更新できませんでした。'); return; } setAuthUser(data.user); setProfileModalOpen(false); }
+    catch { setProfileError('プロフィールを更新できませんでした。'); } finally { setProfileSaving(false); }
+  };
 
   useEffect(() => {
     const dialog = isNavigationOpen
@@ -121,7 +206,7 @@ export const App: React.FC = () => {
         ? importDialogRef.current
         : isStructureSearchOpen && !selectedStructure
           ? searchDialogRef.current
-          : null;
+          : profileModalOpen ? profileDialogRef.current : null;
     if (!dialog) return;
 
     const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -135,6 +220,7 @@ export const App: React.FC = () => {
         event.preventDefault();
         if (isNavigationOpen) setIsNavigationOpen(false);
         else if (isImportModalOpen) setIsImportModalOpen(false);
+        else if (profileModalOpen) setProfileModalOpen(false);
         else closeStructureSearch();
         return;
       }
@@ -163,9 +249,9 @@ export const App: React.FC = () => {
         previouslyFocused?.focus();
       }
     };
-  }, [isNavigationOpen, isImportModalOpen, isStructureSearchOpen, selectedStructure]);
+  }, [isNavigationOpen, isImportModalOpen, isStructureSearchOpen, selectedStructure, profileModalOpen]);
 
-  const fetchLayouts = async () => {
+  async function fetchLayouts() {
     try {
       const response = await fetch('/api/factory-map/layouts/');
       if (response.ok) {
@@ -178,9 +264,9 @@ export const App: React.FC = () => {
     } catch {
       // ignore
     }
-  };
+  }
 
-  const fetchTargets = async (date: string) => {
+  async function fetchTargets(date: string) {
     if (!date) return;
     setIsLoadingTargets(true);
     setGlobalError(null);
@@ -205,7 +291,7 @@ export const App: React.FC = () => {
     } finally {
       setIsLoadingTargets(false);
     }
-  };
+  }
 
   const getJapaneseErrorLabel = (code: string) => {
     const labels: Record<string, string> = {
@@ -386,16 +472,17 @@ export const App: React.FC = () => {
     }, 2500);
   };
 
-  const handleRegisterTarget = async (code: string) => {
+  const handleRegisterTarget = async (machineId: number, code: string) => {
     if (!selectedDate) return;
     try {
-      const response = await fetch('/api/inspection-targets/manual/', {
+      const response = await fetch('/api/inspection-targets/factory-map/', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ date: selectedDate, codes: [code] }),
+        body: JSON.stringify({ date: selectedDate, machine_id: machineId, code }),
       });
       if (!response.ok) {
-        console.error('手動追加に失敗しました');
+        const data = await response.json().catch(() => ({}));
+        setGlobalError(data.message || '見取り図からの追加に失敗しました');
         return;
       }
       await fetchTargets(selectedDate);
@@ -532,9 +619,9 @@ export const App: React.FC = () => {
     }
   };
 
-  const handleCheckUpdate = (date: string, items: { code: string; checks: Record<string, boolean>; class_override?: number | null }[]) => {
+  const handleCheckUpdate = (date: string, items: { target_id: number; checks: Record<string, boolean> }[]) => {
     setTargets(prev => prev.map(t => {
-      const item = items.find(i => i.code === t.code);
+      const item = items.find(i => i.target_id === t.target_id);
       if (!item) return t;
       const newChecks = { ...t.checks };
       for (const [slot, checked] of Object.entries(item.checks)) {
@@ -543,19 +630,18 @@ export const App: React.FC = () => {
       return { ...t, checks: newChecks };
     }));
 
-    const itemsWithClass = items.map(item => ({
-      ...item,
-      class_override: item.class_override ?? undefined,
-    }));
-
     fetch('/api/history/bulk-upsert/', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ date, items: itemsWithClass }),
+      body: JSON.stringify({ date, items }),
     }).then(res => {
       if (!res.ok) fetchTargets(date);
     }).catch(() => fetchTargets(date));
   };
+
+  if (!authChecked) return <div className="auth-screen"><div className="auth-card">読み込み中...</div></div>;
+  if (!authUser) return <div className="auth-screen"><form className="auth-card" onSubmit={submitAuthentication}><CircleUserRound size={64} aria-hidden="true" /><h1>Quality Control HQ</h1><h2>{authMode === 'login' ? 'ログイン' : '新規登録'}</h2><label>ユーザーID<input autoFocus required value={authId} onChange={e => setAuthId(e.target.value)} /></label><label>パスワード<input type="password" required minLength={8} value={authPassword} onChange={e => setAuthPassword(e.target.value)} /></label>{authError && <p className="auth-error">{authError}</p>}<button type="submit">{authMode === 'login' ? 'ログイン' : '作業者として登録'}</button><button type="button" className="auth-switch" onClick={() => { setAuthMode(authMode === 'login' ? 'register' : 'login'); setAuthError(null); }}>{authMode === 'login' ? '新規登録はこちら' : 'ログインへ戻る'}</button></form></div>;
+  const permittedActiveTab = authUser.role === 'worker' ? 'dashboard' : activeTab;
 
   return (
     <div className="app-container">
@@ -587,16 +673,20 @@ export const App: React.FC = () => {
           <button
             type="button"
             className="header-icon-btn"
-            onClick={() => setTheme(getNextTheme)}
+            onClick={cycleTheme}
             title={`テーマ切替: ${THEME_LABELS[getNextTheme(theme)]}`}
             aria-label={`テーマ切替。現在は${THEME_LABELS[theme]}、次は${THEME_LABELS[getNextTheme(theme)]}`}
           >
             <Palette size={18} />
           </button>
+          <div ref={userMenuRef} className="user-menu-wrap">
+            <button ref={userMenuTriggerRef} id="user-menu-trigger" type="button" className="header-user-button" onClick={() => setUserMenuOpen(!userMenuOpen)} aria-haspopup="menu" aria-controls="user-menu" aria-expanded={userMenuOpen} aria-label="ユーザーメニュー"><AvatarImage src={authUser.avatar_url} alt="" fallbackSize={28} /></button>
+            {userMenuOpen && <div id="user-menu" className="user-menu" role="menu" aria-labelledby="user-menu-trigger"><button type="button" role="menuitem" onClick={openProfileModal}><Settings size={17} aria-hidden="true" />設定</button><div className="user-menu-separator" role="separator" /><button type="button" role="menuitem" onClick={() => { setUserMenuOpen(false); void logoutUser(); }}><LogOut size={17} aria-hidden="true" />ログアウト</button></div>}
+          </div>
         </div>
       </header>
 
-      <main className={`app-main ${activeTab !== 'dashboard' ? 'scrollable' : ''}`}>
+      <main className={`app-main ${permittedActiveTab !== 'dashboard' ? 'scrollable' : ''}`}>
 
         {successMessage && (
           <div className="card success-card-global">
@@ -617,7 +707,7 @@ export const App: React.FC = () => {
           </div>
         )}
 
-        {activeTab === 'dashboard' ? (
+        {permittedActiveTab === 'dashboard' ? (
           <div className="dashboard-grid">
             <div className="dashboard-workspace">
               <LayoutList
@@ -648,10 +738,12 @@ export const App: React.FC = () => {
               </div>
             </div>
           </div>
-        ) : activeTab === 'machineMaster' ? (
+        ) : permittedActiveTab === 'summary' ? (
+          <InspectionSummary />
+        ) : permittedActiveTab === 'machineMaster' ? (
           <MachineMasterPanel />
-        ) : activeTab === 'settings' ? (
-          <SettingsPanel fontSize={fontSize} onFontSizeChange={setFontSize} />
+        ) : permittedActiveTab === 'settings' ? (
+          <SettingsPanel />
         ) : (
           <FactoryMapCreator />
         )}
@@ -667,10 +759,11 @@ export const App: React.FC = () => {
             </div>
             <button className={activeTab === 'dashboard' ? 'active' : ''} onClick={() => navigateTo('dashboard')}><Layers size={17} />巡回ダッシュボード</button>
             <hr />
+            {authUser.role === 'admin' && <><button className={activeTab === 'summary' ? 'active' : ''} onClick={() => navigateTo('summary')}><ClipboardList size={17} />検査サマリー</button>
             <button className={activeTab === 'mapCreator' ? 'active' : ''} onClick={() => navigateTo('mapCreator')}><MapIcon size={17} />見取り図作成</button>
             <button className={activeTab === 'machineMaster' ? 'active' : ''} onClick={() => navigateTo('machineMaster')}><Cpu size={17} />機械マスタ編集</button>
             <hr />
-            <button className={activeTab === 'settings' ? 'active' : ''} onClick={() => navigateTo('settings')}><Settings size={17} />設定</button>
+            <button className={activeTab === 'settings' ? 'active' : ''} onClick={() => navigateTo('settings')}><Settings size={17} />管理者設定</button></>}
           </aside>
         </div>
       )}
@@ -691,6 +784,8 @@ export const App: React.FC = () => {
           </section>
         </div>
       )}
+
+      {profileModalOpen && <div className="modal-overlay" onClick={() => setProfileModalOpen(false)}><section ref={profileDialogRef} className="card modal-content profile-modal" role="dialog" aria-modal="true" aria-labelledby="profile-dialog-title" onClick={event => event.stopPropagation()}><div className="modal-header"><h3 id="profile-dialog-title">アカウント設定</h3><button type="button" className="header-icon-btn" onClick={() => setProfileModalOpen(false)} aria-label="閉じる"><X size={18} /></button></div><form className="profile-form" onSubmit={saveProfile}><section className="profile-form-section" aria-labelledby="profile-basic-title"><h4 id="profile-basic-title">プロフィール / 基本情報</h4><label>ログイン名<input value={authUser.login_name} disabled /></label><label>ユーザー名<input value={profileDisplayName} maxLength={255} onChange={event => setProfileDisplayName(event.target.value)} /></label><label>アバター画像<input type="file" accept="image/jpeg,image/png,image/webp" onChange={event => setProfileAvatar(event.target.files?.[0] || null)} /></label><div className="profile-avatar-preview"><AvatarImage src={profileAvatarPreview || authUser.avatar_url} alt={profileAvatarPreview ? '選択したアバターのプレビュー' : '現在のアバター'} fallbackSize={56} /></div></section><div className="profile-section-separator" role="separator" /><section className="profile-form-section" aria-labelledby="profile-password-title"><h4 id="profile-password-title">パスワード変更</h4><p className="profile-section-note">変更する場合のみ入力してください。</p><label>現在のパスワード<input type="password" autoComplete="current-password" value={currentPassword} onChange={event => setCurrentPassword(event.target.value)} /></label><label>新しいパスワード<input type="password" minLength={8} autoComplete="new-password" value={newPassword} onChange={event => setNewPassword(event.target.value)} /></label><label>新しいパスワード（確認）<input type="password" minLength={8} autoComplete="new-password" value={newPasswordConfirm} onChange={event => setNewPasswordConfirm(event.target.value)} /></label></section>{profileError && <p className="auth-error" role="alert">{profileError}</p>}<div className="profile-actions"><button type="button" className="btn" onClick={() => setProfileModalOpen(false)}>キャンセル</button><button type="submit" className="btn btn-primary" disabled={profileSaving}>{profileSaving ? '保存中...' : '保存'}</button></div></form></section></div>}
 
       {isStructureSearchOpen && !selectedStructure && (
         <div className="modal-overlay modal-overlay-top" onClick={closeStructureSearch}>

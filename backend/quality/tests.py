@@ -1,10 +1,12 @@
 import os
+from types import SimpleNamespace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from django.test import TestCase, override_settings
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.utils import timezone
 from openpyxl import Workbook, load_workbook
 from rest_framework.test import APIClient
 
@@ -13,6 +15,8 @@ from .models import (
     ClassMaster,
     History,
     InspectionFile,
+    InspectionSession,
+    InspectionTarget,
     Job,
     LayoutMaster,
     LayoutObject,
@@ -21,7 +25,14 @@ from .models import (
     Master,
     MasterClass,
     Structure,
+    User,
 )
+
+
+def authenticate_test_client(client, login_name="test-admin", role=User.Role.ADMIN):
+    user = User.objects.create(login_name=login_name, display_name=login_name, password_hash="!", role=role)
+    client.force_authenticate(user)
+    return user
 
 
 def make_csv_row(root_code, parent_code, child_code, child_name, level, department, quantity):
@@ -71,8 +82,11 @@ def csv_with_codes(codes_with_data):
 class PhaseOneApiTests(TestCase):
     def setUp(self):
         self.client = APIClient()
-        Master.objects.create(code="C1234", name="ホルダーAssy", category=1)
-        Master.objects.create(code="C5678", name="検査品", category=6)
+        self.user = authenticate_test_client(self.client)
+        master1 = Master.objects.create(code="C1234", name="ホルダーAssy", category=1)
+        master6 = Master.objects.create(code="C5678", name="検査品", category=6)
+        InspectionFile.objects.create(master=master1, file_name="C1234.xlsx", file_path=r"C:\製品検査\(1)\C1234.xlsx")
+        InspectionFile.objects.create(master=master6, file_name="C5678.xlsx", file_path=r"C:\製品検査\(1)\C5678.xlsx")
 
     def test_manual_targets_preserve_unknown_code_warning(self):
         response = self.client.post(
@@ -89,13 +103,19 @@ class PhaseOneApiTests(TestCase):
         self.assertEqual(unknown["warnings"][0]["error_code"], "UNKNOWN_CODE")
 
     def test_bulk_history_upsert_creates_and_removes_checked_slots(self):
+        self.client.post(
+            "/api/inspection-targets/manual/",
+            {"date": "2026-05-20", "codes": ["C1234"]},
+            format="json",
+        )
+        target_id = InspectionTarget.objects.get(normalized_code="C1234").id
         response = self.client.post(
             "/api/history/bulk-upsert/",
             {
                 "date": "2026-05-20",
                 "items": [
                     {
-                        "code": "C1234",
+                        "target_id": target_id,
                         "checks": {"A": True, "B": False, "C": True, "D": False},
                     }
                 ],
@@ -108,12 +128,16 @@ class PhaseOneApiTests(TestCase):
 
         response = self.client.patch(
             "/api/history/",
-            {"date": "2026-05-20", "code": "C1234", "time": "C", "checked": False},
+            {"date": "2026-05-20", "target_id": target_id, "time": "C", "checked": False},
             format="json",
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(set(History.objects.values_list("time_slot", flat=True)), {"A"})
+        self.assertEqual(
+            set(History.objects.filter(deleted_at__isnull=True).values_list("time_slot", flat=True)),
+            {"A"},
+        )
+        self.assertTrue(History.objects.filter(time_slot="C", deleted_by=self.user, deleted_at__isnull=False).exists())
 
     def test_daily_report_generation_writes_expected_cells(self):
         with TemporaryDirectory() as temp_dir:
@@ -129,11 +153,13 @@ class PhaseOneApiTests(TestCase):
                 date="2026-05-20",
                 master=Master.objects.get(code="C1234"),
                 time_slot="A",
+                created_by=self.user,
             )
             History.objects.create(
                 date="2026-05-20",
                 master=Master.objects.get(code="C5678"),
                 time_slot="B",
+                created_by=self.user,
             )
 
             with override_settings(
@@ -150,22 +176,26 @@ class PhaseOneApiTests(TestCase):
             job = Job.objects.get(job_id=response.json()["job_id"])
             self.assertEqual(job.status, Job.Status.SUCCEEDED)
 
-            report = load_workbook(output_dir / "2026-05-20.xlsm")
+            report = load_workbook(output_dir / f"2026-05-20_u{self.user.pk}.xlsm")
             sheet = report["日報"]
             self.assertEqual(sheet["C26"].value, "ホルダーAssy")
             self.assertEqual(sheet["F18"].value, "検査品")
 
     def test_plan_import_merges_ocr_text_and_excel_codes(self):
-        Master.objects.create(code="CDP0028", name="OCR対象", category=5)
-        Master.objects.create(code="CAP0044", name="Excel対象", category=4)
+        ocr_master = Master.objects.create(code="CDP0028", name="OCR対象", category=5)
+        excel_master = Master.objects.create(code="CAP0044", name="Excel対象", category=4)
+        machine = Machine.objects.create(machine_no="PLAN-M", machine_name="Plan", machine_class=2, shape_type="rectangle", map_x=0, map_y=0, width=1, height=1)
+        MachineAssignment.objects.create(machine=machine, code=ocr_master, assignment_class=2)
+        InspectionFile.objects.create(master=ocr_master, file_name="CDP0028.xlsx", file_path=r"C:\製品検査\(2)\CDP0028.xlsx")
+        InspectionFile.objects.create(master=excel_master, file_name="CAP0044.xlsx", file_path=r"C:\製品検査\(1)\CAP0044.xlsx")
 
         with TemporaryDirectory() as temp_dir:
             excel_path = Path(temp_dir) / "plan.xlsx"
             workbook = Workbook()
             worksheet = workbook.active
             worksheet.title = "雛形"
-            worksheet["G5"] = "cap0044"
-            worksheet["G6"] = "cdp0028"
+            worksheet["F4"] = "cap0044"
+            worksheet["F5"] = "cdp0028"
             workbook.save(excel_path)
 
             with excel_path.open("rb") as handle:
@@ -183,18 +213,15 @@ class PhaseOneApiTests(TestCase):
                             handle.read(),
                             content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         ),
+                        "sheet_name": "雛形",
                     },
                     format="multipart",
                 )
 
         self.assertEqual(response.status_code, 202)
         targets = self.client.get("/api/inspection-targets/?date=2026-05-21").json()
-        codes = {target["code"]: target for target in targets}
-
-        self.assertEqual(set(codes), {"CAP0044", "CDP0028", "CDP0029"})
-        self.assertTrue(codes["CDP0028"]["source_flags"]["ocr"])
-        self.assertTrue(codes["CDP0028"]["source_flags"]["excel"])
-        self.assertEqual(codes["CDP0029"]["warnings"][0]["error_code"], "UNKNOWN_CODE")
+        self.assertEqual([(t["code"], t["category"]) for t in targets], [("CAP0044", 6), ("CDP0028", 2), ("CDP0028", 7), ("CDP0029", None)])
+        self.assertEqual(next(t for t in targets if t["code"] == "CDP0029")["warnings"][0]["error_code"], "UNKNOWN_CODE")
 
     def test_master_update_imports_csv_and_resolves_name(self):
         csv_content = (
@@ -210,6 +237,8 @@ class PhaseOneApiTests(TestCase):
 
         self.assertEqual(response.status_code, 202)
         self.assertTrue(Master.objects.filter(code="CAP0048", name="テスト品名").exists())
+        imported_master = Master.objects.get(code="CAP0048")
+        InspectionFile.objects.create(master=imported_master, file_name="CAP0048.xlsx", file_path=r"C:\製品検査\(1)\CAP0048.xlsx")
 
         self.client.post(
             "/api/inspection-targets/manual/",
@@ -227,7 +256,9 @@ class PhaseOneApiTests(TestCase):
             "page_count": 3,
             "mode": "ocr",
         }
-        Master.objects.create(code="CAP0048", name="OCR参照品名", category=1)
+        master = Master.objects.create(code="CAP0048", name="OCR参照品名", category=1)
+        machine = Machine.objects.create(machine_no="PDF-M", machine_name="PDF", machine_class=1, shape_type="rectangle", map_x=0, map_y=0, width=1, height=1)
+        MachineAssignment.objects.create(machine=machine, code=master, assignment_class=1)
 
         response = self.client.post(
             "/api/plans/import/",
@@ -259,14 +290,17 @@ class PhaseOneApiTests(TestCase):
             map_y=5,
             width=6,
             height=3,
+            machine_class=1,
         )
-        MachineAssignment.objects.create(machine=machine, code=master)
+        MachineAssignment.objects.create(machine=machine, code=master, assignment_class=1)
 
         self.client.post(
-            "/api/inspection-targets/manual/",
-            {"date": "2026-05-23", "codes": ["C1234", "ZZZ9999"]},
+            "/api/inspection-targets/factory-map/",
+            {"date": "2026-05-23", "machine_id": machine.id, "code": "C1234"},
             format="json",
         )
+        from quality.services import upsert_targets
+        upsert_targets("2026-05-23", ["ZZZ9999"], "ocr", user=self.user)
 
         response = self.client.get("/api/factory-map/?date=2026-05-23")
 
@@ -323,9 +357,37 @@ class PhaseOneApiTests(TestCase):
         self.assertEqual(LayoutObject.objects.count(), 2)
 
         payload = self.client.get("/api/factory-map/layout/").json()
-        self.assertEqual(payload["background_image_path"], "/media/maps/factory.png")
+        self.assertEqual(payload["background_image_path"], "")
         self.assertEqual(payload["objects"][0]["machine_name"], "配置機")
         self.assertEqual(payload["objects"][1]["type"], "path")
+
+    def test_factory_map_save_preserves_legacy_background_but_hides_it(self):
+        layout, _ = LayoutMaster.objects.get_or_create(layout_name="legacy-background")
+        layout.background_image_path = "/media/maps/legacy.png"
+        layout.save(update_fields=["background_image_path"])
+        response = self.client.put(
+            f"/api/factory-map/layout/?layout_id={layout.id}",
+            {
+                "layout_name": layout.layout_name,
+                "background_image_path": "/media/maps/replacement.png",
+                "grid_width": 42,
+                "grid_height": 31,
+                "objects": [],
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        layout.refresh_from_db()
+        self.assertEqual(layout.background_image_path, "/media/maps/legacy.png")
+        self.assertEqual(response.json()["background_image_path"], "")
+
+    def test_factory_map_background_upload_route_is_stopped(self):
+        response = self.client.post(
+            "/api/factory-map/upload-image/",
+            {"image": SimpleUploadedFile("map.png", b"not-used", content_type="image/png")},
+            format="multipart",
+        )
+        self.assertEqual(response.status_code, 404)
 
     def test_factory_map_layout_rejects_invalid_object(self):
         response = self.client.put(
@@ -353,6 +415,7 @@ class PhaseOneApiTests(TestCase):
 class PhaseTwoMasterUpdateTests(TestCase):
     def setUp(self):
         self.client = APIClient()
+        self.user = authenticate_test_client(self.client)
 
     def _upload_csv(self, csv_bytes):
         return self.client.post(
@@ -400,17 +463,11 @@ class PhaseTwoMasterUpdateTests(TestCase):
         self.assertEqual(response.status_code, 202)
 
         class_vals = {
-            mc.master.code: mc.class_value
-            for mc in MasterClass.objects.select_related("master").all()
+            mc.master.code: mc.class_master.class_no
+            for mc in MasterClass.objects.select_related("master", "class_master").all()
         }
-        # Most codes have no inspection files and no specific node_type -> class 8
-        self.assertEqual(class_vals.get("BA0061"), 8)
-        self.assertEqual(class_vals.get("CAG0008"), 8)
-        self.assertEqual(class_vals.get("CAL0001"), 8)
-        self.assertEqual(class_vals.get("DA0045"), 8)
-        self.assertEqual(class_vals.get("DC0034"), 8)
-        self.assertEqual(class_vals.get("BA0099"), 8)
-        self.assertEqual(class_vals.get("CAG0010"), 8)
+        # 判定不能な品目をclass 8へ自動フォールバックしない。
+        self.assertEqual(class_vals, {"DK0289": 4})
 
     def test_csv_import_applies_product_classification(self):
         response = self._upload_csv(MASTER_CSV)
@@ -484,6 +541,7 @@ class PhaseTwoMasterUpdateTests(TestCase):
             AppSetting.objects.create(
                 csv_path="",
                 inspection_folder_paths=[str(folder)],
+                inspection_folder_priorities={str(folder): 25},
             )
 
             response = self._upload_csv(MASTER_CSV)
@@ -495,6 +553,33 @@ class PhaseTwoMasterUpdateTests(TestCase):
             self.assertIn("CAL0001_検査書_ver2.pdf", file_names)
             self.assertIn("DA0045_図面.pdf", file_names)
             self.assertNotIn("other_file.txt", file_names)
+            self.assertTrue(all(f.priority == 25 for f in files))
+
+    def test_scanner_records_windows_creation_time_and_continues_when_unavailable(self):
+        from quality.services import _file_created_at, scan_and_classify_files
+
+        with TemporaryDirectory() as temp_dir:
+            folder = Path(temp_dir)
+            first = folder / "CAG0008_first.pdf"
+            second = folder / "CAG0008_second.pdf"
+            first.touch()
+            second.touch()
+
+            with patch("quality.services.os.name", "nt"), patch.object(
+                Path, "stat", return_value=SimpleNamespace(st_ctime=1_700_000_000)
+            ):
+                created = _file_created_at(first)
+            self.assertTrue(timezone.is_aware(created))
+
+            with patch("quality.services._file_created_at", side_effect=lambda path: created if path == first else None):
+                scanned, warnings = scan_and_classify_files([str(folder)], {str(folder): 7})
+
+            self.assertEqual(warnings, [])
+            self.assertEqual(len(scanned["CAG0008"]), 2)
+            by_name = {row["file_name"]: row for row in scanned["CAG0008"]}
+            self.assertEqual(by_name[first.name]["priority"], 7)
+            self.assertEqual(by_name[first.name]["file_created"], created)
+            self.assertIsNone(by_name[second.name]["file_created"])
 
     def test_inspection_file_cleared_on_reimport(self):
         with TemporaryDirectory() as temp_dir:
@@ -565,6 +650,7 @@ class PhaseTwoMasterUpdateTests(TestCase):
         data = response.json()
         self.assertEqual(data["csv_path"], "")
         self.assertEqual(data["inspection_folder_paths"], [])
+        self.assertEqual(data["inspection_folder_priorities"], {})
 
         # PUTで保存
         put_response = self.client.put(
@@ -575,6 +661,11 @@ class PhaseTwoMasterUpdateTests(TestCase):
                     r"\\server\share\自動機検査書フォルダ1",
                     r"\\server\share\製品検査(1)フォルダ",
                 ],
+                "inspection_folder_priorities": {
+                    r"\\server\share\自動機検査書フォルダ1": 100,
+                    r"\\server\share\製品検査(1)フォルダ": 10,
+                    r"\\server\share\削除済み": 999,
+                },
             },
             format="json",
         )
@@ -585,6 +676,98 @@ class PhaseTwoMasterUpdateTests(TestCase):
         data2 = get_response.json()
         self.assertEqual(data2["csv_path"], r"temp\master.csv")
         self.assertEqual(len(data2["inspection_folder_paths"]), 2)
+        self.assertEqual(
+            data2["inspection_folder_priorities"],
+            {
+                r"\\server\share\自動機検査書フォルダ1": 100,
+                r"\\server\share\製品検査(1)フォルダ": 10,
+            },
+        )
+
+        old_format_response = self.client.put(
+            "/api/settings/",
+            {"inspection_folder_paths": [r"\\server\share\自動機検査書フォルダ1", r"\\server\share\追加"]},
+            format="json",
+        )
+        self.assertEqual(old_format_response.status_code, 200)
+        self.assertEqual(
+            old_format_response.json()["inspection_folder_priorities"],
+            {r"\\server\share\自動機検査書フォルダ1": 100, r"\\server\share\追加": 0},
+        )
+
+    def test_settings_api_rejects_non_integer_priority(self):
+        response = self.client.put(
+            "/api/settings/",
+            {
+                "inspection_folder_paths": [r"\\server\share\folder"],
+                "inspection_folder_priorities": {r"\\server\share\folder": "high"},
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_settings_api_trims_paths_and_matches_priority_keys_case_insensitively(self):
+        response = self.client.put(
+            "/api/settings/",
+            {
+                "inspection_folder_paths": [r"  C:\Inspection\Primary  "],
+                "inspection_folder_priorities": {r" c:\inspection\primary ": 100},
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["inspection_folder_paths"], [r"C:\Inspection\Primary"])
+        self.assertEqual(
+            response.json()["inspection_folder_priorities"],
+            {r"C:\Inspection\Primary": 100},
+        )
+
+    def test_settings_api_rejects_blank_and_normalized_duplicate_paths(self):
+        blank_response = self.client.put(
+            "/api/settings/",
+            {"inspection_folder_paths": ["   "]},
+            format="json",
+        )
+        self.assertEqual(blank_response.status_code, 400)
+        self.assertIn("空のフォルダパス", str(blank_response.json()))
+
+        duplicate_response = self.client.put(
+            "/api/settings/",
+            {
+                "inspection_folder_paths": [
+                    r"C:\Inspection\Primary",
+                    r" c:/inspection/primary/ ",
+                ],
+            },
+            format="json",
+        )
+        self.assertEqual(duplicate_response.status_code, 400)
+        self.assertIn("同じフォルダパス", str(duplicate_response.json()))
+
+    def test_settings_old_put_preserves_priority_after_trim_and_case_change(self):
+        initial_response = self.client.put(
+            "/api/settings/",
+            {
+                "inspection_folder_paths": [r"C:\Inspection\Primary"],
+                "inspection_folder_priorities": {r"C:\Inspection\Primary": 75},
+            },
+            format="json",
+        )
+        self.assertEqual(initial_response.status_code, 200)
+
+        old_format_response = self.client.put(
+            "/api/settings/",
+            {"inspection_folder_paths": [r"  c:\inspection\primary  "]},
+            format="json",
+        )
+
+        self.assertEqual(old_format_response.status_code, 200)
+        self.assertEqual(old_format_response.json()["inspection_folder_paths"], [r"c:\inspection\primary"])
+        self.assertEqual(
+            old_format_response.json()["inspection_folder_priorities"],
+            {r"c:\inspection\primary": 75},
+        )
 
     def test_class_4_press_from_node_type_1(self):
         csv_lines = [CSV_HEADER, make_csv_row("BA0080", "CAD0001", "DK0289", "Press部品", 5, "工場", 1)]
@@ -595,8 +778,8 @@ class PhaseTwoMasterUpdateTests(TestCase):
         dk0289 = Master.objects.get(code="DK0289")
         self.assertEqual(dk0289.node_type_1, "プレス")
 
-        mc = MasterClass.objects.get(master=dk0289)
-        self.assertEqual(mc.class_value, 4)
+        mc = MasterClass.objects.select_related("class_master").get(master=dk0289)
+        self.assertEqual(mc.class_master.class_no, 4)
 
     def test_class_5_secondary_processing(self):
         master = Master.objects.create(
@@ -614,19 +797,22 @@ class PhaseTwoMasterUpdateTests(TestCase):
         self.assertEqual(determine_inspection_class(master2, {}), 5)
         self.assertEqual(determine_inspection_class(master3, {}), 8)
 
-    def test_class_1_from_inspection_file(self):
-        with TemporaryDirectory() as temp_dir:
-            base = Path(temp_dir)
-            auto1_folder = base / "★自動機(工程内検査)"
-            auto1_folder.mkdir(parents=True)
-            (auto1_folder / "CAG0999_検査書.pdf").write_text("dummy")
+    def test_class_1_from_machine_assignment(self):
+        master = Master.objects.create(code="CAG0999", name="自動機対象")
+        machine = Machine.objects.create(
+            machine_no="AUTO-TEST-1",
+            machine_name="自動機テスト",
+            machine_class=1,
+            shape_type=Machine.ShapeType.RECTANGLE,
+            map_x=0,
+            map_y=0,
+            width=1,
+            height=1,
+        )
+        MachineAssignment.objects.create(machine=machine, code=master, assignment_class=1)
 
-            master = Master.objects.create(code="CAG0999", name="自動機対象")
-
-            from quality.services import scan_and_classify_files, determine_inspection_class
-            file_map, _ = scan_and_classify_files([str(auto1_folder)])
-            cls = determine_inspection_class(master, file_map)
-            self.assertEqual(cls, 1)
+        from quality.services import determine_inspection_class
+        self.assertEqual(determine_inspection_class(master, {}), 1)
 
     def test_class_8_fallback(self):
         master = Master.objects.create(
@@ -690,16 +876,16 @@ class PhaseTwoMasterUpdateTests(TestCase):
 
     def test_inspection_sheet_required_uses_master_class(self):
         master = Master.objects.create(code="MCLASS1", name="Class1")
-        MasterClass.objects.create(master=master, class_value=1)
+        MasterClass.objects.create(master=master, class_master=ClassMaster.objects.get(class_no=1))
 
         master6 = Master.objects.create(code="MCLASS6", name="Class6")
-        MasterClass.objects.create(master=master6, class_value=6)
+        MasterClass.objects.create(master=master6, class_master=ClassMaster.objects.get(class_no=6))
 
         master7 = Master.objects.create(code="MCLASS7", name="Class7")
-        MasterClass.objects.create(master=master7, class_value=7)
+        MasterClass.objects.create(master=master7, class_master=ClassMaster.objects.get(class_no=7))
 
         master2 = Master.objects.create(code="MCLASS2", name="Class2")
-        MasterClass.objects.create(master=master2, class_value=2)
+        MasterClass.objects.create(master=master2, class_master=ClassMaster.objects.get(class_no=2))
 
         from quality.services import inspection_sheet_required
         self.assertTrue(inspection_sheet_required(master))
@@ -714,11 +900,12 @@ class PhaseTwoMasterUpdateTests(TestCase):
             code="CAP0048", name="テスト品名",
             product_category="スライド丁番",
         )
-        MasterClass.objects.create(master=master, class_value=1)
+        machine = Machine.objects.create(machine_no="CAT-M", machine_name="Category", machine_class=1, shape_type="rectangle", map_x=0, map_y=0, width=1, height=1)
+        MachineAssignment.objects.create(machine=machine, code=master, assignment_class=1)
 
         self.client.post(
-            "/api/inspection-targets/manual/",
-            {"date": "2026-06-01", "codes": ["CAP0048"]},
+            "/api/inspection-targets/factory-map/",
+            {"date": "2026-06-01", "machine_id": machine.id, "code": "CAP0048"},
             format="json",
         )
         targets = self.client.get("/api/inspection-targets/?date=2026-06-01").json()
@@ -741,12 +928,17 @@ class PhaseTwoMasterUpdateTests(TestCase):
         self.assertEqual(data["inspection_folder_paths"], ["/path/a", "/path/b"])
 
     def test_master_update_without_file_and_without_settings_falls_back_to_default(self):
-        response = self.client.post(
-            "/api/master/update/",
-            {"force": False},
-            format="json",
-        )
+        small_master_csv = (CSV_HEADER + "\n" + MASTER_CSV_LINES[0]).encode("cp932")
+        with TemporaryDirectory() as temp_dir:
+            Path(temp_dir, "master.csv").write_bytes(small_master_csv)
+            with override_settings(TEST_INPUT_DIR=Path(temp_dir)):
+                response = self.client.post(
+                    "/api/master/update/",
+                    {"force": False},
+                    format="json",
+                )
         self.assertEqual(response.status_code, 202)
+        self.assertTrue(Master.objects.filter(code="BA0061", name="DYL完成品").exists())
 
     def test_excel_serial_date(self):
         from quality.services import _excel_serial_date
@@ -952,6 +1144,7 @@ class PhaseTwoMasterUpdateTests(TestCase):
 class InspectionFileViewTests(TestCase):
     def setUp(self):
         self.client = APIClient()
+        self.user = authenticate_test_client(self.client)
         self.master = Master.objects.create(code="PDF001", name="PDF test")
 
     def _create_inspection_file(self, path):
@@ -1017,3 +1210,142 @@ class JobServiceTests(TestCase):
                 "exception_type": "RuntimeError",
             },
         )
+
+    def test_run_job_persists_safe_classification_details(self):
+        from quality.services import ClassificationError, run_job
+
+        job = Job.objects.create(
+            job_id="job_test_classification_failure",
+            job_type=Job.JobType.INSPECTION_SHEET_ISSUE,
+            request_payload={},
+        )
+        error = ClassificationError(
+            "AMBIGUOUS_INSPECTION_FILE",
+            "同じクラスの検査書が複数あります。保存場所を確認してください。",
+            {
+                "code": "CCP0030",
+                "class": 1,
+                "candidate_count": 2,
+                "candidate_file_names": [r"C:\internal\CCP0030-A.xlsx", r"D:\secret\CCP0030-B.xlsx"],
+                "internal_path": r"C:\internal",
+            },
+        )
+
+        with self.assertRaises(ClassificationError):
+            run_job(job, lambda: (_ for _ in ()).throw(error))
+
+        job.refresh_from_db()
+        self.assertEqual(job.status, Job.Status.FAILED)
+        self.assertEqual(job.result["error_code"], "AMBIGUOUS_INSPECTION_FILE")
+        self.assertEqual(
+            job.result["details"],
+            {
+                "code": "CCP0030",
+                "class": 1,
+                "candidate_count": 2,
+                "candidate_file_names": ["CCP0030-A.xlsx", "CCP0030-B.xlsx"],
+            },
+        )
+        self.assertIn("品番: CCP0030", job.error_message)
+        self.assertIn("候補: 2件", job.error_message)
+        self.assertNotIn("internal_path", str(job.result))
+        self.assertNotIn("C:\\internal", str(job.result))
+        self.assertNotIn("D:\\secret", job.error_message)
+
+
+class InspectionSummaryApiTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.admin = authenticate_test_client(self.client, "summary-admin")
+        self.worker = User.objects.create(login_name="summary-worker", display_name="検査者", password_hash="!", role=User.Role.WORKER)
+        self.master = Master.objects.create(code="SUM001", name="集計,品目")
+        class_master, _ = ClassMaster.objects.get_or_create(class_no=1, defaults={"class_name": "自動機"})
+        MasterClass.objects.create(master=self.master, class_master=class_master)
+
+    def test_note_is_separated_by_owner_and_created_without_targets(self):
+        self.client.force_authenticate(self.worker)
+        response = self.client.put("/api/inspection-note/", {"date": "2026-07-01", "note": "気づき"}, format="json")
+        self.assertEqual(response.status_code, 200)
+        session = InspectionSession.objects.get(owner_user=self.worker, target_date="2026-07-01")
+        self.assertEqual(session.note, "気づき")
+        session.status = InspectionSession.Status.CLOSED
+        session.deleted_at = "2026-07-01T01:00:00Z"
+        session.deleted_by = self.admin
+        session.save(update_fields=["status", "deleted_at", "deleted_by"])
+        self.client.put("/api/inspection-note/", {"date": "2026-07-01", "note": "追記"}, format="json")
+        session.refresh_from_db()
+        self.assertEqual(session.note, "追記")
+        self.assertIsNone(session.deleted_at)
+        self.assertIsNone(session.deleted_by)
+        self.assertEqual(self.client.get("/api/inspection-note/?date=2026-07-01").json()["note"], "追記")
+        other = User.objects.create(login_name="other-worker", display_name="別担当", password_hash="!", role=User.Role.WORKER)
+        self.client.force_authenticate(other)
+        self.assertEqual(self.client.get("/api/inspection-note/?date=2026-07-01").json()["note"], "")
+
+    def test_summary_requires_admin_and_counts_override_excluding_deleted(self):
+        History.objects.create(date="2026-07-01", master=self.master, time_slot="A", created_by=self.worker)
+        History.objects.create(date="2026-07-01", master=self.master, time_slot="B", class_override=8, created_by=self.worker)
+        History.objects.create(date="2026-07-01", master=self.master, time_slot="C", created_by=self.admin, deleted_at="2026-07-01T01:00:00Z", deleted_by=self.admin)
+        self.client.force_authenticate(self.worker)
+        self.assertEqual(self.client.get("/api/inspection-summary/?start=2026-07-01&end=2026-07-02").status_code, 403)
+        self.client.force_authenticate(self.admin)
+        response = self.client.get("/api/inspection-summary/?start=2026-07-01&end=2026-07-02")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["class_totals"]["1"], 1)
+        self.assertEqual(data["class_totals"]["8"], 1)
+        self.assertEqual([day["total"] for day in data["days"]], [2, 0])
+        self.assertEqual(data["days"][0]["inspectors"][0]["name"], "検査者")
+
+    def test_summary_keeps_users_with_same_display_name_separate(self):
+        other = User.objects.create(login_name="same-name-worker", display_name="検査者", password_hash="!", role=User.Role.WORKER)
+        History.objects.create(date="2026-07-01", master=self.master, time_slot="A", created_by=self.worker)
+        History.objects.create(date="2026-07-01", master=self.master, time_slot="B", created_by=other)
+        InspectionSession.objects.create(target_date="2026-07-01", owner_user=self.worker, note="一人目")
+        InspectionSession.objects.create(target_date="2026-07-01", owner_user=other, note="二人目")
+        response = self.client.get("/api/inspection-summary/?start=2026-07-01&end=2026-07-01")
+        inspectors = response.json()["days"][0]["inspectors"]
+        self.assertEqual(len(inspectors), 2)
+        self.assertEqual({row["user_id"] for row in inspectors}, {self.worker.user_id, other.user_id})
+        self.assertEqual({row["total"] for row in inspectors}, {1})
+        notes = response.json()["days"][0]["notes"]
+        self.assertEqual({row["user_id"] for row in notes}, {self.worker.user_id, other.user_id})
+
+    def test_top_items_filters_inspectors_and_classes_together(self):
+        other = User.objects.create(login_name="same-name-worker", display_name=self.worker.display_name, password_hash="!", role=User.Role.WORKER)
+        second_master = Master.objects.create(code="SUM002", name="別品目")
+        second_class, _ = ClassMaster.objects.get_or_create(class_no=2, defaults={"class_name": "半自動機"})
+        MasterClass.objects.create(master=second_master, class_master=second_class)
+        History.objects.create(date="2026-07-01", master=self.master, time_slot="A", created_by=self.worker)
+        History.objects.create(date="2026-07-01", master=self.master, time_slot="B", created_by=other)
+        History.objects.create(date="2026-07-01", master=second_master, time_slot="C", created_by=self.worker)
+        History.objects.create(date="2026-07-01", master=second_master, time_slot="D", created_by=None)
+
+        base = "/api/inspection-summary/?start=2026-07-01&end=2026-07-01"
+        unfiltered = self.client.get(base).json()["top_items"]
+        self.assertEqual({row["code"]: row["count"] for row in unfiltered}, {"SUM001": 2, "SUM002": 2})
+
+        filtered = self.client.get(f"{base}&classes=1&inspectors={self.worker.user_id}").json()["top_items"]
+        self.assertEqual(filtered, [{"code": "SUM001", "name": self.master.name, "count": 1}])
+        self.assertEqual(self.client.get(f"{base}&inspectors=").json()["top_items"], [])
+
+        same_name = self.client.get(f"{base}&inspectors={other.user_id}").json()["top_items"]
+        self.assertEqual(same_name, [{"code": "SUM001", "name": self.master.name, "count": 1}])
+        unknown = self.client.get(f"{base}&inspectors=unknown").json()["top_items"]
+        self.assertEqual(unknown, [{"code": "SUM002", "name": second_master.name, "count": 1}])
+
+    def test_top_items_rejects_invalid_inspector_token(self):
+        response = self.client.get("/api/inspection-summary/?start=2026-07-01&end=2026-07-01&inspectors=invalid")
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error_code"], "INVALID_INSPECTORS")
+
+    def test_csv_has_bom_quotes_and_invalid_period_is_rejected(self):
+        InspectionSession.objects.create(target_date="2026-07-01", owner_user=self.worker, note='改行\n"引用",カンマ')
+        response = self.client.get("/api/inspection-summary/csv/notes/?start=2026-07-01&end=2026-07-01")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.content.startswith(b"\xef\xbb\xbf"))
+        self.assertIn(b'""', response.content)
+        count_csv = self.client.get("/api/inspection-summary/csv/counts/?start=2026-07-01&end=2026-07-02")
+        self.assertEqual(count_csv.status_code, 200)
+        self.assertIn("2026-07-02,0,0,0,0,0,0,0,0,0,0", count_csv.content.decode("utf-8-sig"))
+        self.assertEqual(self.client.get("/api/inspection-summary/?start=2026-07-02&end=2026-07-01").status_code, 400)

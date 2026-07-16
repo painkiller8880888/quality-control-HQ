@@ -1,7 +1,10 @@
+import ntpath
+
 from rest_framework import serializers
 
 from .constants import CHECK_SLOTS
-from .models import AppSetting, History, InspectionFile, InspectionTarget, Job, LayoutMaster, LayoutObject, LayoutObjectType, Machine, MasterClass
+from .models import AppSetting, ClassMaster, History, InspectionTarget, Job, LayoutMaster, LayoutObject, LayoutObjectType, Machine, MasterClass
+from .services import ClassificationError, resolve_inspection_file, resolve_unambiguous_inspection_file
 
 
 LAYOUT_OBJECT_TYPES = {"machine", "wall", "path", "area", "stairs", "entrance"}
@@ -42,6 +45,7 @@ class InspectionTargetSerializer(serializers.ModelSerializer):
             "checks",
             "has_inspection_file",
             "class_override",
+            "registration_route",
         ]
 
     def get_name(self, obj):
@@ -58,6 +62,9 @@ class InspectionTargetSerializer(serializers.ModelSerializer):
     def get_class_name(self, obj):
         if obj.class_override == 9:
             return "特殊検査"
+        if obj.class_override:
+            class_master = ClassMaster.objects.filter(class_no=obj.class_override).first()
+            return class_master.class_name if class_master else None
         if obj.master is None:
             return None
         mc = MasterClass.objects.filter(master=obj.master).exclude(class_master__class_no=9).first()
@@ -75,13 +82,19 @@ class InspectionTargetSerializer(serializers.ModelSerializer):
 
     def get_checks(self, obj):
         histories = self.context.get("histories", {})
-        checked_slots = histories.get(obj.master_id, set()) if obj.master_id else set()
+        checked_slots = histories.get((obj.master_id, obj.class_override), set()) if obj.master_id else set()
         return {slot: slot in checked_slots for slot in CHECK_SLOTS}
 
     def get_has_inspection_file(self, obj):
         if obj.master is None:
             return False
-        return InspectionFile.objects.filter(master=obj.master).exists()
+        try:
+            resolved = resolve_inspection_file(obj.master, self.get_category(obj))
+            if resolved is None and obj.class_override is None:
+                resolved = resolve_unambiguous_inspection_file(obj.master)
+            return resolved is not None
+        except ClassificationError:
+            return False
 
 
 class ManualTargetsRequestSerializer(serializers.Serializer):
@@ -90,7 +103,21 @@ class ManualTargetsRequestSerializer(serializers.Serializer):
         child=serializers.CharField(max_length=64),
         allow_empty=False,
     )
-    class_override = serializers.IntegerField(required=False, allow_null=True, default=None)
+
+    def validate(self, attrs):
+        if "class_override" in self.initial_data:
+            raise serializers.ValidationError({"class_override": "このAPIでは指定できません。"})
+        return attrs
+
+
+class FactoryMapTargetRequestSerializer(serializers.Serializer):
+    date = serializers.DateField()
+    machine_id = serializers.IntegerField()
+    code = serializers.CharField(max_length=64)
+
+
+class SpecialTargetsRequestSerializer(ManualTargetsRequestSerializer):
+    pass
 
 
 class Class9SettingSerializer(serializers.Serializer):
@@ -106,9 +133,8 @@ class Class9SettingCreateSerializer(serializers.Serializer):
 
 
 class CheckItemSerializer(serializers.Serializer):
-    code = serializers.CharField(max_length=64)
+    target_id = serializers.IntegerField()
     checks = serializers.DictField(child=serializers.BooleanField())
-    class_override = serializers.IntegerField(required=False, allow_null=True, default=None)
 
     def validate_checks(self, value):
         invalid = set(value) - set(CHECK_SLOTS)
@@ -124,10 +150,9 @@ class BulkHistoryRequestSerializer(serializers.Serializer):
 
 class SingleHistoryRequestSerializer(serializers.Serializer):
     date = serializers.DateField()
-    code = serializers.CharField(max_length=64)
+    target_id = serializers.IntegerField()
     time = serializers.ChoiceField(choices=History.TimeSlot.choices)
     checked = serializers.BooleanField()
-    class_override = serializers.IntegerField(required=False, allow_null=True, default=None)
 
 
 class BulkHideTargetsRequestSerializer(serializers.Serializer):
@@ -224,11 +249,19 @@ class LayoutSaveRequestSerializer(serializers.Serializer):
     grid_height = serializers.IntegerField(min_value=1, default=50)
     objects = LayoutObjectInputSerializer(many=True, required=False, default=list)
 
+    def validate_background_image_path(self, value):
+        return ""
+
 
 class LayoutMasterListSerializer(serializers.ModelSerializer):
     class Meta:
         model = LayoutMaster
         fields = ["id", "layout_name", "background_image_path", "grid_width", "grid_height", "created_at", "updated_at"]
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        data["background_image_path"] = ""
+        return data
 
 
 class CreateLayoutSerializer(serializers.Serializer):
@@ -273,6 +306,70 @@ class MachineMasterSaveSerializer(serializers.Serializer):
 
 
 class AppSettingSerializer(serializers.ModelSerializer):
+    @staticmethod
+    def _folder_path_key(path):
+        return ntpath.normcase(ntpath.normpath(path.strip()))
+
+    def validate_inspection_folder_paths(self, value):
+        if not isinstance(value, list) or any(not isinstance(path, str) for path in value):
+            raise serializers.ValidationError("フォルダパスは文字列の配列で指定してください。")
+        normalized_paths = []
+        seen = set()
+        for path in value:
+            trimmed_path = path.strip()
+            if not trimmed_path:
+                raise serializers.ValidationError("空のフォルダパスは保存できません。")
+            comparison_key = self._folder_path_key(trimmed_path)
+            if comparison_key in seen:
+                raise serializers.ValidationError("同じフォルダパスが複数指定されています。")
+            seen.add(comparison_key)
+            normalized_paths.append(trimmed_path)
+        return normalized_paths
+
+    def validate_inspection_folder_priorities(self, value):
+        if not isinstance(value, dict):
+            raise serializers.ValidationError("優先順位はフォルダパスをキーにしたオブジェクトで指定してください。")
+        normalized_priorities = {}
+        seen = set()
+        for path, priority in value.items():
+            if not isinstance(path, str) or isinstance(priority, bool) or not isinstance(priority, int):
+                raise serializers.ValidationError("優先順位は整数で指定してください。")
+            trimmed_path = path.strip()
+            if not trimmed_path:
+                raise serializers.ValidationError("優先順位のフォルダパスは空にできません。")
+            comparison_key = self._folder_path_key(trimmed_path)
+            if comparison_key in seen:
+                raise serializers.ValidationError("優先順位に同じフォルダパスが複数指定されています。")
+            seen.add(comparison_key)
+            normalized_priorities[trimmed_path] = priority
+        return normalized_priorities
+
+    def update(self, instance, validated_data):
+        folder_paths = validated_data.get("inspection_folder_paths")
+        if folder_paths is None:
+            folder_paths = self.validate_inspection_folder_paths(instance.inspection_folder_paths)
+            validated_data["inspection_folder_paths"] = folder_paths
+        requested_priorities = validated_data.get("inspection_folder_priorities")
+        current_priorities = instance.inspection_folder_priorities or {}
+        requested_by_key = {
+            self._folder_path_key(path): priority
+            for path, priority in (requested_priorities or {}).items()
+        }
+        current_by_key = {
+            self._folder_path_key(path): priority
+            for path, priority in current_priorities.items()
+            if isinstance(path, str) and path.strip()
+        }
+        validated_data["inspection_folder_priorities"] = {
+            path: (
+                requested_by_key.get(self._folder_path_key(path), current_by_key.get(self._folder_path_key(path), 0))
+                if requested_priorities is not None
+                else current_by_key.get(self._folder_path_key(path), 0)
+            )
+            for path in folder_paths
+        }
+        return super().update(instance, validated_data)
+
     class Meta:
         model = AppSetting
-        fields = ["id", "csv_path", "inspection_folder_paths", "erp_path", "history_file_path", "updated_at"]
+        fields = ["id", "csv_path", "inspection_folder_paths", "inspection_folder_priorities", "erp_path", "history_file_path", "updated_at"]
