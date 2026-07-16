@@ -1,0 +1,17 @@
+<service>
+  <id>QualityControlHQ-Pseudoprod</id>
+  <name>Quality Control HQ Pseudoprod</name>
+  <description>Waitress-hosted Quality Control HQ pseudoproduction service.</description>
+  <executable>REPLACE_WITH_REPO_DIR\.venv\Scripts\waitress-serve.exe</executable>
+  <arguments>--listen=0.0.0.0:8080 config.wsgi:application</arguments>
+  <workingdirectory>REPLACE_WITH_REPO_DIR\backend</workingdirectory>
+  <env name="DJANGO_ENV_FILE" value="REPLACE_WITH_REPO_DIR\deployment\pseudoprod\.env" />
+  <startmode>Automatic</startmode>
+  <onfailure action="restart" delay="10 sec" />
+  <onfailure action="restart" delay="30 sec" />
+  <resetfailure>1 hour</resetfailure>
+  <log mode="roll-by-size">
+    <sizeThreshold>10240</sizeThreshold>
+    <keepFiles>8</keepFiles>
+  </log>
+</service>

@@ -3,7 +3,13 @@ __pycache__/
 *.sqlite3
 db.sqlite3
 .env
+deployment/pseudoprod/.env
+deployment/pseudoprod/.env.migrate
+deployment/postgresql/.env.bootstrap
 .venv/
+backend/frontend_dist/
+runtime/
+deployment/windows/service/
 media/
 reports/
 *.log
