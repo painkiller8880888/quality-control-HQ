@@ -1,6 +1,5 @@
 import mimetypes
 import os
-import sys
 import csv
 from collections import Counter, defaultdict
 from datetime import date, timedelta
@@ -60,7 +59,6 @@ from .serializers import (
     SingleHistoryRequestSerializer,
     SpecialTargetsRequestSerializer,
 )
-import subprocess
 from pathlib import Path
 
 from rest_framework import serializers
@@ -70,20 +68,23 @@ from .services import (
     add_manual_targets,
     add_special_targets,
     bulk_upsert_history,
-    create_job,
-    generate_daily_report,
     history_map_for_date,
-    import_master_csv,
-    import_plan_targets,
-    issue_daily_report,
-    issue_inspection_sheets,
     print_inspection_file,
-    run_job,
     set_check,
     sync_master_class_from_assignment,
     write_history_to_excel,
     resolve_inspection_file,
     resolve_unambiguous_inspection_file,
+)
+from .job_queue import (
+    MASTER_RESOURCE,
+    build_idempotency_key,
+    enqueue_job,
+    execute_inline_if_enabled,
+    path_identity,
+    remove_job_inputs,
+    store_uploaded_file,
+    upload_identity,
 )
 
 
@@ -150,8 +151,24 @@ def serialize_layout(layout):
 
 class JobDetailView(APIView):
     def get(self, request, job_id):
-        job = get_object_or_404(Job, job_id=job_id, created_by=request.user)
+        jobs = Job.objects.all()
+        if request.user.role != request.user.Role.ADMIN:
+            jobs = jobs.filter(created_by=request.user)
+        job = get_object_or_404(jobs, job_id=job_id)
         return Response(JobSerializer(job).data)
+
+
+class ActiveMasterJobView(APIView):
+    def get(self, request):
+        job = (
+            Job.objects.filter(
+                resource_key="quality_master",
+                status__in=[Job.Status.QUEUED, Job.Status.RUNNING],
+            )
+            .order_by("available_at", "job_id")
+            .first()
+        )
+        return Response(JobSerializer(job).data if job else None)
 
 
 class MasterUpdateView(APIView):
@@ -174,29 +191,37 @@ class MasterUpdateView(APIView):
             folder_paths = setting.inspection_folder_paths
             folder_priorities = setting.inspection_folder_priorities or {}
 
+        job_token = f"upload-{timezone.now().strftime('%Y%m%d%H%M%S')}-{os.urandom(4).hex()}"
+        stored_master_file = store_uploaded_file(master_file, job_token, "master_file")
         payload = {
+            "operation": "master_update",
             "force": serializer.validated_data["force"],
-            "master_file": getattr(master_file, "name", None),
+            "master_file": stored_master_file,
             "csv_path": csv_path,
+            "inspection_folder_paths": folder_paths,
+            "inspection_folder_priorities": folder_priorities,
+            "retry_safe": True,
         }
-        job = create_job(Job.JobType.MASTER_UPDATE, payload, request.user)
-        try:
-            run_job(
-                job,
-                lambda: import_master_csv(
-                    master_file=master_file,
-                    csv_path=csv_path,
-                    inspection_folder_paths=folder_paths,
-                    inspection_folder_priorities=folder_priorities,
-                ),
-            )
-        except FileNotFoundError:
-            return error_response("FILE_NOT_FOUND", "マスタ取込ファイルが保存場所に存在しません。", status.HTTP_404_NOT_FOUND)
-        except ClassificationError as exc:
-            return classification_error_response(exc)
-        except Exception as exc:
-            return error_response("ERP_AUTOMATION_FAILED", str(exc), status.HTTP_500_INTERNAL_SERVER_ERROR)
-        return Response({"status": "accepted", "job_id": job.job_id}, status=status.HTTP_202_ACCEPTED)
+        identity_payload = {
+            **payload,
+            "master_file": upload_identity(stored_master_file),
+            "csv_path": path_identity(csv_path) if csv_path else None,
+        }
+        job, created = enqueue_job(
+            Job.JobType.MASTER_UPDATE,
+            payload,
+            request.user,
+            resource_key=MASTER_RESOURCE,
+            idempotency_key=build_idempotency_key(Job.JobType.MASTER_UPDATE, identity_payload),
+            timeout_seconds=1800,
+        )
+        if not created:
+            remove_job_inputs(payload)
+        execute_inline_if_enabled(job, created)
+        return Response(
+            {"status": "accepted", "job_id": job.job_id, "deduplicated": not created},
+            status=status.HTTP_202_ACCEPTED,
+        )
 
 
 class MasterSearchView(APIView):
@@ -243,32 +268,28 @@ class ErpAutomationView(APIView):
             return error_response("ERP_PATH_NOT_CONFIGURED", "ERPのパスが設定されていません。", status.HTTP_400_BAD_REQUEST)
 
         csv_path = str(Path(csv_path).resolve())
-        module_dir = Path(__file__).resolve().parent.parent.parent / "erp_automation"
-        script = module_dir / "erp.py"
-
-        if not script.exists():
-            return error_response("SCRIPT_NOT_FOUND", f"スクリプトが見つかりません: {script}", status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-        job = create_job(Job.JobType.MASTER_UPDATE, {"erp_path": erp_path, "csv_path": csv_path}, request.user)
-
-        def run():
-            try:
-                result = subprocess.run(
-                    [sys.executable, str(script), erp_path, csv_path],
-                    capture_output=True, text=True, timeout=300,
-                )
-                if result.returncode != 0:
-                    raise RuntimeError(f"ERP automation failed: {result.stderr.strip()}")
-                return {"status": "succeeded", "output": result.stdout.strip()}
-            except subprocess.TimeoutExpired:
-                raise RuntimeError("ERP automation timed out (300s)")
-
-        try:
-            run_job(job, run)
-        except Exception as exc:
-            return error_response("ERP_AUTOMATION_FAILED", str(exc), status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-        return Response({"status": "accepted", "job_id": job.job_id}, status=status.HTTP_202_ACCEPTED)
+        payload = {
+            "operation": "erp_automation",
+            "erp_path": erp_path,
+            "csv_path": csv_path,
+            "retry_safe": False,
+        }
+        job, created = enqueue_job(
+            Job.JobType.MASTER_UPDATE,
+            payload,
+            request.user,
+            resource_key=MASTER_RESOURCE,
+            idempotency_key=build_idempotency_key(
+                Job.JobType.MASTER_UPDATE,
+                {**payload, "csv_path": path_identity(csv_path)},
+            ),
+            timeout_seconds=600,
+        )
+        execute_inline_if_enabled(job, created)
+        return Response(
+            {"status": "accepted", "job_id": job.job_id, "deduplicated": not created},
+            status=status.HTTP_202_ACCEPTED,
+        )
 
 
 class PlansImportView(APIView):
@@ -281,34 +302,37 @@ class PlansImportView(APIView):
 
         if excel_file and not sheet_name:
             return error_response("INVALID_REQUEST", "計画Excelファイルを指定する場合はシート名を入力してください。")
-        job = create_job(
+        job_token = f"upload-{timezone.now().strftime('%Y%m%d%H%M%S')}-{os.urandom(4).hex()}"
+        stored_scan_file = store_uploaded_file(scan_file, job_token, "scan_file")
+        stored_excel_file = store_uploaded_file(excel_file, job_token, "excel_file")
+        payload = {
+            "operation": "plans_import",
+            "target_date": str(serializer.validated_data["target_date"]),
+            "scan_file": stored_scan_file,
+            "excel_file": stored_excel_file,
+            "sheet_name": sheet_name,
+            "retry_safe": True,
+        }
+        identity_payload = {
+            **payload,
+            "scan_file": upload_identity(stored_scan_file),
+            "excel_file": upload_identity(stored_excel_file),
+        }
+        job, created = enqueue_job(
             Job.JobType.PLANS_IMPORT,
-            {
-                "target_date": str(serializer.validated_data["target_date"]),
-                "scan_file": getattr(scan_file, "name", None),
-                "excel_file": getattr(excel_file, "name", None),
-                "sheet_name": sheet_name,
-            },
+            payload,
             request.user,
+            resource_key=f"plans:{payload['target_date']}",
+            idempotency_key=build_idempotency_key(Job.JobType.PLANS_IMPORT, identity_payload),
+            timeout_seconds=900,
         )
-        try:
-            run_job(
-                job,
-                lambda: import_plan_targets(
-                    serializer.validated_data["target_date"],
-                    scan_file=scan_file,
-                    excel_file=excel_file,
-                    sheet_name=sheet_name,
-                    user=request.user,
-                ),
-            )
-        except FileNotFoundError:
-            return error_response("FILE_NOT_FOUND", "取込ファイルが保存場所に存在しません。", status.HTTP_404_NOT_FOUND)
-        except ClassificationError as exc:
-            return classification_error_response(exc)
-        except Exception as exc:
-            return error_response("JOB_FAILED", str(exc), status.HTTP_500_INTERNAL_SERVER_ERROR)
-        return Response({"status": "accepted", "job_id": job.job_id}, status=status.HTTP_202_ACCEPTED)
+        if not created:
+            remove_job_inputs(payload)
+        execute_inline_if_enabled(job, created)
+        return Response(
+            {"status": "accepted", "job_id": job.job_id, "deduplicated": not created},
+            status=status.HTTP_202_ACCEPTED,
+        )
 
 
 class ManualTargetsView(APIView):
@@ -1019,20 +1043,21 @@ class MachineMasterView(APIView):
 class InspectionSheetIssueView(APIView):
     def post(self, request):
         target_date = request.data.get("date")
-        job = create_job(Job.JobType.INSPECTION_SHEET_ISSUE, request.data, request.user)
-        try:
-            run_job(job, lambda: issue_inspection_sheets(target_date=target_date, user=request.user))
-        except FileNotFoundError:
-            return error_response("FILE_NOT_FOUND", "検査書テンプレートが保存場所に存在しません。", status.HTTP_500_INTERNAL_SERVER_ERROR)
-        except RuntimeError as exc:
-            return error_response("COM_FAILED", str(exc), status.HTTP_500_INTERNAL_SERVER_ERROR)
-        except Exception as exc:
-            return error_response(
-                "INSPECTION_SHEET_ISSUE_FAILED",
-                str(exc),
-                status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
-        return Response({"status": "accepted", "job_id": job.job_id}, status=status.HTTP_202_ACCEPTED)
+        payload = {
+            "operation": "inspection_sheet_issue",
+            "date": target_date,
+            "retry_safe": False,
+        }
+        job, created = enqueue_job(
+            Job.JobType.INSPECTION_SHEET_ISSUE,
+            payload,
+            request.user,
+            resource_key=f"inspection_sheet:{target_date or 'all'}",
+            idempotency_key=build_idempotency_key(Job.JobType.INSPECTION_SHEET_ISSUE, payload),
+            timeout_seconds=900,
+        )
+        execute_inline_if_enabled(job, created)
+        return Response({"status": "accepted", "job_id": job.job_id, "deduplicated": not created}, status=status.HTTP_202_ACCEPTED)
 
 
 class DailyReportGenerateView(APIView):
@@ -1040,26 +1065,21 @@ class DailyReportGenerateView(APIView):
         serializer = DailyReportGenerateRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         target_date = serializer.validated_data["date"]
-        job = create_job(
+        payload = {
+            "operation": "daily_report_generate",
+            "date": str(target_date),
+            "retry_safe": True,
+        }
+        job, created = enqueue_job(
             Job.JobType.DAILY_REPORT_GENERATE,
-            {"date": str(target_date)},
+            payload,
             request.user,
+            resource_key=f"daily_report_generate:{target_date}",
+            idempotency_key=build_idempotency_key(Job.JobType.DAILY_REPORT_GENERATE, payload),
+            timeout_seconds=900,
         )
-
-        try:
-            run_job(job, lambda: generate_daily_report(target_date, request.user))
-        except FileNotFoundError:
-            return error_response("FILE_NOT_FOUND", "日報テンプレートが保存場所に存在しません。", status.HTTP_500_INTERNAL_SERVER_ERROR)
-        except PermissionError as exc:
-            return error_response("FILE_IN_USE", str(exc), status.HTTP_409_CONFLICT)
-        except Exception as exc:
-            return error_response(
-                "DAILY_REPORT_GENERATE_FAILED",
-                str(exc),
-                status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
-
-        return Response({"status": "accepted", "job_id": job.job_id}, status=status.HTTP_202_ACCEPTED)
+        execute_inline_if_enabled(job, created)
+        return Response({"status": "accepted", "job_id": job.job_id, "deduplicated": not created}, status=status.HTTP_202_ACCEPTED)
 
 
 class DailyReportIssueView(APIView):
@@ -1067,26 +1087,21 @@ class DailyReportIssueView(APIView):
         serializer = DailyReportGenerateRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         target_date = serializer.validated_data["date"]
-        job = create_job(
+        payload = {
+            "operation": "daily_report_issue",
+            "date": str(target_date),
+            "retry_safe": False,
+        }
+        job, created = enqueue_job(
             Job.JobType.DAILY_REPORT_GENERATE,
-            {"date": str(target_date)},
+            payload,
             request.user,
+            resource_key=f"daily_report_issue:{target_date}",
+            idempotency_key=build_idempotency_key(Job.JobType.DAILY_REPORT_GENERATE, payload),
+            timeout_seconds=900,
         )
-
-        try:
-            run_job(job, lambda: issue_daily_report(target_date, request.user))
-        except FileNotFoundError:
-            return error_response("FILE_NOT_FOUND", "日報テンプレートが保存場所に存在しません。", status.HTTP_500_INTERNAL_SERVER_ERROR)
-        except PermissionError as exc:
-            return error_response("FILE_IN_USE", str(exc), status.HTTP_409_CONFLICT)
-        except Exception as exc:
-            return error_response(
-                "DAILY_REPORT_ISSUE_FAILED",
-                str(exc),
-                status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
-
-        return Response({"status": "accepted", "job_id": job.job_id}, status=status.HTTP_202_ACCEPTED)
+        execute_inline_if_enabled(job, created)
+        return Response({"status": "accepted", "job_id": job.job_id, "deduplicated": not created}, status=status.HTTP_202_ACCEPTED)
 
 
 class LayoutObjectTypeColorUpdateSerializer(serializers.Serializer):

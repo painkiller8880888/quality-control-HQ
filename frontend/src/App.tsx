@@ -108,6 +108,7 @@ export const App: React.FC = () => {
   const suppressDialogFocusRestoreRef = useRef(false);
   const [selectedDate, setSelectedDate] = useState<string>(getTodayString);
   const [currentJob, setCurrentJob] = useState<Job | null>(null);
+  const [activeMasterJob, setActiveMasterJob] = useState<Job | null>(null);
   const [targets, setTargets] = useState<InspectionTarget[]>([]);
   const [isLoadingJob, setIsLoadingJob] = useState<boolean>(false);
   const [isLoadingTargets, setIsLoadingTargets] = useState<boolean>(false);
@@ -164,6 +165,28 @@ export const App: React.FC = () => {
     document.documentElement.setAttribute('data-theme', theme);
     localStorage.setItem('theme', theme);
   }, [theme]);
+
+  useEffect(() => {
+    if (!authUser) {
+      setActiveMasterJob(null);
+      return;
+    }
+    let cancelled = false;
+    const refreshActiveMaster = async () => {
+      try {
+        const response = await apiFetch('/api/jobs/active-master/');
+        if (response.ok && !cancelled) setActiveMasterJob(await response.json());
+      } catch {
+        // Transient polling failures do not replace the normal API error display.
+      }
+    };
+    void refreshActiveMaster();
+    const timer = window.setInterval(refreshActiveMaster, 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [authUser]);
 
   useEffect(() => {
     return () => {
@@ -688,6 +711,15 @@ export const App: React.FC = () => {
 
       <main className={`app-main ${permittedActiveTab !== 'dashboard' ? 'scrollable' : ''}`}>
 
+        {activeMasterJob && (
+          <div className="warning-alert-box" role="status">
+            <ShieldAlert size={18} className="warning-alert-icon" />
+            <div>
+              <strong>マスタ更新中</strong>
+              <span> 確定済みの旧版データを表示しています。Job: {activeMasterJob.job_id}</span>
+            </div>
+          </div>
+        )}
         {successMessage && (
           <div className="card success-card-global">
             <CheckCircle2 size={20} className="success-icon" />

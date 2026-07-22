@@ -38,6 +38,14 @@ export interface Job {
   job_id: string;
   job_type: string;
   status: JobStatus;
+  resource_key?: string;
+  blocked_reason?: string;
+  depends_on_id?: string | null;
+  attempt_count?: number;
+  heartbeat_at?: string | null;
+  lease_until?: string | null;
+  worker_id?: string;
+  available_at?: string;
   started_at: string | null;
   finished_at: string | null;
   error_message: string | null;

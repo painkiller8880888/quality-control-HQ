@@ -1,4 +1,5 @@
 import os
+import sys
 from datetime import date
 from pathlib import Path
 from urllib.parse import urlparse
@@ -146,6 +147,24 @@ STORAGES = {
 MEDIA_URL = "/media/"
 MEDIA_ROOT = Path(os.environ.get("MEDIA_ROOT", str(REPO_DIR / "media")))
 SERVE_MEDIA_FILES = env_bool("SERVE_MEDIA_FILES", DEBUG)
+JOB_INPUT_ROOT = Path(
+    os.environ.get(
+        "JOB_INPUT_ROOT",
+        str(REPO_DIR / "runtime" / APP_ENV / "job_inputs"),
+    )
+)
+JOB_HEARTBEAT_SECONDS = int(os.environ.get("JOB_HEARTBEAT_SECONDS", "30"))
+JOB_LEASE_SECONDS = int(os.environ.get("JOB_LEASE_SECONDS", "120"))
+JOB_MAX_ATTEMPTS = int(os.environ.get("JOB_MAX_ATTEMPTS", "3"))
+JOB_RETRY_DELAYS_SECONDS = [
+    int(value)
+    for value in os.environ.get("JOB_RETRY_DELAYS_SECONDS", "30,120,300").split(",")
+    if value.strip()
+]
+JOB_EXECUTE_INLINE_FOR_TESTS = env_bool(
+    "JOB_EXECUTE_INLINE_FOR_TESTS",
+    "test" in sys.argv,
+)
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 

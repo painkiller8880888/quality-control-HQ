@@ -49,6 +49,8 @@ export const ImportSummary: React.FC<ImportSummaryProps> = ({ job }) => {
         {job.started_at && (
           <div><strong>開始時刻:</strong> {new Date(job.started_at).toLocaleString('ja-JP')}</div>
         )}
+        {(job.attempt_count || 0) > 0 && <div><strong>試行回数:</strong> {job.attempt_count}</div>}
+        {job.blocked_reason && <div><strong>待機理由:</strong> {job.blocked_reason}</div>}
       </div>
 
       {job.status === 'failed' && job.error_message && (

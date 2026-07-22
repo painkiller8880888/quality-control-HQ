@@ -1,7 +1,8 @@
 param(
     [string]$RuntimeEnvFile = (Join-Path $PSScriptRoot "..\pseudoprod\.env"),
     [string]$MigrationEnvFile = (Join-Path $PSScriptRoot "..\pseudoprod\.env.migrate"),
-    [string]$ServiceName = "QualityControlHQ-Pseudoprod"
+    [string]$ServiceName = "QualityControlHQ-Pseudoprod",
+    [string]$WorkerServiceName = "QualityControlHQ-Worker-Pseudoprod"
 )
 
 $ErrorActionPreference = "Stop"
@@ -36,9 +37,15 @@ finally {
 
 $service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 $restartService = $service -and $service.Status -eq "Running"
+$workerService = Get-Service -Name $WorkerServiceName -ErrorAction SilentlyContinue
+$restartWorkerService = $workerService -and $workerService.Status -eq "Running"
 $oldFrontendSaved = $false
 $newFrontendInstalled = $false
 
+if ($restartWorkerService) {
+    Stop-Service -Name $WorkerServiceName -Force
+    (Get-Service -Name $WorkerServiceName).WaitForStatus("Stopped", (New-TimeSpan -Seconds 30))
+}
 if ($restartService) {
     Stop-Service -Name $ServiceName -Force
     (Get-Service -Name $ServiceName).WaitForStatus("Stopped", (New-TimeSpan -Seconds 30))
@@ -68,6 +75,10 @@ try {
         Start-Service -Name $ServiceName
         (Get-Service -Name $ServiceName).WaitForStatus("Running", (New-TimeSpan -Seconds 30))
     }
+    if ($restartWorkerService) {
+        Start-Service -Name $WorkerServiceName
+        (Get-Service -Name $WorkerServiceName).WaitForStatus("Running", (New-TimeSpan -Seconds 30))
+    }
 }
 catch {
     if ($newFrontendInstalled -and (Test-Path -LiteralPath $liveFrontend)) {
@@ -82,6 +93,9 @@ catch {
     }
     if ($restartService) {
         Start-Service -Name $ServiceName
+    }
+    if ($restartWorkerService) {
+        Start-Service -Name $WorkerServiceName
     }
     throw
 }

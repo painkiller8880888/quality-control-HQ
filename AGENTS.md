@@ -2,16 +2,17 @@
 
 ## Purpose
 
-このリポジトリでは、複数のAI agentが
-役割分離されたパイプラインとして協調する。
+このリポジトリでは、複数のAI agentが役割分離されたパイプラインとして協調する。
 
 現在の基本パイプライン:
 
-1. planner
-2. implementer
-3. reviewer
+1. planner(codex)
+2. implementer(opencode)
+3. reviewer(codex)
 
 各agentは自分の責務のみ実行する。
+1->2, 2->3は異なるクライアント間のhandoffとなる。
+各エージェントは次のクライアントのためのhandoff生成をgoalとする。
 
 ---
 

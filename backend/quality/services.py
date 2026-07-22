@@ -3,6 +3,9 @@ import os
 import shutil
 import logging
 import re
+import subprocess
+import sys
+from time import perf_counter
 from pathlib import Path
 from uuid import uuid4
 
@@ -37,6 +40,7 @@ from .models import (
 CODE_PATTERN = re.compile(r"\b[A-Za-z]{3}\d{4}\b")
 FILE_CODE_PATTERN = re.compile(r"(?<![A-Za-z0-9])[A-Za-z]{2,4}\d{4}(?![A-Za-z0-9])")
 ALNUM_PATTERN = re.compile(r"[A-Za-z0-9]")
+INSPECTION_FOLDER_SCAN_ERROR = "Inspection folder scan failed or became inaccessible."
 logger = logging.getLogger(__name__)
 _OCR_ENGINE = None
 
@@ -985,21 +989,28 @@ def scan_and_classify_files(folder_paths, folder_priorities=None):
         if not path_str:
             continue
         p = Path(path_str)
-        if not p.exists() or not p.is_dir():
+        try:
+            accessible = p.exists() and p.is_dir()
+        except OSError:
+            accessible = False
+        if not accessible:
             folder_warnings.append(f"Folder not found or inaccessible: {path_str}")
             continue
-        for f in p.rglob("*"):
-            if f.is_file():
-                name = f.name
-                fpath = str(f.resolve())
-                for m in FILE_CODE_PATTERN.finditer(name.upper()):
-                    code = normalize_code(m.group(0))
-                    code_file_map.setdefault(code, []).append({
-                        "file_name": name,
-                        "file_path": fpath,
-                        "priority": priorities.get(path_str, 0),
-                        "file_created": _file_created_at(f),
-                    })
+        try:
+            for f in p.rglob("*"):
+                if f.is_file():
+                    name = f.name
+                    fpath = str(f.resolve())
+                    for m in FILE_CODE_PATTERN.finditer(name.upper()):
+                        code = normalize_code(m.group(0))
+                        code_file_map.setdefault(code, []).append({
+                            "file_name": name,
+                            "file_path": fpath,
+                            "priority": priorities.get(path_str, 0),
+                            "file_created": _file_created_at(f),
+                        })
+        except OSError:
+            raise OSError(INSPECTION_FOLDER_SCAN_ERROR) from None
     return code_file_map, folder_warnings
 
 
@@ -1010,6 +1021,7 @@ def import_master_csv(
     inspection_folder_paths=None,
     inspection_folder_priorities=None,
 ):
+    update_started = perf_counter()
     if master_file:
         rows = load_master_rows_from_csv(master_file)
         source = getattr(master_file, "name", "uploaded")
@@ -1023,6 +1035,14 @@ def import_master_csv(
 
     folder_paths = inspection_folder_paths or []
     code_file_map, folder_warnings = scan_and_classify_files(folder_paths, inspection_folder_priorities)
+    configured_folder_count = len([path for path in folder_paths if str(path).strip()])
+    all_configured_folders_inaccessible = (
+        configured_folder_count > 0
+        and not code_file_map
+        and len(folder_warnings) >= configured_folder_count
+    )
+    if folder_warnings and not all_configured_folders_inaccessible:
+        raise OSError(INSPECTION_FOLDER_SCAN_ERROR)
 
     processed_codes = set()
     master_count = 0
@@ -1106,21 +1126,24 @@ def import_master_csv(
         )
         structure_count += 1
 
-    InspectionFile.objects.all().delete()
-    file_count = 0
-    for code, file_infos in code_file_map.items():
-        master = Master.objects.filter(code=code).first()
-        if master is None:
-            continue
-        for fi in file_infos:
-            InspectionFile.objects.create(
-                master=master,
-                file_name=fi["file_name"],
-                file_path=fi["file_path"],
-                priority=fi["priority"],
-                file_created=fi["file_created"],
-            )
-            file_count += 1
+    if all_configured_folders_inaccessible:
+        file_count = InspectionFile.objects.count()
+    else:
+        InspectionFile.objects.all().delete()
+        file_count = 0
+        for code, file_infos in code_file_map.items():
+            master = Master.objects.filter(code=code).first()
+            if master is None:
+                continue
+            for fi in file_infos:
+                InspectionFile.objects.create(
+                    master=master,
+                    file_name=fi["file_name"],
+                    file_path=fi["file_path"],
+                    priority=fi["priority"],
+                    file_created=fi["file_created"],
+                )
+                file_count += 1
 
     result = {
         "updated_master_count": master_count,
@@ -1128,9 +1151,13 @@ def import_master_csv(
         "updated_structure_count": structure_count,
         "inspection_file_count": file_count,
         "source": source,
+        "total_update_seconds": round(perf_counter() - update_started, 3),
+        "transaction_strategy": "single_atomic_update",
     }
     if folder_warnings:
         result["folder_warnings"] = folder_warnings
+    if all_configured_folders_inaccessible:
+        result["inspection_files_preserved"] = True
     return result
 
 
@@ -1274,15 +1301,31 @@ def create_job(job_type, payload, user=None):
     )
 
 
-def run_job(job, fn):
-    job.status = Job.Status.RUNNING
-    job.started_at = timezone.now()
-    job.updated_by = job.created_by
-    job.save(update_fields=["status", "started_at", "updated_by", "updated_at"])
+class StaleJobExecution(RuntimeError):
+    pass
+
+
+def run_job(
+    job,
+    fn,
+    mark_running=True,
+    *,
+    worker_id=None,
+    execution_token=None,
+):
+    if mark_running:
+        job.status = Job.Status.RUNNING
+        job.started_at = timezone.now()
+        job.updated_by = job.created_by
+        job.save(update_fields=["status", "started_at", "updated_by", "updated_at"])
+    execution_started = perf_counter()
     try:
-        result = fn()
+        if execution_token:
+            with transaction.atomic():
+                result = fn()
+        else:
+            result = fn()
     except Exception as exc:
-        job.status = Job.Status.FAILED
         error_message = str(exc)
         failure_result = {
             "status": "failed",
@@ -1294,19 +1337,99 @@ def run_job(job, fn):
             failure_result["error_code"] = exc.error_code
             failure_result["details"] = safe_details
             error_message = _classification_job_error_message(error_message, safe_details)
-        job.error_message = error_message
-        job.result = failure_result
-        job.finished_at = timezone.now()
-        job.updated_by = job.created_by
-        job.save(update_fields=["status", "error_message", "result", "finished_at", "updated_by", "updated_at"])
+        finished_at = timezone.now()
+        if execution_token:
+            updated = Job.objects.filter(
+                pk=job.pk,
+                status=Job.Status.RUNNING,
+                worker_id=worker_id,
+                execution_token=execution_token,
+            ).update(
+                status=Job.Status.FAILED,
+                error_message=error_message,
+                result=failure_result,
+                finished_at=finished_at,
+                updated_by=job.created_by,
+                worker_id="",
+                execution_token="",
+                heartbeat_at=None,
+                lease_until=None,
+                updated_at=finished_at,
+            )
+            if updated != 1:
+                raise StaleJobExecution("Job execution lease is no longer owned.") from exc
+            return failure_result
+        else:
+            job.status = Job.Status.FAILED
+            job.error_message = error_message
+            job.result = failure_result
+            job.finished_at = finished_at
+            job.updated_by = job.created_by
+            job.worker_id = ""
+            job.execution_token = ""
+            job.heartbeat_at = None
+            job.lease_until = None
+            job.save(update_fields=["status", "error_message", "result", "finished_at", "updated_by", "worker_id", "execution_token", "heartbeat_at", "lease_until", "updated_at"])
         raise
 
-    job.status = Job.Status.SUCCEEDED
-    job.result = result
-    job.finished_at = timezone.now()
-    job.updated_by = job.created_by
-    job.save(update_fields=["status", "result", "finished_at", "updated_by", "updated_at"])
+    if isinstance(result, dict):
+        result.setdefault(
+            "job_metrics",
+            {
+                "execution_seconds": round(perf_counter() - execution_started, 3),
+                "attempt_count": job.attempt_count,
+            },
+        )
+    finished_at = timezone.now()
+    if execution_token:
+        updated = Job.objects.filter(
+            pk=job.pk,
+            status=Job.Status.RUNNING,
+            worker_id=worker_id,
+            execution_token=execution_token,
+        ).update(
+            status=Job.Status.SUCCEEDED,
+            result=result,
+            finished_at=finished_at,
+            updated_by=job.created_by,
+            worker_id="",
+            execution_token="",
+            heartbeat_at=None,
+            lease_until=None,
+            updated_at=finished_at,
+        )
+        if updated != 1:
+            raise StaleJobExecution("Job execution lease is no longer owned.")
+    else:
+        job.status = Job.Status.SUCCEEDED
+        job.result = result
+        job.finished_at = finished_at
+        job.updated_by = job.created_by
+        job.worker_id = ""
+        job.execution_token = ""
+        job.heartbeat_at = None
+        job.lease_until = None
+        job.save(update_fields=["status", "result", "finished_at", "updated_by", "worker_id", "execution_token", "heartbeat_at", "lease_until", "updated_at"])
     return result
+
+
+def run_erp_automation(erp_path, csv_path):
+    module_dir = Path(__file__).resolve().parent.parent.parent / "erp_automation"
+    script = module_dir / "erp.py"
+    if not script.exists():
+        raise FileNotFoundError(f"スクリプトが見つかりません: {script}")
+    try:
+        result = subprocess.run(
+            [sys.executable, str(script), erp_path, csv_path],
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("ERP automation timed out (600s)") from exc
+    if result.returncode != 0:
+        raise RuntimeError(f"ERP automation failed: {result.stderr.strip()}")
+    return {"status": "succeeded", "output": result.stdout.strip()}
 
 
 def _safe_classification_details(details):

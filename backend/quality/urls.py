@@ -1,6 +1,7 @@
 from django.urls import path
 
 from .views import (
+    ActiveMasterJobView,
     BulkHideTargetsView,
     BulkHistoryView,
     Class9SettingsView,
@@ -51,6 +52,7 @@ urlpatterns = [
     path("me/avatar/", AvatarView.as_view()),
     path("admin/users/", UserManagementView.as_view()),
     path("admin/users/<int:user_id>/", UserManagementView.as_view()),
+    path("jobs/active-master/", ActiveMasterJobView.as_view()),
     path("jobs/<str:job_id>/", JobDetailView.as_view()),
     path("master/update/", MasterUpdateView.as_view()),
     path("master/seed/", SeedMasterView.as_view()),

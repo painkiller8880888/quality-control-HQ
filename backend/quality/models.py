@@ -1,5 +1,6 @@
 from django.db import models
 from django.contrib.auth.hashers import check_password, make_password
+from django.utils import timezone
 
 
 class User(models.Model):
@@ -463,6 +464,23 @@ class Job(models.Model):
     request_payload = models.JSONField(default=dict, blank=True)
     result = models.JSONField(default=dict, blank=True)
     error_message = models.TextField(blank=True)
+    resource_key = models.CharField(max_length=128, blank=True, default="")
+    idempotency_key = models.CharField(max_length=64, blank=True, default="")
+    blocked_reason = models.CharField(max_length=255, blank=True, default="")
+    depends_on = models.ForeignKey(
+        "self",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="dependent_jobs",
+    )
+    attempt_count = models.PositiveIntegerField(default=0)
+    heartbeat_at = models.DateTimeField(null=True, blank=True)
+    lease_until = models.DateTimeField(null=True, blank=True)
+    worker_id = models.CharField(max_length=128, blank=True, default="")
+    execution_token = models.CharField(max_length=64, blank=True, default="")
+    available_at = models.DateTimeField(default=timezone.now)
+    timeout_seconds = models.PositiveIntegerField(default=900)
     started_at = models.DateTimeField(null=True, blank=True)
     finished_at = models.DateTimeField(null=True, blank=True)
     created_by = models.ForeignKey(User, on_delete=models.PROTECT, null=True, blank=True, related_name="created_jobs")
@@ -481,6 +499,20 @@ class Job(models.Model):
                 condition=models.Q(status__in=["queued", "running", "succeeded", "failed"]),
                 name="job_status_check",
             ),
+            models.UniqueConstraint(
+                fields=["resource_key", "idempotency_key"],
+                condition=(
+                    models.Q(status__in=["queued", "running"])
+                    & ~models.Q(resource_key="")
+                    & ~models.Q(idempotency_key="")
+                ),
+                name="active_job_idempotency_unique",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["status", "available_at", "job_id"]),
+            models.Index(fields=["resource_key", "status"]),
+            models.Index(fields=["lease_until", "status"]),
         ]
 
 
