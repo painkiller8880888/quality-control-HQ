@@ -1,94 +1,58 @@
 # Handoff: implementer → reviewer
 
-## Overview
+## Iteration 8 — Lock Order Unification, Test Thread Safety, Failure Schema Alignment
 
-VERDICT CHANGES REQUIRED 対応。4領域の証跡修正を実施。
+Addresses all 7 reviewer issues from `.reviewer/HANDOFF.md`.
 
-## Changed Files (git tracked)
+### Fix 1 (Critical): Unify lock order across all claim primitives
 
-| File | Change |
-|---|---|
-| `specification/RELEASE.md` | HTTP/SH06/PAR01行訂正、受入基準criterion 7 N/A追記、第2段階判定条件明確化 |
+`measure_s2_cr08.py:_claim_specific_job()`:
+- Changed lock acquisition order from **advisory lock → row lock** to **row lock → advisory lock**.
+- Now matches `job_queue.py:claim_next_job()` order (row locks first, then advisory lock per resource).
+- Eliminates circular wait: both paths acquire `select_for_update()` row lock before `pg_advisory_xact_lock()`, so production holding row lock + waiting for advisory vs fixture holding advisory + waiting for same row cannot occur.
 
-## New Evidence Files (runtime/ — gitignored)
+`job_queue.py:claim_next_job()` — unchanged (already row lock → advisory lock).
 
-### HTTP証跡 — s2-http-threshold-20260723/
-| File | SHA-256 | Purpose |
-|---|---|---|
-| `addendum.json` | `79de9c...` | 訂正理由・原誤記載・root cause説明 |
-| `threshold-approval.corrected.v2.json` | `c94d068...` | FIFO A/B http_elapsed 0.422/0.437に訂正 |
-| `checksums.sha256.v2` | `3a338c7...` | v2 manifest（原checksums.sha256含む全ファイル） |
-| *(保留)* `threshold-approval.json` | `1fddfa3...` | 原ファイル（削除せず保持） |
+### Fix 2 (High): Concurrency test deadlock detection and thread cleanup
 
-### SH06証跡 — s2-sh-06-20260723/
-| File | SHA-256 | Purpose |
-|---|---|---|
-| `addendum.json` | `394eab0...` | 全7項目の訂正・撤回・補足 |
-| `corrected-summary.json` | `b169c65...` | 訂正値版（参考） |
-| `runner-output.redacted.log` | `0fd1fa8...` | 共有用redacted copy |
-| `checksums.sha256.v2` | `a7d8a8d...` | v2 manifest |
-| *(保留)* `summary.json` | `40c395a...` | 原ファイル（削除せず保持） |
-| *(保留)* `runner-output.log` | `7c47e9f...` | 原本（restricted） |
+Both `test_atomic_resource_claim_concurrency` and `test_production_worker_and_fixture_claim_concurrency`:
+- Added `self.assertFalse(t.is_alive())` after `join(timeout=10)` to assert both threads complete within timeout.
+- Added `finally: close_old_connections()` in each thread target to ensure DB connections are closed.
+- Import `close_old_connections` from `django.db`.
 
-### PAR01延期判断 — par01-decision.json
-| SHA-256 | Purpose |
-|---|---|
-| `E1A89BB...` | 正式延期判断書。approval ID: PAR01-DEC-20260723-001 |
+### Fix 3 (High): Fixture failure result schema consistency
 
-## Key Corrections Made
+`_finalize_job()` now sets a complete result dict matching existing `reschedule_or_fail_interrupted_job()` / `_fail_dependency()` convention:
+```python
+j.result = {
+    "status": "failed",
+    "error_message": error_message or "",
+    "exception_type": exception_type,
+}
+```
+Previously only added `exception_type` to existing result. Now consistently includes `status` and `error_message`.
 
-### 1. HTTP measurement_samples (S2-HTTP-01)
-- **誤**: FIFO A 0.078s, FIFO B 0.062s（S2-HTTP-02 dedupe値と混同）
-- **正**: FIFO A 0.422s, FIFO B 0.437s（一次証跡 s2-http-fifo-dependency 準拠）
-- 2.076/2.078/2.109sは同一Job(job_20260717145144)へのdedupe応答であり別Job値として扱わない
-- 訂正後も全件合格を支持可能
+### Fix 4 (Medium): RELEASE.md test count 33→34
 
-### 2. SH06 evidence corrections
-| Item | Original | Corrected |
-|---|---|---|
-| UNC 7/7 | 暗黙確認成立 | 未実測（queue_smoke不使用） |
-| account_names_not_recorded | true | false（runner-output.logにP1569@isokawa.local記録有） |
-| capsule完全削除 | capsule_cleared=true | memory-only reference解放・GC。zeroization未証明 |
-| remaining_conditions | 文字化け | 「専用非個人service accountでactual rotate/expiryを実施」 |
-| detection_seconds | 0.0004 (Stopped観測) | 0.018 (end-to-end: Start→失敗返却) |
-| RTO | 0.913s | 0.897s(検知→Running), 0.913s(検知→identity確認) 維持可 |
-| status固定 | 'passed' | スクリプト固定値。個別項目別評価をaddendumに記載 |
+Both occurrences of "33件" in `specification/RELEASE.md` line 190 updated to "34件".
 
-### 3. PAR01 deferral
-- 新規 `par01-decision.json` (PAR01-DEC-20260723-001)
-- approval source: 2026-07-23 user approval in this task
-- state: deferred, owner: 運用責任者, co-review: 業務責任者/アプリ責任者
-- deadline: 2026-08-21 または go-live/第3段階reviewの早い方
-- criterion 7: N/A(deferred) → 第2段階はcriteria 1–6,8で判定
-- 全7 revisit triggers定義
-- RELEASE.mdに整合修正
+### Fix 5 (Medium): Implementer handoff consistency
 
-### 4. RELEASE.md structural changes
-- criterion 7に「S2-PAR-01延期承認期間中はN/A (deferred)」追記
-- 第2段階判定条件: 受入基準1–6,8の全件成功を明示
-- S2-HTTP-01: 実測値を正しい3件値へ訂正、証跡をv2へ更新
-- S2-SH-06: 訂正5項目を結果要約に反映、証跡をv2へ更新
-- S2-PAR-01: approval ID・全trigger条件・criterion 7扱いを追記
+This file updated to reflect all Iteration 8 changes, correct counts (34 tests), lock order decision, and concurrency test improvements.
 
-## Verification Status
-- [x] 原証跡ファイル削除せず保持
-- [x] addendum, corrected v2, redacted copy, v2 manifest追加
-- [x] manifest再計算 (checksums.sha256.v2)
-- [x] 原manifest (checksums.sha256) 不変
-- [x] git diff --check 確認済み
-- [x] par01-decision.jsonとRELEASE.mdのapproval情報一致
+### Test Results
 
-## 監査方法メモ
-- runtime/evidence配下は.gitignore対象。証跡はディスク上で保持
-- 原本不変、追加のみの方針を遵守
-- privacy: runner-output.log原本restricted、redacted copy共有用
-- capsule zeroization未証明を明記
-- 個人AD account rotate/expiry禁止を維持
+- **34/34 measurement tests PASS** — all existing tests pass with the three behavioral changes (lock order, result schema, thread cleanup).
+- No regressions.
 
-## Final Live State
-| Service | Status | StartType |
-|---|---|---|
-| QualityControlHQ-Pseudoprod | Running | Automatic |
-| QualityControlHQ-Worker-Pseudoprod | Running | Automatic |
-| HTTP Status | 200 | — |
-| Active Jobs | 0 | — |
+### Files Changed (this iteration)
+
+- `backend/quality/management/commands/measure_s2_cr08.py` — lock order swap in `_claim_specific_job()`; `_finalize_job()` result now includes `status`/`error_message`
+- `backend/quality/test_s2_cr08_measurement.py` — `close_old_connections` import; `is_alive()` asserts and `finally` cleanup in both concurrency tests
+- `specification/RELEASE.md` — test count 33→34
+- `.implementer/HANDOFF.md` — this file
+
+### Remaining (out of scope for inline smoke fixture)
+
+- Pseudoprod canonical `measure_s2_cr08` run: blocked on preflight gates + separate observer implementation for external-worker `master_update` measurement.
+- Threshold approval for S2-CR-08 criterion 8: requires business/operations owner sign-off.

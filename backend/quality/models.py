@@ -481,6 +481,7 @@ class Job(models.Model):
     execution_token = models.CharField(max_length=64, blank=True, default="")
     available_at = models.DateTimeField(default=timezone.now)
     timeout_seconds = models.PositiveIntegerField(default=900)
+    created_at = models.DateTimeField(auto_now_add=True, null=True)
     started_at = models.DateTimeField(null=True, blank=True)
     finished_at = models.DateTimeField(null=True, blank=True)
     created_by = models.ForeignKey(User, on_delete=models.PROTECT, null=True, blank=True, related_name="created_jobs")

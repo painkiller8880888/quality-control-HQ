@@ -10,7 +10,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from django.conf import settings
-from django.db import IntegrityError, close_old_connections, transaction
+from django.db import IntegrityError, close_old_connections, connection, transaction
 from django.utils import timezone
 
 from .models import AppSetting, Job, User
@@ -264,6 +264,14 @@ def _fail_dependency(job, dependency):
     )
 
 
+def claim_resource_advisory_lock(resource_key):
+    if not resource_key:
+        return
+    lock_id = int(hashlib.sha256(resource_key.encode("utf-8")).hexdigest()[:16], 16) % (2**63 - 1)
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT pg_advisory_xact_lock(%s)", [lock_id])
+
+
 def claim_next_job(worker_id):
     now = timezone.now()
     recover_expired_jobs(now)
@@ -288,11 +296,13 @@ def claim_next_job(worker_id):
                             candidate.blocked_reason = f"先行Job {candidate.depends_on_id} の完了待ち"
                             candidate.save(update_fields=["blocked_reason", "updated_at"])
                         continue
-                if candidate.resource_key and Job.objects.filter(
-                    resource_key=candidate.resource_key,
-                    status=Job.Status.RUNNING,
-                ).exclude(pk=candidate.pk).exists():
-                    continue
+                if candidate.resource_key:
+                    claim_resource_advisory_lock(candidate.resource_key)
+                    if Job.objects.filter(
+                        resource_key=candidate.resource_key,
+                        status=Job.Status.RUNNING,
+                    ).exclude(pk=candidate.pk).exists():
+                        continue
                 job = candidate
                 break
             if failed_dependency:
