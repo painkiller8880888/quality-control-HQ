@@ -1,150 +1,194 @@
 # Handoff: planner → implementer
 
-# Goal
+## Goal
 
-S2-CR-08で未測定の2指標を補う、最小の測定fixtureとevidence schemaを作成・検証する。
+S2-CR-08のcanonical疑似本番再測定を安全に実行する前段として、外部Windows workerが実行する`master_update`を観測できる最小fixtureと、必須preflight/postflight gateを実装・自動検証する。
 
-1. 後続Jobの総queue waitを、後続Jobの生成時刻と開始時刻から測定する。
-2. `master_update`のDB transaction開始・終了をJob実行開始・終了と独立に測定する。
-3. 既存証跡で代替できないと確定し、fixtureの事前検証が通った場合に限り、疑似本番でcanonical `master_update` A→Bを1セット再測定する。
-4. 6指標の閾値はimplementerが決めず、責任者の承認入力が得られた場合だけ判定に使用する。
+このiterationでは疑似本番canonical Jobを投入しない。実装と自動試験をreviewerへ渡し、reviewer PASS後の次iterationでのみ実地再測定へ進む。
 
-# Context
+## Current State
 
-## 検証済み事実
+### 検証済み事実
 
-- `.reviewer/HANDOFF.md`のverdictはPASSだが、これは訂正対応へのPASSでありS2-CR-08合格ではない。
-- `specification/RELEASE.md`のS2-CR-08は「部分実施」。CPU、メモリ、DB接続数、lock待ちの4/6指標は測定済み。
-- `runtime/pseudoprod/evidence/s2-criterion-8-20260723-095921/summary.corrected.json`は、transaction時間とJob実行時間を区別できず、FIFO Bの生成時刻がないため総queue waitを確定できないと結論している。
-- 既存証跡で確定できるのはA完了→B開始のdispatch/handoff gap 2.177371秒と、Bの初回queued観測→開始の下限576.041648秒だけである。
-- `Job`には`started_at` / `finished_at`があるが、現在のmodelに永続的な`created_at`はない。`master_update`は`services.import_master_csv()`の`@transaction.atomic`内で動作する。
-- S2-CR-08の6指標には承認済み閾値がない。S2-HTTP-01の`IFC20260723-001`はHTTP応答とJob全体時間用であり流用できない。
-- corrected evidenceと原証跡は保持対象。変更・削除しない。
+- `.reviewer/HANDOFF.md`の最新verdictはfixture変更への`PASS`であり、S2-CR-08自体の合格ではない。
+- `backend/quality/management/commands/measure_s2_cr08.py`は同一process/同一DB connectionでinline `queue_smoke`をclaim・実行する開発fixtureである。helpにも外部worker/canonical `master_update`非対応と明記されている。
+- `backend/quality/s2_cr08_measurement.py`の`TransactionObserver`はtarget backend PIDを指定できるが、現行commandはcommand自身のDB backend PIDを指定する。外部worker backendの一意な発見・固定・継続観測は未実装。
+- `Job.created_at`とmigration 0029、総queue wait、transaction上下限schema、ordering検証、SHA-256 manifestは実装済み。
+- 測定fixtureの自動試験は34/34、関連queue試験16/16、backend全157/157、`PhaseTwoMasterUpdateTests` 33/33がreviewer環境で合格済み。
+- 既存疑似本番証跡からCPU、メモリ、DB接続数、lock待ちの4指標は得られるが、canonical transaction時間と後続Jobの総queue waitは確定できない。
+- `runtime/pseudoprod/evidence/s2-criterion-8-20260723-095921/summary.corrected.json`は6指標すべてを閾値未承認のため`not_evaluable`としている。
+- 2026-07-23のplanner read-only確認では、`QualityControlHQ-Pseudoprod`と`QualityControlHQ-Worker-Pseudoprod`は`Running / Automatic`、`http://127.0.0.1:8080/`はHTTP 200、Django `check`はissue 0だった。
+- 非昇格sessionでは`Get-CimInstance Win32_Service`がaccess deniedとなったが、`Get-Service`では状態とStartTypeを取得できた。fixtureは取得不能を成功扱いしない。
+- repository rootの通常`.env`でDjango shellを起動すると疑似本番DBではなく、`quality_job`不存在だった。runnerは`deployment/pseudoprod/.env`を明示して接続先identityを検証し、暗黙の環境fallbackを禁止する。
+- `.reviewer/HANDOFF.md`にはユーザー既存の未commit変更がある。変更・復元・stageしない。
 
-## 未確認事項
+### 未確認事項
 
-- 責任者が承認する6指標の閾値、責任者名/役割、approval ID、承認日、review期限。
-- 外部observerによるDB transaction終了時刻の測定精度。これはポーリング間隔による上下限付きとし、真値と偽らない。
+- 6指標のwarning/fail閾値、comparison、approval ID、承認日、承認者の役割、review期限、再検討trigger。
+- 外部worker child processとPostgreSQL backendを、この環境でどの既存情報から一意に対応づけるのが最小か。
+- canonical再測定実行時点のactive Job、migration、backup、canonical input、業務baseline、UNC、service process tree。
 
-# Scope
+## Scope
 
-## 1. 測定evidence schemaとfixtureの作成
+### 1. 外部worker transaction observer
 
-新規証跡directoryを`runtime/pseudoprod/evidence/s2-cr-08-measurement-<timestamp>/`とし、少なくとも以下を独立fieldとしてUTC/ISO 8601で記録する。
+既存`TransactionObserver`とevidence schemaを再利用し、外部workerがclaimした対象Jobの実行transactionだけを一意に観測する。
 
-- `job_a_created_at`, `job_a_started_at`, `job_a_finished_at`
-- `job_b_created_at`, `job_b_started_at`, `job_b_finished_at`
-- `job_b_total_queue_wait_seconds = job_b_started_at - job_b_created_at`
-- `job_b_handoff_gap_seconds = job_b_started_at - job_a_finished_at`
-- `transaction_backend_pid` ではなく、共有不要なhash化したbackend correlation identifier
-- PostgreSQLの同一client backendで観測した`xact_start`
-- `transaction_end_lower_bound` と `transaction_end_upper_bound`
-- `transaction_duration_lower_bound_seconds` と `transaction_duration_upper_bound_seconds`
-- observerの`poll_interval_seconds`
-- Job時間とtransaction時間を分けた定義
+最低限、次の状態遷移を実装する。
 
-Job生成時刻は、本番model/schemaへ新規migrationを追加する前に、fixtureが同一DB sessionのserver timestampとJob insert成立を相関づけて取得できるか検証する。厳密な生成時刻が取得できない場合のみ、`Job.created_at = DateTimeField(auto_now_add=True)`とmigrationを最小候補とする。その場合はqueue取得順・dedupe・API serializerに影響しないことを自動試験で確認する。
+1. 観測開始前の`pg_stat_activity`とworker process tree/接続をbaseline化する。
+2. 対象Jobが`running`になり、`worker_id`、`execution_token`、heartbeat/leaseを所有したことを確認する。
+3. 対象Jobを実行するexact child processのTCP client portと、`pg_stat_activity.pid/client_port/datname/usename/xact_start`をメモリ上で照合する。
+4. 候補が1件だけであることを証明してbackendを固定する。0件または複数件なら安全停止する。
+5. 同じbackend PID/client portと同じ`xact_start`をtransaction終了まで継続観測する。
+6. 終了時刻はPostgreSQL `clock_timestamp()`でbracketした`end_lower_bound` / `end_upper_bound`として記録し、単一の厳密値に丸めない。
 
-DB transactionは、worker子processとPostgreSQL client backendを既存証跡と同等のPID/client-port照合で一意に対応づけ、`pg_stat_activity.xact_start`を観測する。終了は同一backendの同一`xact_start`が消えた最後の観測区間で上下限を記録する。ポーリング値だけで単一の「正確なtransaction終了時刻」を作らない。
+共有用evidenceには生PID、client port、worker ID、execution token、service account、SIDを保存しない。相関identifierはSHA-256化し、照合成否と候補数を記録する。生値がdebugに必要な場合はメモリ上だけで扱う。
 
-## 2. fixture単体検証
+既存`target_pid=None`の「新規backendが1件なら採用」だけでcanonicalを観測しない。対象Jobのexact childとの対応が必要である。
 
-- 短時間の専用fixture/自動試験で、Job生成、queue待機、transaction開始、transaction終了上下限を独立記録できることを先に確認する。
-- fixtureは計測のみ。製品のqueue意味論、retry、dedupe、transaction境界を変えない。
-- fixtureで一意なbackend対応を証明できなければ安全停止する。
+### 2. canonical runnerのdry-run/preflight
 
-## 3. 疑似本番再測定
+実地試験用runnerは、まず`--dry-run`または同等のnon-mutating modeを持つ。今回のvalidationではこのmodeだけを実行する。
 
-既存corrected evidenceでは2指標を代替できないため、以下の全ゲート成功時のみcanonical `master_update` A→Bを1セット実行する。
+preflightで以下をすべて機械判定し、各項目を`passed/failed/not_checked`で保存する。
 
-- Web/workerが`Running` / `Automatic`、HTTP 200、active Job 0。
-- migration/checkが正常。
-- canonical input identity/hashと期待件数を既存baselineと照合。
-- 更新前の業務表count/stable-content hash、InspectionFile distribution/pathsetを取得。
-- custom-format full backupを取得し、restore-listを読めることとSHA-256を確認。
-- configured UNC rootsはread/list成否のみ証跡化し、raw pathを保存しない。
-- observerとmeasurement schemaの事前検証が成功。
+- 実行hostとrepository rootが期待値。
+- `deployment/pseudoprod/.env`を明示読込し、DB名/host/port/userの生値を保存せず、期待する疑似本番DB identityとの一致をboolean/hashで確認。
+- migration 0029を含む期待migration適用済み、Django `check`成功。
+- Web/worker serviceが存在し、`Running / Automatic`。取得不能はfail。
+- HTTP 200。
+- active Job 0、running Job 0。
+- worker process treeを一意に取得できる。
+- canonical input identity/content/path hashと期待件数が既知baseline一致。
+- Master、MasterClass、Structure、InspectionFileを含む既存の業務count/stable-content hashとInspectionFile distribution/pathsetが既知baseline一致。
+- configured UNC 7 rootのread/list成功。raw UNC pathは保存しない。
+- custom-format full backup取得手順、backup SHA-256、non-empty `pg_restore --list`を実行可能。
+- output evidence directoryが新規かつ空。
+- privacy allowlist/denylistとmanifest生成処理が利用可能。
 
-AとBは安全なcanonical入力とし、BをAの後続queued Jobにする。A/Bが別Jobとなる既存の安全な手法が再現できなければ実行しない。実行後は両Jobの試行、最終状態、結果件数、warning、business hash、active Job 0、service live stateを確認する。
+`--dry-run`はJobを作成せず、backupも作成せず、serviceを停止/開始せず、DB・UNC・業務fileを変更しない。backupについてはbinary/path/config/出力先の検証までとし、実backupは次iterationのlive run直前に取得する。
 
-## 4. 閾値承認入力
+### 3. live modeの設計
 
-6指標それぞれにつき、次を含む承認入力だけを受理する。
+reviewer PASS後に使えるlive modeを実装してよいが、今回実行してはならない。
 
-- 指標の定義と単位
-- warning/fail閾値と比較演算子
-- approval ID、承認日、承認者の役割
-- 適用環境/データ量、review期限、再検討trigger
+live modeは次の順序を固定する。
 
-承認入力がない場合、測定値は記録してもverdictを`not_evaluable`、S2-CR-08を「部分実施」のままとする。閾値候補をimplementerの提案や承認済み値として記録しない。
+1. preflight成功。
+2. Web/workerを既存の承認済み手順で停止し、active Job 0を再確認。
+3. custom-format full backupを取得し、SHA-256とrestore-listをfsyncした証跡へ保存。
+4. serviceを復旧し、`Running / Automatic`、HTTP 200を再確認。
+5. observerをbaseline/armed状態にする。
+6. canonical Aと、Aに依存する別内容canonical Bを正式queue経路へ投入する。同一Jobへdedupeされたら中止。
+7. A/Bを外部workerだけに実行させ、各transactionとJob/queue時間を観測する。
+8. A成功後にBだけが開始し、同時running 0であることを確認する。
+9. postflightで各attempt 1、canonical result件数/warning、active Job 0、business baseline不変、service live state、HTTP 200、UNC 7/7を確認する。
+10. privacy scanとmanifest検証に成功した場合だけ共有用evidenceを確定する。
 
-## 5. 最小更新
+runner自身がJobをclaimしたり`execute_claimed_job()`を直接呼んだりしない。外部WinSW workerの本番経路を測定する。
 
-- 追加evidenceは原本不変・追加のみとし、SHA-256 manifestを付ける。
-- `specification/RELEASE.md`はS2-CR-08の実施行だけを、実測・承認状態に合わせて最小更新する。
-- 永続`Job.created_at`が不要なら製品model/migrationは変更しない。必要な場合だけmodel、migration、直接関連testに限る。
+### 4. evidence schema
 
-# Non-Goals
+既存`s2-cr-08-measurement-v3`を互換的に拡張する。少なくとも以下を保持する。
 
-- S2-SH-06、S2-PAR-01、並列worker導入、性能改善、transaction短縮、staging/swap方式の実装。
-- 計測に不要なAPI/UI変更、リファクタ、DB schema変更。
-- 個人AD accountのpassword/expiry/lockout変更。
-- 承認のない閾値の作成、IFC20260723-001の流用、閾値なしでの合格判定。
-- 既存の原証跡、corrected evidence、addendum、manifestの修正・削除。
+- fixture/schema version、run mode、UTC measurement date。
+- preflight/postflightの項目別結果と総合結果。
+- Job A/Bのhash化identifier、`created_at`、`started_at`、`finished_at`、attempt、status、結果要約。
+- Bの`total_queue_wait_seconds`とA完了からの`handoff_gap_seconds`を別field。
+- A/Bそれぞれのtransaction `xact_start`、終了lower/upper bound、duration lower/upper、最大測定誤差、poll回数/間隔。
+- exact child/backend相関のmethod、candidate count、一意性boolean、hash化correlation。
+- CPU、メモリ、DB接続数、lock待ちの測定値。既存canonical証跡の値を新run値としてコピーしない。
+- backup metadata、canonical input/baseline/postflight一致boolean。
+- threshold approvalは別sectionとし、承認入力がなければ6指標すべて`not_evaluable`。
 
-# Constraints
+値が取れなかったfieldを0やnull成功として扱わず、`measurement_status`とfailure reasonを持つ。
 
-- MVPの最小変更。測定fixtureは製品動作を変えない。
-- 時刻は同一クロック基準のUTCで取得する。observer timestampとDB server timestampを混同しない。
-- credential、token、cookie、session、raw request/header/body、raw UNC path、個人名、account名、SID、worker ID、execution token、生PID/client portを共有用証跡に保存しない。照合に必要な場合はメモリ上だけで使い、evidenceにはbooleanまたはSHA-256化したcorrelationだけを残す。
-- 追加試験では実在業務fileを変更しない。自動restoreを前提に続行しない。
-- 原証跡とbackupは削除しない。runtime evidenceがgitignoredであることをhandoffに明記する。
+### 5. 自動試験
 
-# Safety Stop Conditions
+実DB/processを必要とする部分は依存境界を小さくmock/fake可能にし、以下を追加する。
 
-以下のどれかで新規Job投入前または実行中に安全停止し、復旧可能性とlive stateを確認してreviewerへ報告する。
+- external backend候補0件、1件、複数件。
+- exact child/client-port/backend相関成功と、途中でidentityが変化した場合の失敗。
+- observer開始前baseline transactionを対象と誤認しない。
+- A/B別々のtransactionを取得し、Bのtotal queue waitとhandoff gapを混同しない。
+- observer thread例外、欠測、timeoutでevidenceを確定しない。
+- dry-runがJob/DB/service/backupを変更しない。
+- DB環境fallback、service状態取得不能、active Job非0、migration不一致、HTTP非200、baseline不一致、backup tool/restore-list検証不可でfail closed。
+- privacy scanが生PID/client port、credential、token、cookie/session、raw UNC path、account/SIDを拒否する。
+- live modeが明示flag/confirmationなしに開始しない。
+- manifest生成と全entry再検証。
 
-- preflightでactive Jobが0でない、service/HTTP/DB/migration/check/backup/restore-list/canonical baselineのいずれかが不正。
-- input identity、期待件数、業務hash/count、UNC read/list成否が既存baselineと不一致。
-- fixtureがJob生成時刻を厳密に取得できない、またはworker子processとDB backendを一意に対応づけできない。
-- 同じbackend/transactionを継続観測できない、observerが欠測・停止する、時計基準が混在する。
-- A/Bが同一Jobにdedupeされる、BがA実行中に開始する、想定外のJobが起動する。
-- AまたはBが想定外状態、timeout、warning、結果件数不一致、business hash不一致となる。
-- credential/raw UNC path/個人情報が証跡に混入した疑い。共有用evidenceは確定せずrestricted扱いで報告する。
-- 試験fixture/DDLが残る、active Jobが0に戻らない、serviceが最終live stateに戻らない。
+thread/DB connectionは`finally`でcloseし、join timeout後のlive threadを残さない。
 
-# Acceptance Criteria
+## Non-Goals
 
-1. evidence schemaがJob生成/開始/終了、総queue wait、handoff gap、DB transaction開始/終了上下限、poll精度を独立fieldで表現する。
-2. fixture単体検証で、後続Jobの`created_at < started_at <= finished_at`と、transactionの`xact_start < end_lower_bound <= end_upper_bound`を機械的に確認できる。
-3. Job実行時間、総queue wait、handoff gap、transaction時間を別指標とし、dispatch gapを総queue waitとしない。
-4. transaction終了がポーリング区間でしか確定できない場合、lower/upper boundと最大誤差を保持し、単一の厳密値として扱わない。
-5. 疑似本番再測定を行う場合、全preflight/backupゲートに成功し、A/Bが逐次で各attempt 1・canonical success、最終active Job 0、business baseline不変、Web/worker Running・Automatic、HTTP 200となる。
-6. 再測定を行わない場合、代替証跡または安全停止理由を、未検証の成功とせず明記する。
-7. 新規evidenceにcredential、raw UNC path、個人情報、生の運用identifierが含まれず、原証跡はhash一致で不変である。
-8. 6指標全てに承認入力がある場合だけ閾値判定を行う。不足時は`not_evaluable`およびS2-CR-08「部分実施」を維持する。
-9. 作成した各evidence fileのSHA-256 manifestが実fileと一致する。
-10. `specification/RELEASE.md`は実測事実、測定誤差、承認状態、証跡path/hash、残課題と一致する。
+- 今回のiterationでのcanonical疑似本番Job投入、実backup、service停止/再起動。
+- S2-SH-06残件、S2-PAR-01、並列worker、性能改善、transaction短縮、staging/swap。
+- 6指標の閾値提案・承認代行、IFC20260723-001の流用。
+- 製品queue、retry、dedupe、transaction境界、API/UIの仕様変更。
+- 既存evidence、corrected/addendum、backup、manifestの修正・削除。
+- `.reviewer/HANDOFF.md`の変更。
 
-# Validation
+## Constraints
 
-- fixtureの直接単体試験。永続`Job.created_at`を追加した場合はmodel/migration checkとJob queueの関連自動試験。
-- Django `check`、migration drift check、影響するbackend test。製品フロントを変更しない限りfrontend buildは不要。
-- fixture出力JSON/JSONLのparse、必須field、timestamp ordering、時間差再計算。
-- source/corrected evidenceの実行前後SHA-256一致、新規manifestの全entry一致。
-- 再測定時はbackup SHA-256/restore-list、pre/post business count/hash、Job transition、transaction bound、queue wait、service/HTTP/active Jobの最終状態を再計算。
-- privacy scanでcredential/token/cookie/session/raw UNC path/account名/SID/生PID/client portが共有用evidenceにないことを確認。
+- MVPの最小変更。既存`measure_s2_cr08.py`のinline smoke用途を壊さない。
+- 運用fixtureは可能なら新command/moduleとし、製品runtime pathへの影響を局所化する。
+- OS/process観測には既存dependencyを優先し、新dependency追加は必要性を示す。
+- timestampはUTCで、Job/Python clockとPostgreSQL server clockの出典を明記する。
+- evidenceは追加のみ。runtime evidenceはgitignoredであることをhandoffへ明記する。
+- credentialや`.env`値をstdout/stderr/evidence/test failureへ出さない。
+- file書込は一時file→flush/fsync→atomic replace相当とし、不完全evidenceを正式manifestへ含めない。
+- ユーザー既存変更を保持し、scope外fileを変更しない。
+
+## Safety Stop Conditions
+
+以下のいずれかでfail closedとする。
+
+- 疑似本番environment identityを明示確認できない。
+- active/running Jobが0でない。
+- service/HTTP/DB/migration/check/canonical baseline/UNC/backup準備のいずれかが失敗。
+- exact child processまたはDB backendが0件・複数件・途中変化。
+- observerがtransaction開始前にarmedにならない、欠測、停止、clock混在。
+- A/Bがdedupe、順序違反、同時running、unexpected Job起動。
+- attempt/status/result/count/warning/business hashが期待外。
+- credential/raw path/個人情報/生運用identifier混入の疑い。
+- final active Job 0、service live state、HTTP 200へ戻らない。
+
+安全停止時は未検証の成功を記録せず、取得済みのrestricted diagnostic、復旧確認、再実行条件だけをhandoffする。
+
+## Acceptance Criteria
+
+1. 外部worker exact childとPostgreSQL backendを一意に相関し、A/Bの実行transactionを別々に上下限付きで観測できる。
+2. 候補0件/複数件、identity変化、observer失敗でfail closedし、正式evidenceを確定しない。
+3. dry-run preflightはnon-mutatingで、Job作成、backup、service操作、業務file変更が0件である。
+4. 誤った`.env`や通常開発DBへのfallbackを検出して停止する。
+5. Job実行時間、total queue wait、handoff gap、transaction時間を別指標としてschema化する。
+6. live modeは外部worker経路だけを使い、明示的なlive承認flagなしでは開始しない。
+7. 6指標の閾値承認不足時は`not_evaluable`を維持し、S2-CR-08を合格へ変更しない。
+8. 共有用evidenceにcredential、raw UNC path、個人情報、生PID/client port/worker ID/token/account/SIDがない。
+9. 自動試験、Django check、migration drift、関連queue regression、`git diff --check`が合格する。
+10. 今回は`specification/RELEASE.md`のS2-CR-08状態を「部分実施」から変更しない。dry-run結果を追記する場合も実地測定と誤認させない。
+
+## Validation
+
+- `quality.test_s2_cr08_measurement`と新規external observer/preflight test。
+- `PersistentJobQueueApiTests`、`PersistentJobQueueRecoveryTests`、`PhaseTwoMasterUpdateTests`。
+- backend全試験をfresh test DBで実行。
+- Django `check`、`makemigrations --check --dry-run`。
+- dry-runを疑似本番明示envで実行し、実行前後のJob count/hash、service PID/state、backup directory、業務count/hashが不変であることを確認。
+- fixture出力JSONのschema、timestamp ordering、差分再計算、privacy denylist、manifestを再検証。
 - `git diff --check`。
+- frontendを変更しない限りfrontend build/lintは不要。既存lint issueを本scopeへ混ぜない。
 
-# Deliverable
+## Deliverable
 
 `.implementer/HANDOFF.md`にreviewer向けstructured handoffを作成し、以下を分離して記載する。
 
-- 変更fileと追加evidenceの一覧。
-- fixture/evidence schemaの時刻定義、クロック出典、測定誤差。
-- 既存証跡で代替不能と判断した根拠。
-- 疑似本番再測定を実施したか、安全停止したか、その根拠。
-- 実測値、再計算式、測定成否、閾値、判定を6指標別に示した表。
-- 閾値承認入力の有無。入力がある場合はapproval ID/承認日/役割/review期限、ない場合は`not_evaluable`と残課題。
-- preflight、backup、live service、business baseline、privacy、manifest、test、`git diff --check`の結果。
-- 「検証済み事実」「未確認事項」「残リスク」を別立てで記載する。
+- 変更file、設計したprocess/backend相関method、failure mode。
+- dry-run/preflightの項目別結果と、non-mutatingである証拠。
+- 自動試験とregression結果。
+- live modeが未実行であること、reviewer PASS後に必要な実地手順。
+- 閾値承認入力の有無と`not_evaluable`維持。
+- privacy、manifest、scope外の既存変更。
+- 「検証済み事実」「未確認事項」「残リスク」「次の実地試験条件」。
