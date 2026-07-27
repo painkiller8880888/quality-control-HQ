@@ -189,6 +189,29 @@ Job状態は当面`queued / running / succeeded / failed`を維持し、依存�
 | S2-PAR-01 | 独立Job用の並列workerを第2段階で導入するか後段へ延期するか判断する | 延期 | 2026-07-23 | 設計・運用判断 | 判断日2026-07-23。approval ID: PAR01-DEC-20260723-001。期限2026-08-21またはgo-live/第3段階capacity reviewの早い方。owner: 運用責任者、co-review: 業務責任者 / アプリ責任者。concurrency=1、quality_master排他、依存待機を維持。acception criterion 7はN/A/deferred。applicable criteria(1–6,8)全件成功を第2段階合格条件とする。並列化導入時criterion 7必須化。再検討trigger全7条件をpar01-decision.jsonに定義 | 本記録（延期判断日2026-07-23）および `runtime/pseudoprod/evidence/par01-decision.json`（PAR01-DEC-20260723-001）。decision evidenceとRELEASEの双方に同一approval情報を記録済み | 正式延期のためrelease blockerではない。再検討trigger条件を監視する運用ルールの確立が必要 |
 | S2-CR-08 | 受入基準8（transaction時間、lock待ち、CPU、メモリ、DB接続数、後続Job待ち時間）の現存証跡監査 | 部分実施 | 2026-07-23 | 疑似本番証跡監査 | 3証跡のSHA-256一致確認。CPU最大21.7%、メモリ最大66.3%、DB接続2〜4、waiting locks 0、granted locks 1〜65、Job実行時間641.118秒。FIFO A→B dispatch/handoff gap 2.177秒。CPU・メモリ・DB接続数・lock待ち・transaction時間・後続Job待ち時間のいずれも承認済み閾値なし。S2-HTTP-01のIFC20260723-001はWeb応答/master更新完了時間の閾値でありcriterion 8の対象外。**測定fixture拡充**: Jobごとに独立した`TransactionObserver`を`start_watching()`フェーズ制御で運用し、transaction時間とJob作成時刻を`job_a_transaction`/`job_b_transaction`として分離記録する。CLIはsmoke fixture専用に制限。fixture単体検証自動試験34件(quality.test_s2_cr08_measurement)が合格。疑似本番再測定は全preflight gate未充足のため安全停止（未実行）。6指標とも承認済み閾値なしのためverdictは`not_evaluable`、S2-CR-08は「部分実施」を維持 | `runtime/pseudoprod/evidence/s2-criterion-8-20260723-095921/`（summary・addendum・checksums.sha256）。測定fixture: `backend/quality/s2_cr08_measurement.py`（evidence schema v3・observer・検証）、`backend/quality/management/commands/measure_s2_cr08.py`（smoke fixture CLI）、`backend/quality/test_s2_cr08_measurement.py`（fixture単体検証自動試験34件）。`backend/quality/models.py` + `migrations/0029_job_created_at.py`（Job.created_atフィールド追加） | 承認済み閾値の設定と記録。疑似本番でのcanonical再測定（全preflight gate充足後）。fixture検証自動試験合格確認 |
 
+### S2-CR-08 テスト方針の優先順位と暫定推奨閾値（未承認）
+
+S2-CR-08は、既存回帰試験の件数増加よりも、測定対象の同一性、欠測時の安全停止、正式証跡の合否判定可能性を優先する。次の優先順位を崩さず、各修正とそのdirect positive/negative testを同一iterationで完了させる。後続優先度への着手は、先行優先度のreviewer PASS後とする。
+
+1. **P0: A/Bと実transactionの一意な相関** — eventの先着順ではなく、対象Jobのclaim/execution ownership、exact child process、PostgreSQL backendの`(pid, client_port, xact_start)`を照合する。unrelated transaction、候補0件・複数件、identity変化はfallbackせずfail-closedとする。異PID、同PID・別port、same-port連続transaction、baseline connection再利用をdirect testする。
+2. **P0: transaction境界の正確性** — START、same-port transition END/START、backend disappearance ENDを同一DB snapshotのclock lower/upper boundで記録し、transaction identityと終了boundを別fieldにする。clock順序、欠測、collector停止・timeoutをdirect testする。
+3. **P0: final gateとformal evidence** — Job A/B結果、observer、postflight、metrics coverage、cleanup、service recoveryを先に確定し、その後に`measurement_status`、`failure_reason`、`live_verification`、privacy check、evidence writeを行う。いずれかの不足・不一致・例外を成功扱いしない。
+4. **P1: 回帰・privacy・件数整合** — 上記P0の各failureを再現するnegative testを追加し、既存measurement、queue、recovery、`PhaseTwoMasterUpdateTests`もfresh test DBで実行する。implementer/reviewer handoffの試験対象、件数、結果を同一にする。
+5. **P2: 疑似本番段階移行** — P0/P1のreviewer PASSまでは`LIVE_BLOCKED = True`を維持し、canonical `--dry-run`、Job投入、service操作、`--live`を実行しない。PASS後にpreflightを満たしたdry-run、backup/restore検証、live A/B測定の順で進める。
+
+以下は2026-07-24時点の**承認前の初期案**であり、実装者による合格判定には使用しない。既存実測（CPU最大21.7%、別の疑似本番run最大67.6%、メモリ最大68.2%、DB接続最大5、waiting locks 0、Job実行時間514.923〜872.992秒、FIFO B queue wait下限576.042秒）を基に、初回canonical測定で異常を検知しつつ即時failを過剰発生させない幅として提案する。
+
+| 指標 | warning暫定案 | fail暫定案 | 測定・判定条件 |
+|---|---:|---:|---|
+| host CPU使用率 | 最大値 `>70%` | 最大値 `>85%` | A enqueue前からB完了後まで5秒以下の間隔で測定する。sample欠落またはA/B実行区間未coverageは`not_evaluable` |
+| hostメモリ使用率 | 最大値 `>75%` | 最大値 `>85%` | 同上。使用率だけでなく測定開始・終了時刻とsample数を証跡化する |
+| DB接続数 | 最大 `>6` | 最大 `>8`、またはPostgreSQL `max_connections`の80%以上 | 対象DBの全client connectionを同一定義で数える。baseline値と対象Jobによる増分も併記する |
+| row/table lock待ち | 業務tableのwaiting lockが1件以上 | 30秒以上継続、deadlock、lock timeoutのいずれか | 瞬間値だけでなく対象relation、初回・最終観測時刻、継続時間を記録する。試験用advisory lockは分離する |
+| A/B各transaction時間 | `>600秒` | `>900秒` | Job全体時間ではなく、相関済み`xact_start`から終了boundまでを評価する。上下限が閾値をまたぐ場合はwarning側へ倒し、相関不能・終了欠測は`not_evaluable` |
+| 後続Job Bの総queue wait | `>750秒` | `>1200秒` | `Job.created_at`からBの実行開始まで。A完了からB開始までのhandoff gapは別指標とし、補助guardとしてwarning `>10秒`、fail `>30秒`を提案する |
+
+暫定案の正式採用には、業務責任者・運用責任者・アプリ責任者が、指標定義、warning/fail値、approval ID、承認日、owner、review期限を記録する。初回canonical A/B測定を含む同条件3組の成功runが揃った時点、または2026-08-21の早い方で再評価し、中央値、最大値、欠測、warning発生状況を確認する。承認完了までは6指標のverdictを`not_evaluable`、S2-CR-08を「部分実施」のままとする。
+
 ## 3. High
 
 #### 第3段階（先行実装）: 登録経路別の分類安全化

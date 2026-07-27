@@ -1,4 +1,5 @@
 import csv
+import hashlib
 import os
 import shutil
 import logging
@@ -10,7 +11,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from django.conf import settings
-from django.db import transaction
+from django.db import connection, transaction
 from django.db.models import Q
 from django.utils import timezone
 import fitz
@@ -21,6 +22,11 @@ import xlrd
 
 from datetime import date as date_type, datetime
 from .constants import CHECK_SLOTS
+from .s2_cr08_shared import (
+    ADVISORY_LOCK_NAMESPACE,
+    make_advisory_lock_id,
+    make_application_name_marker,
+)
 from .models import (
     ClassMaster,
     History,
@@ -1322,6 +1328,12 @@ def run_job(
     try:
         if execution_token:
             with transaction.atomic():
+                _lock_id = make_advisory_lock_id(job.job_id, execution_token)
+                _app_name = make_application_name_marker(job.job_id, execution_token)
+                with connection.cursor() as cursor:
+                    cursor.execute("SELECT pg_advisory_xact_lock(%s, %s)",
+                                   [ADVISORY_LOCK_NAMESPACE, _lock_id])
+                    cursor.execute("SET LOCAL application_name = %s", [_app_name])
                 result = fn()
         else:
             result = fn()

@@ -1,98 +1,82 @@
 # Handoff: implementer → reviewer
 
-## Implementation Summary
+## Scope
 
-Date: 2026-07-24
-Iteration: 9 v17 (fixes for Iteration 9 v16 reviewer findings F1-F5)
+- 対象: RELEASE.md:197 第二P0「transaction境界の正確性」のみ
+- P0 final gate、P1、P2へ着手しない
+- `LIVE_BLOCKED = True` 維持確認済み
 
-## Files Modified
+## Changes (since previous implementer submission)
 
-- `backend/quality/s2_cr08_canonical.py`
-- `backend/quality/management/commands/measure_s2_cr08_canonical.py`
+### F1 — same-port transition lower bound race (critical)
 
-## Fixes Applied
+- `_track_ab_transactions` transition END lower bound: `_last_poll_after` → `_last_poll_before`
+- 理由: 前回pollの`before`はsnapshotより前であり、transaction transitionがsnapshot直後〜`after`間で起きるraceを許さない
+- `_poll_once`で`_last_poll_before = before`を各poll末尾に保存
+- `get_transactions`に`end_lower > end_upper` fail-closed invariant追加
 
-### F1 — Critical: A/Bを対象Jobのexact child/backendへ一意に相関していない
-**File:** `s2_cr08_canonical.py` (TransactionCollector)
-- Added `set_job_ids()` method to register Job A/B IDs for correlation
-- `_poll_once()` now tracks A/B transactions by exact child PID:
-  - First new transaction after A enqueued → marked as Job A's child
-  - Second distinct transaction (different PID or new xact_start on same PID) → marked as Job B's child
-  - Tracks `_a_child_pid`, `_b_child_pid`, `_a_xact_start`, `_b_xact_start`, start/end bounds
-- `get_transactions()` returns tracked A/B info with exact child PID, port, xact_start, bounds
-- Fail-closed: if A/B not uniquely correlated, falls back to first two START events
+### F2 — unrelated END false completion (confirmed in previous review)
 
-### F2 — Critical: transaction boundsがDB snapshotをbracketせず、baselineも未使用
-**File:** `s2_cr08_canonical.py` (TransactionCollector)
-- `_poll_once()` now properly brackets each DB snapshot:
-  - `before = _db_clock()` → `poll_active_backends()` → `after = _db_clock()`
-  - Both `before/after` used for START/END event bounds
-- Baseline exclusion implemented:
-  - `capture_baseline()` stores worker child ports in `self._baseline`
-  - `_poll_once()` skips START events for backends present in baseline
-  - Baseline transactions still tracked in `_current_backends` for END detection
+- `wait_for_completion`: event scanning → `_a_xact_end_verified and _b_xact_end_verified`
+- observer shim `transaction_completed`: event `xs in ends` → `_a_xact_end_verified`
+- `test_shim_transaction_completed_after_assignment`: raw event append → production `_track_ab_disappearance`呼出
 
-### F3 — Critical: live final gateが未構築でcleanup/recovery failureを成功から除外できない
-**File:** `measure_s2_cr08_canonical.py`
-- Added explicit final gate computation before `live_verification` enrichment:
-  - `job_a_ok`, `job_b_ok` from `_verify_job_safe()`
-  - `obs_a_ok`, `obs_b_ok` from observer shim properties
-  - `transactions_distinct` check (xact_start distinct)
-  - `metrics_ok`, `metrics_alive_ok`, `coverage_ok` from evidence
-  - `recovery_ok` from `all(r.get("success") for r in recovery_results)`
-- `all_gates_pass = all([...])` computed before enrichment
-- `measurement_status` updated to "incomplete" if gates fail
-- `failure_reason` includes all failing gate reasons
-- Running jobs monitored to completion (120s timeout) before service recovery
-- Recovery failure prevents `all_gates_pass`
+### F3 — disappearance lower bound (confirmed in previous review)
 
-### F4 — Critical: actual minimum/live evidenceはprivacy checkを通らない
-**File:** `s2_cr08_canonical.py` (PRIVACY_ALLOWLIST)
-- Added `job_hash` to allowlist for minimum evidence
-- Added all nested Job verification fields to allowlist:
-  - `succeeded`, `single_attempt`, `has_result`, `updated_master_count`, `updated_class_count`, `updated_structure_count`, `inspection_file_count`, `transaction_strategy`, `folder_warnings`, `status`
-- All `live_verification` nested fields already present
-- Minimum evidence `job_hash` field now passes privacy check
+- `_last_poll_before`新規追加（`__init__` + `_poll_once`末尾で保存）
+- disappearance END lower: `_last_poll_after` → `_last_poll_before`（snapshot前の安全側時刻）
 
-### F5 — High: cleanup failure evidenceへraw Job identifierを埋め込む
-**Files:** `measure_s2_cr08_canonical.py`, `s2_cr08_canonical.py`
-- Cleanup failure messages now use truncated SHA-256:
-  - `f"job_{_sha256(job_id)[:16]}_running_timeout"`
-  - `f"job_{_sha256(job_id)[:16]}_cleanup_error: {sanitized_error}"`
-- Imported `_sha256` from canonical module
+### F4 — START ordering assertion (confirmed in previous review)
 
-### F6 — Medium: v16修正のdirect regression testがない
-- Noted in handoff; to be implemented in next iteration
-- Required coverage:
-  - exact child correlation & ambiguous fail-closed
-  - unrelated worker transaction exclusion
-  - baseline exclusion
-  - same-port zero-gap & snapshot bracket ordering
-  - pre-arm/stop lifecycle
-  - queued CAS race & running timeout
-  - recovery failure inclusive final gate
-  - minimum + complete live enrichment privacy
-  - raw Job identifier non-emission
+- `test_start_bound_clock_ordering`: `assertIsNotNone` → `assertGreaterEqual(start_bound, xact_start)`
 
-## Test Results
+### Production code
 
-```
-canonical + measurement: PASS (100/100, 93.289s)
-job queue API + recovery: PASS (16/16, 5.075s)
-PhaseTwoMasterUpdateTests: PASS (33/33, 1.125s)
-Django check: PASS
-makemigrations --check --dry-run: PASS
-git diff --check: PASS
-```
+| Location | Change |
+|---|---|
+| `s2_cr08_canonical.py:380` | `__init__`: `_last_poll_before = None`追加 |
+| `s2_cr08_canonical.py:484-531` | `_poll_once`: `_last_poll_before = before`保存、disappearance lower = `_last_poll_before`、transition lower = `_last_poll_before` |
+| `s2_cr08_canonical.py:775-842` | `_track_ab_transactions`: 4箇所の`_last_poll_after` → `_last_poll_before` |
+| `s2_cr08_canonical.py:896-912` | `get_transactions`: A/B END bounds invariant check追加 |
 
-Total: **182/182 tests PASS**
+## New Tests (P0-2 boundary, 13 total)
 
-Dry-run executed successfully with privacy check passing.
+`TransactionCollectorCorrelationTests`クラスに追加:
 
-## `LIVE_BLOCKED`
+| # | Test | Verification |
+|---|------|-------------|
+| 1 | `test_start_bound_clock_ordering` | START bound >= xact_start |
+| 2 | `test_same_port_transition_bounds_shared_snapshot` | same-port: end_lower <= end_upper <= start_bound |
+| 3 | `test_disappearance_end_ordering` | disappearance: lower <= upper, lower = previous before |
+| 4 | `test_field_separation_xact_start_not_end` | end_lower != any xact_start (time vs xs) |
+| 5 | `test_unrelated_end_not_mixed_into_ab_target` | 無関係END eventがA/B targetを変更しない |
+| 6 | `test_wait_for_completion_timeout_raises` | timeout → RuntimeError |
+| 6b | `test_wait_for_completion_missing_end_raises` | END欠測 → RuntimeError |
+| 7 | `test_collector_stop_fail_closed` | exception保持時stop()→RuntimeError |
+| 8 | `test_poll_exception_fail_closed` | poll exception→exception伝搬 |
+| 9 | `test_ab_same_port_formal_ordering` | A/B same-port: A end_upper <= B xact_start |
+| 10 | `test_unrelated_end_completion_probe` | unrelated END/same xs: shim + wait_for_completion拒否 |
+| 11 | `test_race_xs_before_previous_after_transition` | xs_b < previous after → end_lower <= end_upper維持 |
+| 12 | `test_inverted_bounds_fail_closed_in_get_transactions` | 反転bounds → get_transactions raise RuntimeError |
 
-`LIVE_BLOCKED = True` maintained. `--live` disabled. Proceed to reviewer validation only.
+### Existing test changes
 
-## Next Action
+- `test_shim_transaction_completed_after_assignment`: raw event → production `_track_ab_disappearance`
+- `test_start_bound_clock_ordering`: is not None → assertGreaterEqual
 
-Reviewer validation of v17 fixes. If PASS, proceed to pseudoprod `--dry-run`.
+## Verification Results
+
+| Check | Result |
+|---|---|
+| TransactionCollectorCorrelationTests (39 original + 13 new) | **PASS: 52/52** |
+| 全canonical tests | **PASS: 167/167** |
+| `manage.py check` | PASS |
+| `manage.py makemigrations --check --dry-run` | No changes detected |
+| `manage.py check --deploy` | 既知のsecurity warning 6件 |
+| `LIVE_BLOCKED = True` | 維持確認 |
+
+## Scope Guard
+
+- P0 final gate、P1、P2に着手していない
+- pseudoprod dry-run/live、Job投入、service操作、backupを実行していない
+- 未承認閾値を合否判定に使用していない

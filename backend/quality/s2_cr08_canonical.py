@@ -11,6 +11,8 @@ from django.conf import settings
 from django.db import connection, close_old_connections
 from django.utils import timezone
 
+from collections import Counter
+
 from quality.s2_cr08_measurement import (
     poll_active_backends,
     _connection_pid,
@@ -18,9 +20,20 @@ from quality.s2_cr08_measurement import (
     _db_clock,
     _iso,
 )
+from quality.s2_cr08_shared import (
+    ADVISORY_LOCK_NAMESPACE,
+    ADVISORY_LOCK_MARKER_PREFIX,
+    make_advisory_lock_id,
+    make_application_name_marker,
+)
 from quality.models import Job
 
 CANONICAL_SCHEMA_VERSION = "s2-cr-08-canonical-v1"
+
+_LOCK_HELD = "HELD"
+_LOCK_NOT_HELD = "NOT_HELD"
+_LOCK_ERROR = "ERROR"
+_MAX_ERROR_CODES = 32
 
 # Known canonical baseline constants
 # Must be set from a verified canonical run with approval before --live can proceed.
@@ -35,7 +48,7 @@ CANONICAL_BASELINE_EXPECTED_STRUCTURE_COUNT = -1
 
 def _worker_child_client_ports_recursive(worker_service_name, db_port=None):
     """Discover TCP client ports of worker child processes via recursive Windows process tree.
-    Returns list of (child_pid, local_port) tuples.
+    Returns list of (child_pid, local_addr, local_port) tuples.
     Returns empty list on any failure (no worker, no children, no DB connections).
     """
     if db_port is None:
@@ -63,7 +76,7 @@ foreach ($child in $allDescendants) {
     $connections = Get-NetTCPConnection -OwningProcess $child.ProcessId -ErrorAction SilentlyContinue |
         Where-Object { $_.RemotePort -eq $env:DB_PORT -and $_.State -eq 'Established' }
     foreach ($conn in $connections) {
-        $result += [PSCustomObject]@{ ChildPid = $child.ProcessId; LocalPort = $conn.LocalPort }
+        $result += [PSCustomObject]@{ ChildPid = $child.ProcessId; LocalAddress = $conn.LocalAddress; LocalPort = $conn.LocalPort }
     }
 }
 if ($result.Count -eq 0) { exit 1 }
@@ -77,8 +90,8 @@ return $result | ConvertTo-Json -Compress
         import json as _json
         data = _json.loads(result.stdout.strip())
         if isinstance(data, dict):
-            return [(int(data["ChildPid"]), int(data["LocalPort"]))]
-        return [(int(d["ChildPid"]), int(d["LocalPort"])) for d in data]
+            return [(int(data["ChildPid"]), str(data.get("LocalAddress", "")), int(data["LocalPort"]))]
+        return [(int(d["ChildPid"]), str(d.get("LocalAddress", "")), int(d["LocalPort"])) for d in data]
     except (subprocess.TimeoutExpired, ValueError, json.JSONDecodeError, KeyError):
         return []
 
@@ -181,7 +194,7 @@ class ExternalWorkerObserver:
             self.correlation_unique = False
             return None
         all_unique_matches = {}
-        for pid, port in ports:
+        for pid, addr, port in ports:
             matches = _match_backend_by_client_port(port)
             active = [m for m in matches if (m["pid"], m["client_port"]) not in self._baseline]
             for m in active:
@@ -334,36 +347,88 @@ class TransactionCollector:
         self._baseline_ready = Event()
         self._baseline_ok = False
         self._collector_started = False
+        # Port tracking for Job-based correlation
+        self._all_seen_ports = set()
+        self._prev_worker_ports = set()
+        self._new_ports_since_last_poll = set()
+        self._pre_enqueue_ports = None
         # Job correlation fields
         self._a_job_id = None
         self._b_job_id = None
+        self._a_worker_id = None
+        self._b_worker_id = None
+        self._a_execution_token = None
+        self._b_execution_token = None
+        # OS child PID (from WMI process tree) - used for process ownership
+        self._a_child_os_pid = None
+        self._b_child_os_pid = None
+        # PostgreSQL backend PID (from pg_stat_activity) - used for transaction tracking
         self._a_child_pid = None
+        self._a_child_port = None
         self._b_child_pid = None
+        self._b_child_port = None
         self._a_xact_start = None
         self._b_xact_start = None
-        self._a_xact_end = None
-        self._b_xact_end = None
+        self._a_xact_end_lower = None
+        self._a_xact_end_upper = None
+        self._b_xact_end_lower = None
+        self._b_xact_end_upper = None
+        self._a_xact_end_verified = False
+        self._b_xact_end_verified = False
         self._a_start_bound = None
         self._b_start_bound = None
+        self._last_poll_before = None
+        self._last_poll_after = None
+        # Assignment state machine (IDLE/COLLECTING/ASSIGNED/FAILED)
+        self._a_state = "IDLE"
+        self._a_candidates = set()
+        self._a_collection_remaining = 0
+        self._b_state = "IDLE"
+        self._b_candidates = set()
+        self._b_collection_remaining = 0
+        # Error tracking (F8: bounded dict with counter)
+        self._error_codes = {}
+        # Addr mapping for (pid, port) → local_addr (F3)
+        self._addr_map = {}
 
     def _get_worker_child_ports(self):
         """Get set of (pid, port) for worker child processes."""
         db_port = connection.settings_dict.get("PORT", "5432")
         ports = _worker_child_client_ports_recursive(self.worker_service_name, db_port=db_port)
-        return {(pid, port) for pid, port in ports} if ports else set()
+        if not ports:
+            return set()
+        self._addr_map = {(pid, port): addr for pid, addr, port in ports}
+        return {(pid, port) for pid, _, port in ports}
 
     def set_job_ids(self, a_job_id, b_job_id):
-        """Set Job A and B IDs for transaction correlation."""
+        """Set Job A and B IDs for transaction correlation via Job ownership.
+        Freezes pre-enqueue ports so that only ports appearing after enqueue
+        (subprocesses spawned by worker claim) are considered for A/B assignment.
+        """
         self._a_job_id = a_job_id
         self._b_job_id = b_job_id
+        self._pre_enqueue_ports = self._all_seen_ports.copy()
 
     def capture_baseline(self):
-        """Capture baseline of worker child backends before services start."""
+        """Capture baseline of worker child backends before services start.
+        Stores (pid, client_port, xact_start) triples for exact identity matching.
+        """
         worker_ports = self._get_worker_child_ports()
-        self._baseline = worker_ports
+        current = poll_active_backends()
+        self._baseline = set()
+        for _, port in worker_ports:
+            xs = None
+            pg_pid = None
+            for b in current:
+                if b["client_port"] == port:
+                    pg_pid = b["pid"]
+                    xs = b.get("xact_start")
+                    break
+            if pg_pid is not None:
+                self._baseline.add((pg_pid, port, xs))
         self._baseline_ok = True
         self._baseline_ready.set()
-        return len(self._baseline)
+        return len(worker_ports)
 
     def pre_arm(self):
         """Start collector thread immediately - non-blocking."""
@@ -387,10 +452,8 @@ class TransactionCollector:
     def _collect_loop(self):
         close_old_connections()
         try:
-            # Wait a moment for services to start, then baseline
-            time.sleep(1)
-            self.capture_baseline()
-
+            # Baseline is captured externally by the command before pre_arm().
+            # The thread polls immediately without overwriting baseline.
             while not self._stop.is_set():
                 self._poll_once()
                 self._stop.wait(self.poll_seconds)
@@ -400,128 +463,490 @@ class TransactionCollector:
 
     def _poll_once(self):
         """Poll worker child backends and detect transaction transitions.
+        Tracks new worker ports, checks Job claim status for A/B correlation,
+        and records START/END events.
 
-        Each poll brackets the DB snapshot: clock -> poll_active_backends -> clock.
-        Baseline transactions (from capture_baseline) are excluded from START events.
+        OS child PID (from WMI process tree) and PostgreSQL backend PID
+        (from pg_stat_activity) are separate domains. Joining is done by
+        client_port, not by PID.
         """
+        worker_ports = self._get_worker_child_ports()
+        self._all_seen_ports.update(worker_ports)
+        self._new_ports_since_last_poll = worker_ports - self._prev_worker_ports
+        self._prev_worker_ports = worker_ports.copy()
+
+        # Build set of client_ports for pg_stat_activity join
+        _worker_client_ports = {cp for _, cp in worker_ports}
+
+        # Check Job claim status for A/B correlation via ownership
+        self._check_job_claims(worker_ports)
+
         before = _db_clock()
         current = poll_active_backends()
         after = _db_clock()
-        worker_ports = self._get_worker_child_ports()
 
-        # Filter to ONLY worker child backends with xact_start
+        # Filter to ONLY worker child backends with xact_start.
+        # Join by client_port (not PID) because OS PID and PG PID differ.
         seen = {}
         for b in current:
+            if b["client_port"] not in _worker_client_ports:
+                continue
             key = (b["pid"], b["client_port"])
-            if key not in worker_ports:
-                continue  # Ignore non-worker backends
             xs = b["xact_start"]
             if xs is not None:
                 seen[key] = xs
 
-        # Exclude baseline transactions from START events
-        baseline_xs = set()
-        if self._baseline:
-            for b in self._baseline:
-                if isinstance(b, tuple) and len(b) >= 2:
-                    # baseline is a set of (pid, port)
-                    pass
-            # Baseline is tracked as set of (pid, port) in self._baseline
-            # Any backend that was in baseline should not generate START event
-
         # Detect new transactions (START) and same-port xact_start changes
         for key, xs in seen.items():
-            # Skip if this backend was in baseline
-            if self._baseline and key in self._baseline:
-                # Update current backend tracking but don't emit START
-                if key not in self._current_backends:
-                    self._current_backends[key] = xs
-                continue
+            # A/B transaction tracking from owned ports (always, regardless of baseline)
+            self._track_ab_transactions(key, xs, before, after)
+
+            # Baseline check for event emission
+            if self._baseline:
+                baseline_key = (key[0], key[1], xs)
+                if baseline_key in self._baseline:
+                    if key not in self._current_backends:
+                        self._current_backends[key] = xs
+                    continue
 
             if key not in self._current_backends:
-                # New backend with transaction - START
                 self._events.append(("START", key[0], key[1], xs, before, after))
                 self._current_backends[key] = xs
-
-                # Correlate to Job A or B if we're tracking them
-                pid = key[0]
-                if self._a_job_id is not None and self._a_child_pid is None and self._a_xact_start is None:
-                    # First transaction after A was enqueued
-                    self._a_child_pid = pid
-                    self._a_xact_start = xs
-                    self._a_start_bound = before
-                elif self._b_job_id is not None and self._b_child_pid is None and self._b_xact_start is None:
-                    # Second transaction after B was enqueued
-                    if pid != self._a_child_pid or xs != self._a_xact_start:
-                        self._b_child_pid = pid
-                        self._b_xact_start = xs
-                        self._b_start_bound = before
             else:
-                # Existing backend - check for xact_start change (zero-gap transition)
                 old_xs = self._current_backends[key]
                 if xs != old_xs:
-                    # xact_start changed - previous transaction ended, new one started
-                    # Emit END for old, START for new
                     self._events.append(("END", key[0], key[1], old_xs, before, after))
                     self._events.append(("START", key[0], key[1], xs, before, after))
                     self._current_backends[key] = xs
-
-                    # Track transition for A or B
-                    pid = key[0]
-                    if self._a_xact_start is not None and pid == self._a_child_pid and self._a_xact_end is None:
-                        self._a_xact_end = old_xs
-                    elif self._b_xact_start is not None and pid == self._b_child_pid and self._b_xact_end is None:
-                        self._b_xact_end = old_xs
 
         # Detect ended transactions (backend disappeared)
         for key in list(self._current_backends.keys()):
             if key not in seen:
                 xs = self._current_backends.pop(key)
-                before = _db_clock()
-                after = _db_clock()
-                self._events.append(("END", key[0], key[1], xs, before, after))
+                end_lower = self._last_poll_before or before
+                end_upper = after
+                self._track_ab_disappearance(key, xs, end_lower, end_upper)
+                self._events.append(("END", key[0], key[1], xs, end_lower, end_upper))
+        self._last_poll_before = before
+        self._last_poll_after = after
 
-                # Track end for A or B
-                pid = key[0]
-                if self._a_xact_start is not None and pid == self._a_child_pid and self._a_xact_end is None:
-                    self._a_xact_end = xs
-                elif self._b_xact_start is not None and pid == self._b_child_pid and self._b_xact_end is None:
-                    self._b_xact_end = xs
+    @staticmethod
+    def _verify_child_process(pid, job_id, worker_id=""):
+        """Verify that the process with PID is an execute_claimed_job for the given job_id
+        and worker_id. Checks the process command line via WMI. Returns True only if the
+        command line contains 'execute_claimed_job' followed by the exact job_id argument
+        and '--worker-id' followed by the exact worker_id argument.
+        Fail-closed: returns False on any error.
+        """
+        try:
+            result = subprocess.run(
+                ["powershell", "-Command",
+                 f"Get-CimInstance Win32_Process -Filter 'ProcessId={pid}' | Select-Object -ExpandProperty CommandLine"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode != 0:
+                return False
+            cmdline = result.stdout.strip()
+            parts = cmdline.split()
+            found_job = False
+            found_worker = False
+            for i, p in enumerate(parts):
+                if p == "execute_claimed_job" and i + 1 < len(parts) and parts[i + 1] == job_id:
+                    found_job = True
+                if p == "--worker-id" and i + 1 < len(parts):
+                    if worker_id and parts[i + 1] == worker_id:
+                        found_worker = True
+                    elif not worker_id:
+                        found_worker = True
+            return found_job and found_worker
+        except Exception:
+            return False
+
+    def _check_job_claims(self, worker_ports):
+        """Detect Job ownership from execution tokens and accumulate port candidates.
+        State machine per job: IDLE → COLLECTING → ASSIGNED | FAILED.
+
+        COLLECTING uses a bounded window (_collection_remaining polls). Only PIDs
+        whose command line matches `execute_claimed_job <job_id>` are admitted.
+        When the window closes:
+          - 1 → ASSIGNED (immutable)
+          - 0 at deadline → FAILED; 0 before deadline → keeps waiting
+          - 2+ → FAILED
+        """
+        from quality.models import Job
+        try:
+            close_old_connections()
+            pre = self._pre_enqueue_ports or set()
+
+            def _active_assigned_ports():
+                s = set()
+                if self._a_state == "ASSIGNED" and self._a_child_os_pid is not None and self._a_xact_end_lower is None:
+                    s.add((self._a_child_os_pid, self._a_child_port))
+                if self._b_state == "ASSIGNED" and self._b_child_os_pid is not None and self._b_xact_end_lower is None:
+                    s.add((self._b_child_os_pid, self._b_child_port))
+                return s
+
+            def _collect(job_id, worker_id, cand_attr, rem_attr):
+                current = getattr(self, cand_attr)
+                raw = self._new_ports_since_last_poll - pre - _active_assigned_ports() if current else (worker_ports - pre - _active_assigned_ports())
+                verified = {(p, pt) for p, pt in raw if self._verify_child_process(p, job_id, worker_id)}
+                current.update(verified)
+                setattr(self, cand_attr, current)
+                rem = getattr(self, rem_attr)
+                if current and rem == 0:
+                    setattr(self, rem_attr, 1)
+                    return False
+                if rem > 0:
+                    rem -= 1
+                    setattr(self, rem_attr, rem)
+                    if rem == 0:
+                        return True
+                return False
+
+            # ── Job A ──
+            if self._a_job_id is not None and self._a_state == "IDLE":
+                try:
+                    job = Job.objects.get(job_id=self._a_job_id)
+                    if (job.status == Job.Status.RUNNING
+                            and job.worker_id
+                            and job.execution_token):
+                        self._a_state = "COLLECTING"
+                        self._a_worker_id = job.worker_id
+                        self._a_execution_token = job.execution_token
+                        self._a_collection_remaining = 0
+                except Job.DoesNotExist:
+                    self._add_error_code("A_job_not_found")
+
+            if self._a_state == "COLLECTING":
+                if _collect(self._a_job_id, self._a_worker_id, "_a_candidates", "_a_collection_remaining"):
+                    self._resolve_candidates(self, "A", worker_ports)
+
+            # ── Job B (processed after A) ──
+            if self._b_job_id is not None and self._b_state == "IDLE":
+                try:
+                    job = Job.objects.get(job_id=self._b_job_id)
+                    if (job.status == Job.Status.RUNNING
+                            and job.worker_id
+                            and job.execution_token):
+                        self._b_state = "COLLECTING"
+                        self._b_worker_id = job.worker_id
+                        self._b_execution_token = job.execution_token
+                        self._b_collection_remaining = 0
+                except Job.DoesNotExist:
+                    self._add_error_code("B_job_not_found")
+
+            if self._b_state == "COLLECTING":
+                if _collect(self._b_job_id, self._b_worker_id, "_b_candidates", "_b_collection_remaining"):
+                    self._resolve_candidates(self, "B", worker_ports)
+
+            # ── Post-ASSIGNMENT monitoring ──
+            # After ASSIGNED, verify execution token still matches.
+            # If the Job reached a terminal state (SUCCEEDED/FAILED), the
+            # token clear is a normal terminal transition, not a failure.
+            if self._a_state == "ASSIGNED" and self._a_job_id is not None:
+                try:
+                    job = Job.objects.get(job_id=self._a_job_id)
+                    if job.status in (Job.Status.SUCCEEDED, Job.Status.FAILED):
+                        pass
+                    elif job.execution_token != self._a_execution_token:
+                        self._a_state = "FAILED"
+                        self._add_error_code("A_token_changed")
+                except Job.DoesNotExist:
+                    self._a_state = "FAILED"
+                    self._add_error_code("A_job_gone")
+                # Also detect new ports from same OS PID (F2 ambiguity)
+                if (self._a_state == "ASSIGNED" and self._a_child_os_pid is not None
+                        and not self._a_xact_end_verified):
+                    same_pid_new = {(p, pt) for p, pt in worker_ports
+                                    if p == self._a_child_os_pid and pt != self._a_child_port}
+                    if same_pid_new:
+                        self._a_state = "FAILED"
+                        self._a_candidates.update(same_pid_new)
+                        self._add_error_code("A_same_pid_new_port")
+            if self._b_state == "ASSIGNED" and self._b_job_id is not None:
+                try:
+                    job = Job.objects.get(job_id=self._b_job_id)
+                    if job.status in (Job.Status.SUCCEEDED, Job.Status.FAILED):
+                        pass
+                    elif job.execution_token != self._b_execution_token:
+                        self._b_state = "FAILED"
+                        self._add_error_code("B_token_changed")
+                except Job.DoesNotExist:
+                    self._b_state = "FAILED"
+                    self._add_error_code("B_job_gone")
+                if (self._b_state == "ASSIGNED" and self._b_child_os_pid is not None
+                        and not self._b_xact_end_verified):
+                    same_pid_new = {(p, pt) for p, pt in worker_ports
+                                    if p == self._b_child_os_pid and pt != self._b_child_port}
+                    if same_pid_new:
+                        self._b_state = "FAILED"
+                        self._b_candidates.update(same_pid_new)
+                        self._add_error_code("B_same_pid_new_port")
+
+        except Exception as e:
+            self._add_error_code(f"check_job_claims_error:{type(e).__name__}")
+
+    @staticmethod
+    def _resolve_candidates(instance, label, worker_ports=None):
+        """Check candidate count and transition state.
+        Exactly 1 → ASSIGNED with (os_pid, port) and PG backend PID.
+        0 → keep COLLECTING. 2+ → FAILED.
+
+        Stores OS PID as `_child_os_pid` (from WMI process tree).
+        Looks up PostgreSQL backend PID from active backends by
+        (client_addr, client_port) when candidate addr is available
+        via _addr_map, falling back to client_port-only join.
+        """
+        lo = label.lower()
+        os_pid_field = f"_{lo}_child_os_pid"
+        pg_pid_field = f"_{lo}_child_pid"
+        port_field = f"_{lo}_child_port"
+        state_field = f"_{lo}_state"
+        candidates_field = f"_{lo}_candidates"
+
+        candidates = getattr(instance, candidates_field)
+        if len(candidates) == 1:
+            os_pid, port = next(iter(candidates))
+            setattr(instance, os_pid_field, os_pid)
+            setattr(instance, port_field, port)
+            addr = getattr(instance, '_addr_map', {}).get((os_pid, port), "")
+            # Look up PostgreSQL backend PID by (client_addr, client_port).
+            # OS PID and PG PID are separate domains — never fallback.
+            # Require exactly 1 match; 0 or 2+ → FAILED.
+            # Address missing → fail closed (F5).
+            if not addr:
+                instance._add_error_code(f"{label}_addr_missing")
+                setattr(instance, state_field, "FAILED")
+                return
+            try:
+                current = poll_active_backends()
+                pg_backends = [b for b in current
+                               if b["client_port"] == port
+                               and str(b.get("client_addr") or "") == addr]
+                if len(pg_backends) == 1:
+                    setattr(instance, pg_pid_field, pg_backends[0]["pid"])
+                    setattr(instance, state_field, "ASSIGNED")
+                elif len(pg_backends) > 1:
+                    instance._add_error_code(f"{label}_pg_match_ambiguous")
+                    setattr(instance, state_field, "FAILED")
+                else:
+                    instance._add_error_code(f"{label}_pg_match_not_found")
+                    setattr(instance, state_field, "FAILED")
+            except Exception:
+                instance._add_error_code(f"{label}_pg_lookup_error")
+                setattr(instance, state_field, "FAILED")
+        elif len(candidates) > 1:
+            setattr(instance, state_field, "FAILED")
+
+    def _check_advisory_lock(self, pid, job_id, execution_token=""):
+        """Check if the backend with PID holds the advisory lock for the target job (F3/F4).
+        Returns HELD / NOT_HELD / ERROR — never collapses errors to False.
+        Uses two-arg advisory lock (namespace=42, objsubid=2) + application_name marker (F1/F6).
+        """
+        try:
+            lock_id = make_advisory_lock_id(job_id, execution_token)
+            with connection.cursor() as cursor:
+                cursor.execute("""
+                    SELECT 1 FROM pg_locks
+                    WHERE locktype = 'advisory'
+                      AND pid = %s AND classid = %s AND objid = %s AND objsubid = 2 AND granted
+                """, [pid, ADVISORY_LOCK_NAMESPACE, lock_id])
+                if cursor.fetchone() is None:
+                    return _LOCK_NOT_HELD
+                # Secondary verification: check application_name marker (F6)
+                expected_app = make_application_name_marker(job_id, execution_token)
+                cursor.execute("""
+                    SELECT 1 FROM pg_stat_activity
+                    WHERE pid = %s AND application_name = %s
+                """, [pid, expected_app])
+                return _LOCK_HELD if cursor.fetchone() is not None else _LOCK_NOT_HELD
+        except Exception:
+            return _LOCK_ERROR
+
+    def _add_error_code(self, code):
+        """Bounded error code storage (F8/F5).
+        Existing codes always increment. New codes are capped at _MAX_ERROR_CODES distinct codes.
+        """
+        if code in self._error_codes:
+            self._error_codes[code] += 1
+        elif len(self._error_codes) < _MAX_ERROR_CODES:
+            self._error_codes[code] = 1
+
+    def _track_ab_transactions(self, key, xs, before, after):
+        """Track A/B transaction state from owned child ports using exact (pid, port).
+        Called for each seen backend on every poll, regardless of baseline.
+        Records xact_start and detects END when transaction changes on owned port.
+        Same-port transition: old END upper bound = new xs (definitive end before new start).
+        Lower bound = _last_poll_before (previous poll's before, safe from race with after).
+
+        Uses pg_advisory_xact_lock marker set by services.run_job() during the
+        main work transaction. Target assignment requires POSITIVE marker observation:
+        - First xact_start is never accepted without advisory lock (F1).
+        - Transaction transitions only declare target END when a lock state is observed (F2).
+        - Query errors fail closed via tri-state HELD/NOT_HELD/ERROR (F3).
+        - Marker includes execution_token for attempt-unique identity (F4).
+        """
+        # Track A
+        if (self._a_state == "ASSIGNED" and self._a_child_pid == key[0]
+                and self._a_child_port == key[1]):
+            if self._a_xact_start is None:
+                lock_state = self._check_advisory_lock(key[0], self._a_job_id, self._a_execution_token)
+                if lock_state == _LOCK_HELD:
+                    self._a_xact_start = xs
+                    self._a_start_bound = before
+                elif lock_state == _LOCK_ERROR:
+                    self._a_state = "FAILED"
+                    self._add_error_code("A_advisory_lock_error")
+            elif xs != self._a_xact_start:
+                if self._a_xact_end_lower is None:
+                    lock_state = self._check_advisory_lock(key[0], self._a_job_id, self._a_execution_token)
+                    if lock_state == _LOCK_HELD:
+                        self._a_xact_end_lower = self._last_poll_before or before
+                        self._a_xact_end_upper = xs
+                        self._a_xact_end_verified = True
+                        self._a_xact_start = xs
+                        self._a_start_bound = before
+                    elif lock_state == _LOCK_NOT_HELD:
+                        self._a_xact_end_lower = self._last_poll_before or before
+                        self._a_xact_end_upper = xs
+                        self._a_xact_end_verified = True
+                    else:
+                        self._a_state = "FAILED"
+                        self._add_error_code("A_advisory_lock_error")
+        # Track B
+        if (self._b_state == "ASSIGNED" and self._b_child_pid == key[0]
+                and self._b_child_port == key[1]):
+            if self._b_xact_start is None:
+                lock_state = self._check_advisory_lock(key[0], self._b_job_id, self._b_execution_token)
+                if lock_state == _LOCK_HELD:
+                    self._b_xact_start = xs
+                    self._b_start_bound = before
+                elif lock_state == _LOCK_ERROR:
+                    self._b_state = "FAILED"
+                    self._add_error_code("B_advisory_lock_error")
+            elif xs != self._b_xact_start:
+                if self._b_xact_end_lower is None:
+                    lock_state = self._check_advisory_lock(key[0], self._b_job_id, self._b_execution_token)
+                    if lock_state == _LOCK_HELD:
+                        self._b_xact_end_lower = self._last_poll_before or before
+                        self._b_xact_end_upper = xs
+                        self._b_xact_end_verified = True
+                        self._b_xact_start = xs
+                        self._b_start_bound = before
+                    elif lock_state == _LOCK_NOT_HELD:
+                        self._b_xact_end_lower = self._last_poll_before or before
+                        self._b_xact_end_upper = xs
+                        self._b_xact_end_verified = True
+                    else:
+                        self._b_state = "FAILED"
+                        self._add_error_code("B_advisory_lock_error")
+
+    def _track_ab_disappearance(self, key, xs, end_lower, end_upper):
+        """Track A/B END when owned backend disappears using exact (pid, port).
+        Only records END when target START was confirmed by positive marker (F2).
+        Requires xs matches saved _a_xact_start to ensure we end the correct transaction.
+        Uses end_lower (last observed poll after) and end_upper (current poll after)
+        as disappearance bounds (P0-2 #5).
+        """
+        if (self._a_state == "ASSIGNED" and self._a_child_pid == key[0]
+                and self._a_child_port == key[1] and self._a_xact_end_lower is None
+                and self._a_xact_start is not None and xs == self._a_xact_start):
+            self._a_xact_end_lower = end_lower
+            self._a_xact_end_upper = end_upper
+            self._a_xact_end_verified = True
+        if (self._b_state == "ASSIGNED" and self._b_child_pid == key[0]
+                and self._b_child_port == key[1] and self._b_xact_end_lower is None
+                and self._b_xact_start is not None and xs == self._b_xact_start):
+            self._b_xact_end_lower = end_lower
+            self._b_xact_end_upper = end_upper
+            self._b_xact_end_verified = True
 
     def get_transactions(self, timeout=120):
-        """Wait for and return A/B transaction info in temporal order.
+        """Wait for and return A/B transaction info determined by Job ownership.
+
+        Collector uses a state machine per job: IDLE → COLLECTING → ASSIGNED/FAILED.
+        Assignment requires exactly 1 port candidate per job, verified via
+        execution ownership (worker_id + execution_token non-empty) and
+        exact (pid, port) backend identity.
+
+        Raises RuntimeError on:
+        - timeout (A/B not both ASSIGNED within deadline)
+        - FAILED state (0 or 2+ candidates for either job)
+        - A/B port collision
 
         Returns (a_info, b_info) where each is (pid, port, xact_start, start_bound, end_bound)
         """
         deadline = time.time() + timeout
         while time.time() < deadline:
-            # Use tracked A/B if available, otherwise fall back to first two START events
-            if self._a_xact_start is not None and self._b_xact_start is not None:
-                a_port = self._get_port_for_pid(self._a_child_pid) if self._a_child_pid else None
-                b_port = self._get_port_for_pid(self._b_child_pid) if self._b_child_pid else None
-                a_info = (self._a_child_pid, a_port, self._a_xact_start, self._a_start_bound, self._a_xact_end)
-                b_info = (self._b_child_pid, b_port, self._b_xact_start, self._b_start_bound, self._b_xact_end)
-                return a_info, b_info
-            starts = [e for e in self._events if e[0] == "START"]
-            if len(starts) >= 2:
-                a = starts[0]
-                b = starts[1]
-                return a[1:], b[1:]  # (pid, port, xact_start, start_bound, end_bound)
+            if self._a_state == "FAILED" or self._b_state == "FAILED":
+                a_count = len(self._a_candidates)
+                b_count = len(self._b_candidates)
+                a_hash = _sha256(str(sorted(self._a_candidates))) if self._a_candidates else ""
+                b_hash = _sha256(str(sorted(self._b_candidates))) if self._b_candidates else ""
+                err_codes = ",".join(sorted(self._error_codes.keys()))
+                err_counts = ",".join(f"{k}:{v}" for k, v in sorted(self._error_codes.items()))
+                raise RuntimeError(
+                    f"Candidate assignment failed: "
+                    f"A_state={self._a_state}, A_cand_count={a_count}, A_cand_hash={a_hash}, "
+                    f"B_state={self._b_state}, B_cand_count={b_count}, B_cand_hash={b_hash}, "
+                    f"error_codes=[{err_codes}], errors=[{err_counts}]"
+                )
+            if self._a_state == "ASSIGNED" and self._b_state == "ASSIGNED":
+                if self._a_xact_start is not None and self._b_xact_start is not None:
+                    # Same (pid, port) is allowed for same-port sequential if
+                    # A and B have different xact_start and A ended before B started.
+                    if (self._a_child_pid, self._a_child_port) == (self._b_child_pid, self._b_child_port):
+                        if not (self._a_xact_start != self._b_xact_start
+                                and self._a_xact_end_verified
+                                and self._a_xact_end_upper <= self._b_xact_start):
+                            raise RuntimeError(
+                                f"A/B collision: same port but A end not verified "
+                                f"or ordering not satisfied"
+                            )
+                    # Invariant: END bounds must never be inverted (F1 race guard)
+                    for label, lo, hi in [("A", self._a_xact_end_lower, self._a_xact_end_upper),
+                                          ("B", self._b_xact_end_lower, self._b_xact_end_upper)]:
+                        if lo is not None and hi is not None and lo > hi:
+                            raise RuntimeError(
+                                f"{label} END bounds inverted: lower={lo} > upper={hi}"
+                            )
+                    a_info = (self._a_child_pid, self._a_child_port, self._a_xact_start,
+                              self._a_start_bound, self._a_xact_end_lower, self._a_xact_end_upper)
+                    b_info = (self._b_child_pid, self._b_child_port, self._b_xact_start,
+                              self._b_start_bound, self._b_xact_end_lower, self._b_xact_end_upper)
+                    return a_info, b_info
             time.sleep(0.1)
-        raise RuntimeError("Timed out waiting for two distinct transaction START events")
+        a_count = len(self._a_candidates)
+        b_count = len(self._b_candidates)
+        a_hash = _sha256(str(sorted(self._a_candidates))) if self._a_candidates else ""
+        b_hash = _sha256(str(sorted(self._b_candidates))) if self._b_candidates else ""
+        err_codes = ",".join(sorted(self._error_codes.keys()))
+        err_counts = ",".join(f"{k}:{v}" for k, v in sorted(self._error_codes.items()))
+        raise RuntimeError(
+            f"Timed out waiting for A/B transactions. "
+            f"A_state={self._a_state}, A_cand_count={a_count}, A_cand_hash={a_hash}, "
+            f"B_state={self._b_state}, B_cand_count={b_count}, B_cand_hash={b_hash}, "
+            f"error_codes=[{err_codes}], errors=[{err_counts}]"
+        )
 
     def wait_for_completion(self, a_event, b_event, timeout=120):
-        """Wait for both transactions to complete (END events)."""
-        a_xs, b_xs = a_event[2], b_event[2]
+        """Wait for both transactions to complete via verified END state.
+        Uses _xact_end_verified per target identity (pid, port, xact_start, marker).
+        Raises RuntimeError on timeout — caller must treat as failure (P0-2 #7).
+        """
         deadline = time.time() + timeout
         while time.time() < deadline:
-            ends = {e[3] for e in self._events if e[0] == "END"}
-            if a_xs in ends and b_xs in ends:
+            if self._a_xact_end_verified and self._b_xact_end_verified:
                 return True
             time.sleep(0.5)
-        return False
+        raise RuntimeError(
+            f"wait_for_completion timed out after {timeout}s: "
+            f"A verified={self._a_xact_end_verified}, "
+            f"B verified={self._b_xact_end_verified}"
+        )
 
     def stop(self):
+        """Stop collector thread. Fail-closed: raises on join timeout or internal exception (P0-2 #8)."""
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=30)
@@ -536,24 +961,45 @@ class TransactionCollector:
         class Shim:
             def __init__(self, collector):
                 self._collector = collector
+            def stop(self):
+                """No-op: the collector manages the thread lifetime."""
+                pass
             @property
             def xact_start(self):
-                starts = [e for e in self._collector._events if e[0] == "START"]
-                return starts[0][3] if starts else None
+                return self._collector._a_xact_start
             @property
             def transaction_completed(self):
-                ends = {e[3] for e in self._collector._events if e[0] == "END"}
-                starts = [e for e in self._collector._events if e[0] == "START"]
-                if not starts: return False
-                return starts[0][3] in ends
+                return self._collector._a_xact_end_verified
             @property
-            def correlation_unique(self): return True
+            def correlation_unique(self):
+                return self._collector._a_xact_start is not None and self._collector._b_xact_start is not None
             @property
-            def observation_ok(self): return True
+            def observation_ok(self):
+                return self.transaction_completed
             @property
             def _target_client_port(self):
-                starts = [e for e in self._collector._events if e[0] == "START"]
-                return starts[0][2] if starts else None
+                return self._collector._a_child_port
+            @property
+            def end_lower_bound(self):
+                return self._collector._a_xact_end_lower
+            @property
+            def end_upper_bound(self):
+                return self._collector._a_xact_end_upper
+            @property
+            def backend_hash(self):
+                return None
+            @property
+            def poll_count(self):
+                return 0
+            @property
+            def correlation_method(self):
+                return None
+            @property
+            def correlation_candidate_count(self):
+                return 0
+            @property
+            def correlation_unique_shim(self):
+                return False
         return Shim(self)
 
     @property
@@ -561,24 +1007,45 @@ class TransactionCollector:
         class Shim:
             def __init__(self, collector):
                 self._collector = collector
+            def stop(self):
+                """No-op: the collector manages the thread lifetime."""
+                pass
             @property
             def xact_start(self):
-                starts = [e for e in self._collector._events if e[0] == "START"]
-                return starts[1][3] if len(starts) > 1 else None
+                return self._collector._b_xact_start
             @property
             def transaction_completed(self):
-                ends = {e[3] for e in self._collector._events if e[0] == "END"}
-                starts = [e for e in self._collector._events if e[0] == "START"]
-                if len(starts) < 2: return False
-                return starts[1][3] in ends
+                return self._collector._b_xact_end_verified
             @property
-            def correlation_unique(self): return True
+            def correlation_unique(self):
+                return self._collector._a_xact_start is not None and self._collector._b_xact_start is not None
             @property
-            def observation_ok(self): return True
+            def observation_ok(self):
+                return self.transaction_completed
             @property
             def _target_client_port(self):
-                starts = [e for e in self._collector._events if e[0] == "START"]
-                return starts[1][2] if len(starts) > 1 else None
+                return self._collector._b_child_port
+            @property
+            def end_lower_bound(self):
+                return self._collector._b_xact_end_lower
+            @property
+            def end_upper_bound(self):
+                return self._collector._b_xact_end_upper
+            @property
+            def backend_hash(self):
+                return None
+            @property
+            def poll_count(self):
+                return 0
+            @property
+            def correlation_method(self):
+                return None
+            @property
+            def correlation_candidate_count(self):
+                return 0
+            @property
+            def correlation_unique_shim(self):
+                return False
         return Shim(self)
 
 # Backward compatibility alias
@@ -1435,7 +1902,8 @@ def _privacy_check_passed(evidence):
 
 def _privacy_safe_str(text, replacement="[REDACTED]"):
     """Redact sensitive information from strings.
-    Redacts: denylist keys, Windows paths, UNC paths, POSIX paths.
+    Redacts: denylist keys, Windows paths, UNC paths, POSIX paths,
+    and numeric (pid, port) tuples.
     """
     result = text
     # Redact denylist keys
@@ -1449,6 +1917,8 @@ def _privacy_safe_str(text, replacement="[REDACTED]"):
     result = re.sub(r'\\\\[^\\\s]+(\\[^\\\s]+)+', replacement, result)
     # Redact POSIX paths (/path/...)
     result = re.sub(r'/[^\s]+', replacement, result)
+    # Redact numeric (pid, port) tuples
+    result = re.sub(r'\(\d+,\s*\d+\)', replacement, result)
     return result
 
 

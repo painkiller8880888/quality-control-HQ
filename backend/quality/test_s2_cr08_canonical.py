@@ -5,12 +5,13 @@ from unittest.mock import patch
 
 from django.core.management import call_command
 from django.core.management.base import CommandError
-from django.db import connection
+from django.db import connection, transaction
 from django.test import TransactionTestCase, override_settings
 from django.utils import timezone
 
 from quality.s2_cr08_canonical import (
     ExternalWorkerObserver,
+    TransactionCollector,
     SystemMetricsMonitor,
     build_canonical_evidence,
     _backend_baseline,
@@ -39,10 +40,14 @@ from quality.s2_cr08_canonical import (
     _verify_job_result,
     _verify_canonical_payload,
     _execute_live_backup,
+    _LOCK_HELD,
+    _LOCK_NOT_HELD,
+    _LOCK_ERROR,
 )
 from quality.s2_cr08_measurement import (
     _connection_pid,
     _backend_hash,
+    poll_active_backends,
 )
 from quality.models import Job, AppSetting
 
@@ -550,6 +555,12 @@ class PrivacyFilterExtendedTests(TransactionTestCase):
         issues = _privacy_filter(evidence)
         self.assertEqual(issues, [])
 
+    def test_privacy_safe_str_redacts_pid_port_tuple(self):
+        safe = _privacy_safe_str("A_candidates={(100, 200), (101, 201)}")
+        self.assertNotIn("(100, 200)", safe)
+        self.assertNotIn("(101, 201)", safe)
+        self.assertIn("[REDACTED]", safe)
+
 
 class SystemMetricsMonitorTests(TransactionTestCase):
     @require_postgresql
@@ -1013,3 +1024,1509 @@ class BackupEvidencePrivacyTests(TransactionTestCase):
         evidence = build_canonical_evidence(run_mode="live", backup_evidence=backup)
         ok, issues = _privacy_check_passed(evidence)
         self.assertTrue(ok, msg=f"Privacy issues on failed backup evidence: {issues}")
+
+
+class TransactionCollectorCorrelationTests(TransactionTestCase):
+    """P0-1: Direct tests for TransactionCollector A/B correlation via Job ownership.
+    Tests cover reviewer findings F1–F5 and probes.
+    """
+
+    def setUp(self):
+        self.collector = TransactionCollector(poll_seconds=0.1)
+        self.job_a = Job.objects.create(
+            job_id="test-job-a",
+            job_type=Job.JobType.MASTER_UPDATE,
+            status=Job.Status.RUNNING,
+            worker_id="worker-1",
+            execution_token="tok-a",
+        )
+        self.job_b = Job.objects.create(
+            job_id="test-job-b",
+            job_type=Job.JobType.MASTER_UPDATE,
+            status=Job.Status.RUNNING,
+            worker_id="worker-1",
+            execution_token="tok-b",
+        )
+        # Map mock OS PIDs to their owner job_ids.
+        # OS PID and PostgreSQL PID are separate domains (F1).
+        # _verify_child_process is called with OS PID from WMI process tree.
+        self._pid_to_job = {}
+        self._vp = patch.object(TransactionCollector, '_verify_child_process',
+                                side_effect=lambda pid, job_id, worker_id="": self._pid_to_job.get(pid) == job_id)
+        self._vp.start()
+        # Mock advisory lock check to return HELD by default (F1/F3).
+        # Individual tests can override with specific side effects.
+        self._lock_patch = patch.object(TransactionCollector, '_check_advisory_lock',
+                                        return_value=_LOCK_HELD)
+        self._lock_patch.start()
+
+    def _register_pid(self, pid, job_id):
+        """Register OS PID mapping for _verify_child_process mock."""
+        self._pid_to_job[pid] = job_id
+
+    def tearDown(self):
+        self._vp.stop()
+        self._lock_patch.stop()
+        if self.collector._thread and self.collector._thread.is_alive():
+            self.collector.stop()
+
+    def _make_event(self, etype, pid, port, xs):
+        now = timezone.now()
+        return (etype, pid, port, xs, now, now)
+
+    def _simulate_poll(self, worker_ports, backends, set_addr_map=True):
+        """Run a single _poll_once cycle with given ports and backends.
+        Adds default client_addr to backends if not present (F5).
+        Auto-populates _addr_map for worker ports when set_addr_map=True.
+        """
+        if set_addr_map:
+            for pid, port in worker_ports:
+                if (pid, port) not in self.collector._addr_map:
+                    self.collector._addr_map[(pid, port)] = "127.0.0.1"
+        enriched = []
+        for b in backends:
+            if "client_addr" not in b:
+                b = dict(b, client_addr="127.0.0.1")
+            enriched.append(b)
+        with patch.object(self.collector, '_get_worker_child_ports', return_value=worker_ports):
+            with patch('quality.s2_cr08_canonical.poll_active_backends', return_value=enriched):
+                with patch('quality.s2_cr08_canonical._db_clock', return_value=timezone.now()):
+                    self.collector._poll_once()
+
+    # ----------------------------------------------------------------
+    # Ownership (F1 fix)
+    # ----------------------------------------------------------------
+
+    def test_ownership_discovers_a_on_claim(self):
+        """F1: A's child port assigned when Job RUNNING and new port appears.
+        Uses distinct OS PID (100) and PG PID (900) to verify client_port join."""
+        self.collector.set_job_ids(self.job_a.job_id, self.job_b.job_id)
+        self._register_pid(100, "test-job-a")
+        xs = timezone.now()
+        self._simulate_poll(set(), [])
+        self._simulate_poll({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs, 'state': 'active'},
+        ])
+        # Confirmation poll: collection window closes, A ASSIGNED
+        self._simulate_poll({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs, 'state': 'active'},
+        ])
+        self.assertEqual(self.collector._a_child_os_pid, 100)
+        self.assertEqual(self.collector._a_child_pid, 900)
+        self.assertEqual(self.collector._a_child_port, 200)
+        self.assertEqual(self.collector._a_xact_start, xs)
+
+    def test_ownership_no_claim_while_pending(self):
+        """F1: No A/B assignment when Jobs are still QUEUED (not RUNNING)."""
+        self.job_a.status = Job.Status.QUEUED
+        self.job_a.save()
+        self.job_b.status = Job.Status.QUEUED
+        self.job_b.save()
+        self.collector.set_job_ids(self.job_a.job_id, self.job_b.job_id)
+        self._simulate_poll(set(), [])
+        self._simulate_poll({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': timezone.now(), 'state': 'active'},
+        ])
+        self.assertIsNone(self.collector._a_child_pid)
+        self.assertIsNone(self.collector._b_child_pid)
+
+    def test_ownership_discovers_b_after_a(self):
+        """F1: B assigned from second new port appearing after A's claim."""
+        self.collector.set_job_ids(self.job_a.job_id, self.job_b.job_id)
+        self._register_pid(100, "test-job-a")
+        self._register_pid(101, "test-job-b")
+        xs_a = timezone.now()
+        xs_b = timezone.now() + timezone.timedelta(seconds=1)
+        self._simulate_poll(set(), [])
+        self._simulate_poll({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs_a, 'state': 'active'},
+        ])
+        # A collection window closes; A assigned, B collects (101,201)
+        self._simulate_poll({(100, 200), (101, 201)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs_a, 'state': 'active'},
+            {'pid': 901, 'client_port': 201, 'xact_start': xs_b, 'state': 'active'},
+        ])
+        # B collection window closes
+        self._simulate_poll({(100, 200), (101, 201)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs_a, 'state': 'active'},
+            {'pid': 901, 'client_port': 201, 'xact_start': xs_b, 'state': 'active'},
+        ])
+        self.assertEqual(self.collector._a_child_pid, 900)
+        self.assertEqual(self.collector._b_child_pid, 901)
+        self.assertEqual(self.collector._a_xact_start, xs_a)
+        self.assertEqual(self.collector._b_xact_start, xs_b)
+
+    # ----------------------------------------------------------------
+    # get_transactions (F2 fix: fail-closed on ambiguity)
+    # ----------------------------------------------------------------
+
+    def test_get_transactions_timeout_no_jobs(self):
+        """F2: No job_ids set → RuntimeError."""
+        # collector with no call to set_job_ids
+        empty = TransactionCollector(poll_seconds=0.1)
+        with self.assertRaises(RuntimeError):
+            empty.get_transactions(timeout=1)
+
+    def test_get_transactions_timeout_claim_not_detected(self):
+        """F2: Jobs never claimed (not RUNNING) → RuntimeError."""
+        self.job_a.status = Job.Status.QUEUED
+        self.job_a.save()
+        self.collector.set_job_ids(self.job_a.job_id, self.job_b.job_id)
+        self._simulate_poll({(100, 200)}, [
+            {'pid': 999, 'client_port': 200, 'xact_start': timezone.now(), 'state': 'active'},
+        ])
+        with self.assertRaises(RuntimeError):
+            self.collector.get_transactions(timeout=1)
+
+    def test_get_transactions_returns_claim_based_ab(self):
+        """F2: Both Jobs claimed → get_transactions returns correctly."""
+        self.collector.set_job_ids(self.job_a.job_id, self.job_b.job_id)
+        self._register_pid(100, "test-job-a")
+        self._register_pid(101, "test-job-b")
+        xs_a = timezone.now()
+        xs_b = timezone.now() + timezone.timedelta(seconds=1)
+        self._simulate_poll(set(), [])
+        self._simulate_poll({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs_a, 'state': 'active'},
+        ])
+        self._simulate_poll({(100, 200), (101, 201)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs_a, 'state': 'active'},
+            {'pid': 901, 'client_port': 201, 'xact_start': xs_b, 'state': 'active'},
+        ])
+        # Both collection windows close
+        self._simulate_poll({(100, 200), (101, 201)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs_a, 'state': 'active'},
+            {'pid': 901, 'client_port': 201, 'xact_start': xs_b, 'state': 'active'},
+        ])
+        a_info, b_info = self.collector.get_transactions(timeout=5)
+        self.assertEqual(a_info[0], 900)
+        self.assertEqual(a_info[1], 200)
+        self.assertEqual(a_info[2], xs_a)
+        self.assertEqual(b_info[0], 901)
+        self.assertEqual(b_info[1], 201)
+        self.assertEqual(b_info[2], xs_b)
+
+    # ----------------------------------------------------------------
+    # Historical port loss (F4 fix)
+    # ----------------------------------------------------------------
+
+    def test_historical_port_disappears_still_returns_a(self):
+        """F4+F6: A's port disappears from worker_ports, but get_transactions still returns it."""
+        self.collector.set_job_ids(self.job_a.job_id, self.job_b.job_id)
+        self._register_pid(100, "test-job-a")
+        self._register_pid(101, "test-job-b")
+        xs_a = timezone.now()
+        xs_b = timezone.now() + timezone.timedelta(seconds=1)
+        self._simulate_poll(set(), [])
+        self._simulate_poll({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs_a, 'state': 'active'},
+        ])
+        self._simulate_poll({(100, 200), (101, 201)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs_a, 'state': 'active'},
+            {'pid': 901, 'client_port': 201, 'xact_start': xs_b, 'state': 'active'},
+        ])
+        # Collection windows close for both
+        self._simulate_poll({(100, 200), (101, 201)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs_a, 'state': 'active'},
+            {'pid': 901, 'client_port': 201, 'xact_start': xs_b, 'state': 'active'},
+        ])
+        # A's port disappears from worker_ports in a subsequent poll
+        self._simulate_poll({(101, 201)}, [
+            {'pid': 901, 'client_port': 201, 'xact_start': xs_b, 'state': 'active'},
+        ])
+        a_info, b_info = self.collector.get_transactions(timeout=5)
+        self.assertEqual(a_info[0], 900)
+        self.assertEqual(a_info[1], 200)
+        self.assertEqual(a_info[2], xs_a)
+
+    # ----------------------------------------------------------------
+    # Sequential same-port A→B
+    # ----------------------------------------------------------------
+
+    def test_sequential_same_port_a_then_b(self):
+        """A completes, B claims same port (same subprocess reused).
+        Also verifies get_transactions() returns both successfully (F4 formal path)."""
+        self.collector.set_job_ids(self.job_a.job_id, self.job_b.job_id)
+        self._register_pid(100, "test-job-a")
+        xs_a = timezone.now()
+        xs_b = xs_a + timezone.timedelta(seconds=2)
+        self._simulate_poll(set(), [])
+        self._simulate_poll({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs_a, 'state': 'active'},
+        ])
+        # A collection window closes
+        self._simulate_poll({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs_a, 'state': 'active'},
+        ])
+        self.assertEqual(self.collector._a_state, "ASSIGNED")
+        # A's transaction ends
+        self.collector._track_ab_disappearance((900, 200), xs_a, timezone.now(), timezone.now())
+        self.assertIsNotNone(self.collector._a_xact_end_lower)
+        self.assertIsNotNone(self.collector._a_xact_end_upper)
+        # B claims same port (same subprocess reused)
+        # PID 100 is for job_b now (same process, different claim)
+        self._register_pid(100, "test-job-b")
+        self.job_b.worker_id = "worker-1"
+        self.job_b.save()
+        self._simulate_poll({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs_b, 'state': 'active'},
+        ])
+        # B collection window closes
+        self._simulate_poll({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs_b, 'state': 'active'},
+        ])
+        self.assertEqual(self.collector._b_state, "ASSIGNED")
+        self.assertEqual(self.collector._b_child_pid, 900)
+        self.assertEqual(self.collector._b_child_port, 200)
+        self.assertEqual(self.collector._b_xact_start, xs_b)
+        # Formal path: get_transactions must succeed
+        a_info, b_info = self.collector.get_transactions(timeout=5)
+        self.assertEqual(a_info[0], 900)
+        self.assertEqual(a_info[1], 200)
+        self.assertEqual(a_info[2], xs_a)
+        self.assertEqual(b_info[0], 900)
+        self.assertEqual(b_info[1], 200)
+        self.assertEqual(b_info[2], xs_b)
+        self.assertIsNotNone(a_info[4])  # a end_lower
+        self.assertIsNotNone(a_info[5])  # a end_upper
+        self.assertIsNone(b_info[4])     # b end_lower (still running in this test)
+        self.assertIsNone(b_info[5])     # b end_upper (still running in this test)
+
+    # ----------------------------------------------------------------
+    # Reviewer probe tests (F1–F5 negative probes)
+    # ----------------------------------------------------------------
+
+    def test_blank_worker_id_no_assignment(self):
+        """F1: Job RUNNING but empty worker_id/execution_token → no assignment."""
+        self.job_a.worker_id = ""
+        self.job_a.execution_token = ""
+        self.job_a.save()
+        self.collector.set_job_ids(self.job_a.job_id, self.job_b.job_id)
+        self._simulate_poll(set(), [])
+        self._simulate_poll({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': timezone.now(), 'state': 'active'},
+        ])
+        self.assertEqual(self.collector._a_state, "IDLE")
+        self.assertIsNone(self.collector._a_child_pid)
+
+    def test_three_new_ports_fails_a(self):
+        """F2: Three new ports when A is COLLECTING → FAILED."""
+        self.collector.set_job_ids(self.job_a.job_id, self.job_b.job_id)
+        self._register_pid(100, "test-job-a")
+        self._register_pid(101, "test-job-a")
+        self._register_pid(102, "test-job-a")
+        self._simulate_poll(set(), [])
+        self._simulate_poll({(100, 200), (101, 201), (102, 202)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': timezone.now(), 'state': 'active'},
+            {'pid': 901, 'client_port': 201, 'xact_start': timezone.now(), 'state': 'active'},
+            {'pid': 902, 'client_port': 202, 'xact_start': timezone.now(), 'state': 'active'},
+        ])
+        self.assertEqual(self.collector._a_candidates, {(100, 200), (101, 201), (102, 202)})
+        # Collection window closes → 3 candidates → FAILED
+        self._simulate_poll({(100, 200), (101, 201), (102, 202)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': timezone.now(), 'state': 'active'},
+            {'pid': 901, 'client_port': 201, 'xact_start': timezone.now(), 'state': 'active'},
+            {'pid': 902, 'client_port': 202, 'xact_start': timezone.now(), 'state': 'active'},
+        ])
+        self.assertEqual(self.collector._a_state, "FAILED")
+        with self.assertRaises(RuntimeError):
+            self.collector.get_transactions(timeout=1)
+
+    def test_port_before_running_still_assigns(self):
+        """F3: Port appears in poll 1 (QUEUED), RUNNING in poll 2 → still assigns."""
+        self.job_a.status = Job.Status.QUEUED
+        self.job_a.worker_id = ""
+        self.job_a.execution_token = ""
+        self.job_a.save()
+        self.collector.set_job_ids(self.job_a.job_id, None)
+        self._register_pid(100, "test-job-a")
+        self._simulate_poll({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': timezone.now(), 'state': 'active'},
+        ])
+        self.assertEqual(self.collector._a_state, "IDLE")
+        self.job_a.status = Job.Status.RUNNING
+        self.job_a.worker_id = "worker-1"
+        self.job_a.execution_token = "tok-new"
+        self.job_a.save()
+        self._simulate_poll({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': timezone.now(), 'state': 'active'},
+        ])
+        # Collection window closes
+        self._simulate_poll({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': timezone.now(), 'state': 'active'},
+        ])
+        self.assertEqual(self.collector._a_state, "ASSIGNED")
+        self.assertEqual(self.collector._a_child_pid, 900)
+        self.assertEqual(self.collector._a_child_port, 200)
+
+    def test_b_depends_on_a_queue_to_running(self):
+        """F6: B starts QUEUED, transitions to RUNNING after A completes."""
+        self.job_b.status = Job.Status.QUEUED
+        self.job_b.worker_id = ""
+        self.job_b.execution_token = ""
+        self.job_b.save()
+        self.collector.set_job_ids(self.job_a.job_id, self.job_b.job_id)
+        self._register_pid(100, "test-job-a")
+        self._register_pid(101, "test-job-b")
+        xs_a = timezone.now()
+        xs_b = xs_a + timezone.timedelta(seconds=2)
+        self._simulate_poll(set(), [])
+        self._simulate_poll({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs_a, 'state': 'active'},
+        ])
+        # A collection window closes
+        self._simulate_poll({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs_a, 'state': 'active'},
+        ])
+        self.assertEqual(self.collector._a_state, "ASSIGNED")
+        self.assertEqual(self.collector._b_state, "IDLE")
+        # A's transaction ends and subprocess exits
+        self.collector._track_ab_disappearance((900, 200), xs_a, timezone.now(), timezone.now())
+        # B transitions to RUNNING after A completes
+        self.job_b.status = Job.Status.RUNNING
+        self.job_b.worker_id = "worker-1"
+        self.job_b.execution_token = "tok-b-2"
+        self.job_b.save()
+        self._simulate_poll({(101, 201)}, [
+            {'pid': 901, 'client_port': 201, 'xact_start': xs_b, 'state': 'active'},
+        ])
+        # B collection window closes
+        self._simulate_poll({(101, 201)}, [
+            {'pid': 901, 'client_port': 201, 'xact_start': xs_b, 'state': 'active'},
+        ])
+        self.assertEqual(self.collector._b_state, "ASSIGNED")
+        self.assertEqual(self.collector._b_child_pid, 901)
+
+    def test_unrelated_first_rejected_by_process_identity(self):
+        """F2+F3: Unrelated port first, real target later → process identity filter rejects unrelated."""
+        self.collector.set_job_ids(self.job_a.job_id, self.job_b.job_id)
+        # Only register PID 100 for job_a (not 900)
+        self._register_pid(100, "test-job-a")
+        self._register_pid(101, "test-job-b")
+        xs = timezone.now()
+        self._simulate_poll(set(), [])
+        # Poll: unrelated port (900,990) appears — NOT an execute_claimed_job for job_a
+        self._simulate_poll({(900, 990)}, [
+            {'pid': 900, 'client_port': 990, 'xact_start': xs, 'state': 'active'},
+        ])
+        # A rejects (900,990) because _verify_child_process(900, "test-job-a") is False
+        self.assertEqual(len(self.collector._a_candidates), 0)
+        # Poll: real target (100,200) appears
+        self._simulate_poll({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs, 'state': 'active'},
+        ])
+        # A collection: (100,200) is verified → enters pool
+        self.assertEqual(self.collector._a_candidates, {(100, 200)})
+        # Collection window closes
+        self._simulate_poll({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs, 'state': 'active'},
+        ])
+        self.assertEqual(self.collector._a_state, "ASSIGNED")
+        self.assertEqual(self.collector._a_child_pid, 900)
+
+    def test_late_second_candidate_causes_failure(self):
+        """F2: After first candidate collected, second candidate in next poll → FAILED."""
+        self.collector.set_job_ids(self.job_a.job_id, None)
+        self._register_pid(100, "test-job-a")
+        self._register_pid(200, "test-job-a")  # second PID also for A
+        xs = timezone.now()
+        self._simulate_poll(set(), [])
+        self._simulate_poll({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs, 'state': 'active'},
+        ])
+        # Collection window is open (rem=1)
+        self.assertEqual(self.collector._a_state, "COLLECTING")
+        self.assertEqual(self.collector._a_candidates, {(100, 200)})
+        # Second candidate appears in next poll
+        self._simulate_poll({(100, 200), (200, 400)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs, 'state': 'active'},
+            {'pid': 200, 'client_port': 400, 'xact_start': xs, 'state': 'active'},
+        ])
+        # Window closes → 2 candidates → FAILED
+        self.assertEqual(self.collector._a_state, "FAILED")
+        self.assertEqual(self.collector._a_candidates, {(100, 200), (200, 400)})
+        with self.assertRaises(RuntimeError):
+            self.collector.get_transactions(timeout=1)
+
+    def test_exact_pid_port_tracking(self):
+        """F4: _track_ab_transactions uses exact (pid, port), not port alone."""
+        self.collector._a_state = "ASSIGNED"
+        self.collector._a_child_pid = 900
+        self.collector._a_child_port = 200
+        xs = timezone.now()
+        # Different PID on same port should NOT be tracked as A
+        self.collector._track_ab_transactions((999, 200), xs, timezone.now(), timezone.now())
+        self.assertIsNone(self.collector._a_xact_start)
+        # Matching (pid, port) SHOULD be tracked
+        self.collector._track_ab_transactions((900, 200), xs, timezone.now(), timezone.now())
+        self.assertEqual(self.collector._a_xact_start, xs)
+
+    # ----------------------------------------------------------------
+    # Baseline tests (unchanged from v1)
+    # ----------------------------------------------------------------
+
+    def test_baseline_captures_triple(self):
+        """F7: capture_baseline stores (pg_pid, port, xact_start) triples.
+        Uses distinct OS PID (100) and PG PID (900) to verify concept separation."""
+        xs = timezone.now()
+        with patch.object(self.collector, '_get_worker_child_ports', return_value={(100, 200)}):
+            with patch('quality.s2_cr08_canonical.poll_active_backends', return_value=[
+                {'pid': 900, 'client_port': 200, 'client_addr': None, 'xact_start': xs, 'state': 'active'}
+            ]):
+                count = self.collector.capture_baseline()
+        self.assertEqual(count, 1)
+        for item in self.collector._baseline:
+            self.assertEqual(len(item), 3)
+            self.assertEqual(item[0], 900)
+            self.assertEqual(item[1], 200)
+            self.assertIsNotNone(item[2])
+
+    def test_baseline_triple_blocks_exact_match(self):
+        """F7: START not emitted when exact (pid, port, xact_start) is in baseline."""
+        xs = timezone.now()
+        self.collector._baseline = {(900, 200, xs)}
+        with patch.object(self.collector, '_get_worker_child_ports', return_value={(100, 200)}):
+            with patch('quality.s2_cr08_canonical.poll_active_backends', return_value=[
+                {'pid': 900, 'client_port': 200, 'xact_start': xs, 'state': 'active'}
+            ]):
+                with patch('quality.s2_cr08_canonical._db_clock', return_value=timezone.now()):
+                    self.collector._poll_once()
+        starts = [e for e in self.collector._events if e[0] == "START"]
+        self.assertEqual(len(starts), 0)
+
+    def test_baseline_triple_allows_xact_start_change(self):
+        """F7: xact_start change on baseline port emits START (new transaction).
+        Baseline uses PG PID (900), not OS PID (100)."""
+        old_xs = timezone.now()
+        new_xs = timezone.now() + timezone.timedelta(seconds=1)
+        self.collector._baseline = {(900, 200, old_xs)}
+        with patch.object(self.collector, '_get_worker_child_ports', return_value={(100, 200)}):
+            with patch('quality.s2_cr08_canonical.poll_active_backends', return_value=[
+                {'pid': 900, 'client_port': 200, 'xact_start': new_xs, 'state': 'active'}
+            ]):
+                with patch('quality.s2_cr08_canonical._db_clock', return_value=timezone.now()):
+                    self.collector._poll_once()
+        starts = [e for e in self.collector._events if e[0] == "START"]
+        self.assertEqual(len(starts), 1)
+
+    # ----------------------------------------------------------------
+    # Shim tests (unchanged from v1)
+    # ----------------------------------------------------------------
+
+    def test_shim_transaction_completed_no_assignment(self):
+        """Shim defaults before assignment: not completed, not unique."""
+        self.assertFalse(self.collector.observer_a.transaction_completed)
+        self.assertFalse(self.collector.observer_a.correlation_unique)
+        self.assertFalse(self.collector.observer_a.observation_ok)
+        self.assertFalse(self.collector.observer_b.transaction_completed)
+
+    def test_shim_transaction_completed_after_assignment(self):
+        """Shim reflects actual completion after A/B assigned and END recorded via production path."""
+        xs_a = timezone.now()
+        self.collector._a_state = "ASSIGNED"
+        self.collector._a_child_pid = 900
+        self.collector._a_child_port = 200
+        self.collector._a_xact_start = xs_a
+        self.collector._b_child_pid = 901
+        self.collector._b_child_port = 201
+        self.collector._b_xact_start = timezone.now() + timezone.timedelta(seconds=1)
+        # Record END via production path
+        self.collector._track_ab_disappearance(
+            (900, 200), xs_a, timezone.now(), timezone.now()
+        )
+        self.assertTrue(self.collector.observer_a.transaction_completed)
+        self.assertTrue(self.collector.observer_a.correlation_unique)
+        self.assertTrue(self.collector.observer_a.observation_ok)
+
+    def test_shim_not_hardcoded_true(self):
+        """F3: Verify shims do NOT return hardcoded True."""
+        self.assertFalse(self.collector.observer_a.correlation_unique)
+        self.assertFalse(self.collector.observer_a.observation_ok)
+
+    # ----------------------------------------------------------------
+    # F2 negative probes: post-window second port from same PID
+    # ----------------------------------------------------------------
+
+    def test_post_assigned_same_pid_new_port_fails(self):
+        """F2: After ASSIGNED, new port from same PID → FAILED."""
+        self.collector.set_job_ids(self.job_a.job_id, None)
+        self._register_pid(100, "test-job-a")
+        xs = timezone.now()
+        self._simulate_poll(set(), [])
+        self._simulate_poll({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs, 'state': 'active'},
+        ])
+        # Collection window closes → ASSIGNED
+        self._simulate_poll({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs, 'state': 'active'},
+        ])
+        self.assertEqual(self.collector._a_state, "ASSIGNED")
+        # Same PID opens second port on next poll
+        self._simulate_poll({(100, 200), (100, 201)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs, 'state': 'active'},
+            {'pid': 100, 'client_port': 201, 'xact_start': xs, 'state': 'active'},
+        ])
+        self.assertEqual(self.collector._a_state, "FAILED")
+
+    def test_post_assigned_same_pid_new_port_after_xact_end_ok(self):
+        """F2: After ASSIGNED, new port from same PID after xact_end → OK (not ambiguity)."""
+        self.collector.set_job_ids(self.job_a.job_id, None)
+        self._register_pid(100, "test-job-a")
+        xs = timezone.now()
+        self._simulate_poll(set(), [])
+        self._simulate_poll({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs, 'state': 'active'},
+        ])
+        # Collection window closes → ASSIGNED
+        self._simulate_poll({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs, 'state': 'active'},
+        ])
+        self.assertEqual(self.collector._a_state, "ASSIGNED")
+        # Transaction ends (backend disappears)
+        self.collector._track_ab_disappearance((900, 200), xs, timezone.now(), timezone.now())
+        self.assertTrue(self.collector._a_xact_end_verified)
+        # Same PID opens new port after end → should not fail
+        self._simulate_poll({(100, 201)}, [
+            {'pid': 100, 'client_port': 201, 'xact_start': xs, 'state': 'active'},
+        ])
+        # State stays ASSIGNED (not FAILED) because transaction already ended
+        self.assertEqual(self.collector._a_state, "ASSIGNED")
+
+    # ----------------------------------------------------------------
+    # F4 privacy: error messages must not contain raw (pid, port)
+    # ----------------------------------------------------------------
+
+    def test_get_transactions_failed_privacy_safe(self):
+        """F4: FAILED error message uses count+hash, not raw (pid,port)."""
+        self.collector.set_job_ids(self.job_a.job_id, self.job_b.job_id)
+        self._register_pid(100, "test-job-a")
+        self._register_pid(101, "test-job-a")
+        self._simulate_poll(set(), [])
+        self._simulate_poll({(100, 200), (101, 201)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': timezone.now(), 'state': 'active'},
+            {'pid': 901, 'client_port': 201, 'xact_start': timezone.now(), 'state': 'active'},
+        ])
+        # Window closes → 2 candidates → FAILED
+        self._simulate_poll({(100, 200), (101, 201)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': timezone.now(), 'state': 'active'},
+            {'pid': 901, 'client_port': 201, 'xact_start': timezone.now(), 'state': 'active'},
+        ])
+        with self.assertRaises(RuntimeError) as ctx:
+            self.collector.get_transactions(timeout=1)
+        msg = str(ctx.exception)
+        # Must not contain raw (pid, port) tuples
+        self.assertNotIn("(100, 200)", msg)
+        self.assertNotIn("101", msg.replace("_", ""))
+        # Must contain count and hash
+        self.assertIn("A_cand_count=2", msg)
+
+    def test_get_transactions_timeout_privacy_safe(self):
+        """F4: timeout error message uses count+hash, not raw (pid,port)."""
+        self.collector.set_job_ids(self.job_a.job_id, self.job_b.job_id)
+        self._register_pid(100, "test-job-a")
+        self._simulate_poll(set(), [])
+        self._simulate_poll({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': timezone.now(), 'state': 'active'},
+        ])
+        with self.assertRaises(RuntimeError) as ctx:
+            self.collector.get_transactions(timeout=1)
+        msg = str(ctx.exception)
+        # Must not contain raw (pid, port) tuples
+        self.assertNotIn("(100, 200)", msg)
+        self.assertIn("A_cand_count", msg)
+
+    # ----------------------------------------------------------------
+    # F1: first unmarked transaction rejected
+    # ----------------------------------------------------------------
+
+    def test_first_unmarked_transaction_rejected(self):
+        """F1: When advisory lock is NOT_HELD, first transaction is not set as target."""
+        self.collector.set_job_ids(self.job_a.job_id, None)
+        self._register_pid(100, "test-job-a")
+        xs = timezone.now()
+        with patch.object(TransactionCollector, '_check_advisory_lock',
+                          return_value=_LOCK_NOT_HELD):
+            # First poll: backend appears with NOT_HELD → should NOT set xact_start
+            self._simulate_poll({(100, 200)}, [
+                {'pid': 900, 'client_port': 200, 'xact_start': xs, 'state': 'active'},
+            ])
+            # Second poll to close collection window → assignment still happens
+            self._simulate_poll({(100, 200)}, [
+                {'pid': 900, 'client_port': 200, 'xact_start': xs, 'state': 'active'},
+            ])
+        # A should be ASSIGNED (candidate was resolved) but xact_start should be None
+        self.assertEqual(self.collector._a_state, "ASSIGNED")
+        self.assertIsNone(self.collector._a_xact_start)
+        self.assertIsNone(self.collector._a_xact_end_lower)
+        self.assertIsNone(self.collector._a_xact_end_upper)
+
+    def test_first_unmarked_then_marked_accepts_marked(self):
+        """F1+F2: First transaction NOT_HELD, second HELD → second is target.
+        Also verifies F2: unmarked disappearance does NOT record target END.
+        """
+        self.collector.set_job_ids(self.job_a.job_id, None)
+        self._register_pid(100, "test-job-a")
+        xs1 = timezone.now()
+        xs2 = xs1 + timezone.timedelta(seconds=1)
+        self._simulate_poll(set(), [])
+        # First transaction: lock NOT_HELD → no xact_start set
+        with patch.object(TransactionCollector, '_check_advisory_lock',
+                          return_value=_LOCK_NOT_HELD):
+            self._simulate_poll({(100, 200)}, [
+                {'pid': 900, 'client_port': 200, 'xact_start': xs1, 'state': 'active'},
+            ])
+            # Collection window closes → ASSIGNED but xact_start still None
+            self._simulate_poll({(100, 200)}, [
+                {'pid': 900, 'client_port': 200, 'xact_start': xs1, 'state': 'active'},
+            ])
+        self.assertEqual(self.collector._a_state, "ASSIGNED")
+        self.assertIsNone(self.collector._a_xact_start)
+        self.assertIsNone(self.collector._a_xact_end_lower)
+        self.assertIsNone(self.collector._a_xact_end_upper)
+        # Backend disappears → F2 prevents END record (xact_start was None)
+        self.collector._track_ab_disappearance((900, 200), xs1, timezone.now(), timezone.now())
+        self.assertIsNone(self.collector._a_xact_end_lower,
+                          "F2: unmarked disappearance must NOT set end_lower")
+        self.assertIsNone(self.collector._a_xact_end_upper,
+                          "F2: unmarked disappearance must NOT set end_upper")
+        self.assertFalse(self.collector._a_xact_end_verified,
+                         "F2: unmarked disappearance must NOT set xact_end_verified")
+        # Second transaction: HELD → target starts
+        self._simulate_poll({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs2, 'state': 'active'},
+        ])
+        self.assertEqual(self.collector._a_xact_start, xs2)
+        self.assertIsNone(self.collector._a_xact_end_lower,
+                          "end_lower must remain None until verified end")
+        self.assertIsNone(self.collector._a_xact_end_upper,
+                          "end_upper must remain None until verified end")
+
+    def test_marked_to_marked_selects_new_on_transition(self):
+        """F2: Marked→marked transition: old ends, new is target."""
+        self.collector.set_job_ids(self.job_a.job_id, None)
+        self._register_pid(100, "test-job-a")
+        xs1 = timezone.now()
+        xs2 = xs1 + timezone.timedelta(seconds=1)
+        self._simulate_poll(set(), [])
+        # xs1 appears, HELD → target set
+        self._simulate_poll({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs1, 'state': 'active'},
+        ])
+        self._simulate_poll({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs1, 'state': 'active'},
+        ])
+        self.assertEqual(self.collector._a_xact_start, xs1)
+        self.assertEqual(self.collector._a_state, "ASSIGNED")
+        # xs2 appears with HELD → old ends, new is target
+        self._simulate_poll({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs2, 'state': 'active'},
+        ])
+        self.assertIsNotNone(self.collector._a_xact_end_lower)
+        self.assertIsNotNone(self.collector._a_xact_end_upper)
+        self.assertTrue(self.collector._a_xact_end_verified)
+        self.assertEqual(self.collector._a_xact_start, xs2)
+
+    def test_marked_to_unmarked_ends_old_rejects_new(self):
+        """F2: Marked→unmarked transition: old ends, no new target."""
+        self.collector.set_job_ids(self.job_a.job_id, None)
+        self._register_pid(100, "test-job-a")
+        xs1 = timezone.now()
+        xs2 = xs1 + timezone.timedelta(seconds=1)
+        self._simulate_poll(set(), [])
+        # xs1 appears, HELD → target set
+        self._simulate_poll({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs1, 'state': 'active'},
+        ])
+        self._simulate_poll({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs1, 'state': 'active'},
+        ])
+        self.assertEqual(self.collector._a_xact_start, xs1)
+        self.assertEqual(self.collector._a_state, "ASSIGNED")
+        # xs2 appears with NOT_HELD → old ends, no new target
+        with patch.object(TransactionCollector, '_check_advisory_lock',
+                          return_value=_LOCK_NOT_HELD):
+            self._simulate_poll({(100, 200)}, [
+                {'pid': 900, 'client_port': 200, 'xact_start': xs2, 'state': 'active'},
+            ])
+        self.assertIsNotNone(self.collector._a_xact_end_lower)
+        self.assertIsNotNone(self.collector._a_xact_end_upper)
+        self.assertTrue(self.collector._a_xact_end_verified)
+        self.assertEqual(self.collector._a_xact_start, xs1)
+
+    def test_unmarked_to_unmarked_rejects_both(self):
+        """F2: Both transactions NOT_HELD → neither accepted."""
+        self.collector.set_job_ids(self.job_a.job_id, None)
+        self._register_pid(100, "test-job-a")
+        xs1 = timezone.now()
+        xs2 = xs1 + timezone.timedelta(seconds=1)
+        self._simulate_poll(set(), [])
+        # Both transactions NOT_HELD
+        with patch.object(TransactionCollector, '_check_advisory_lock',
+                          return_value=_LOCK_NOT_HELD):
+            self._simulate_poll({(100, 200)}, [
+                {'pid': 900, 'client_port': 200, 'xact_start': xs1, 'state': 'active'},
+            ])
+            self._simulate_poll({(100, 200)}, [
+                {'pid': 900, 'client_port': 200, 'xact_start': xs1, 'state': 'active'},
+            ])
+            self.assertEqual(self.collector._a_state, "ASSIGNED")
+            self.assertIsNone(self.collector._a_xact_start)
+            # xs2 appears, still NOT_HELD → no change
+            self._simulate_poll({(100, 200)}, [
+                {'pid': 900, 'client_port': 200, 'xact_start': xs2, 'state': 'active'},
+            ])
+        self.assertIsNone(self.collector._a_xact_start)
+        self.assertIsNone(self.collector._a_xact_end_lower)
+        self.assertIsNone(self.collector._a_xact_end_upper)
+
+    def test_advisory_lock_error_fails_closed(self):
+        """F3: Advisory lock query error → FAILED state."""
+        self.collector.set_job_ids(self.job_a.job_id, None)
+        self._register_pid(100, "test-job-a")
+        xs = timezone.now()
+        self._simulate_poll(set(), [])
+        with patch.object(TransactionCollector, '_check_advisory_lock',
+                          return_value=_LOCK_ERROR):
+            self._simulate_poll({(100, 200)}, [
+                {'pid': 900, 'client_port': 200, 'xact_start': xs, 'state': 'active'},
+            ])
+            self._simulate_poll({(100, 200)}, [
+                {'pid': 900, 'client_port': 200, 'xact_start': xs, 'state': 'active'},
+            ])
+        self.assertEqual(self.collector._a_state, "FAILED")
+
+    def test_advisory_lock_error_on_transition_fails_closed(self):
+        """F3: Lock error during transition → FAILED."""
+        self.collector.set_job_ids(self.job_a.job_id, None)
+        self._register_pid(100, "test-job-a")
+        xs1 = timezone.now()
+        xs2 = xs1 + timezone.timedelta(seconds=1)
+        self._simulate_poll(set(), [])
+        self._simulate_poll({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs1, 'state': 'active'},
+        ])
+        self._simulate_poll({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs1, 'state': 'active'},
+        ])
+        self.assertEqual(self.collector._a_state, "ASSIGNED")
+        with patch.object(TransactionCollector, '_check_advisory_lock',
+                          return_value=_LOCK_ERROR):
+            self._simulate_poll({(100, 200)}, [
+                {'pid': 900, 'client_port': 200, 'xact_start': xs2, 'state': 'active'},
+            ])
+        self.assertEqual(self.collector._a_state, "FAILED")
+
+    # ----------------------------------------------------------------
+    # F5: address-based PG join tests
+    # ----------------------------------------------------------------
+
+    def test_addr_missing_fails_closed(self):
+        """F5: Missing client_addr → FAILED (no port-only fallback).
+        No _addr_map is set at any point — _resolve_candidates fails closed.
+        """
+        self.collector.set_job_ids(self.job_a.job_id, None)
+        self._register_pid(100, "test-job-a")
+        xs = timezone.now()
+        # Poll 1: empty, no addr_map
+        self._simulate_poll(set(), [], set_addr_map=False)
+        # Poll 2: port appears, still no addr_map → A starts COLLECTING
+        self._simulate_poll({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs, 'state': 'active'},
+        ], set_addr_map=False)
+        # Poll 3: window closes, _resolve_candidates sees no addr → FAILED
+        self._simulate_poll({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs, 'state': 'active'},
+        ], set_addr_map=False)
+        self.assertEqual(self.collector._a_state, "FAILED")
+
+    def test_pg_match_ambiguous_fails(self):
+        """F5: Two PG backends same port+addr → FAILED (ambiguous match)."""
+        self.collector.set_job_ids(self.job_a.job_id, None)
+        self._register_pid(100, "test-job-a")
+        self.collector._addr_map = {(100, 200): "127.0.0.1"}
+        xs = timezone.now()
+        self._simulate_poll(set(), [])
+        self._simulate_poll({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'client_addr': "127.0.0.1", 'xact_start': xs, 'state': 'active'},
+            {'pid': 901, 'client_port': 200, 'client_addr': "127.0.0.1", 'xact_start': xs, 'state': 'active'},
+        ])
+        self._simulate_poll({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'client_addr': "127.0.0.1", 'xact_start': xs, 'state': 'active'},
+            {'pid': 901, 'client_port': 200, 'client_addr': "127.0.0.1", 'xact_start': xs, 'state': 'active'},
+        ])
+        self.assertEqual(self.collector._a_state, "FAILED")
+
+    def test_pg_match_exact_address_succeeds(self):
+        """F5: Single PG backend with matching addr+port → ASSIGNED."""
+        self.collector.set_job_ids(self.job_a.job_id, None)
+        self._register_pid(100, "test-job-a")
+        self.collector._addr_map = {(100, 200): "127.0.0.1"}
+        xs = timezone.now()
+        self._simulate_poll(set(), [])
+        self._simulate_poll({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'client_addr': "127.0.0.1", 'xact_start': xs, 'state': 'active'},
+        ])
+        self._simulate_poll({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'client_addr': "127.0.0.1", 'xact_start': xs, 'state': 'active'},
+        ])
+        self.assertEqual(self.collector._a_state, "ASSIGNED")
+        self.assertEqual(self.collector._a_child_pid, 900)
+        self.assertEqual(self.collector._a_child_port, 200)
+
+    # ----------------------------------------------------------------
+    # F1+F4: A success/token clear → B claim
+    # ----------------------------------------------------------------
+
+    def test_a_token_clear_b_claims(self):
+        """F1+F4: A completes SUCCEEDED → token clears → B claims new port."""
+        self.collector.set_job_ids(self.job_a.job_id, self.job_b.job_id)
+        self._register_pid(100, "test-job-a")
+        self._register_pid(101, "test-job-b")
+        xs_a = timezone.now()
+        xs_b = xs_a + timezone.timedelta(seconds=3)
+        self._simulate_poll(set(), [])
+        # A's port appears
+        self._simulate_poll({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs_a, 'state': 'active'},
+        ])
+        self._simulate_poll({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs_a, 'state': 'active'},
+        ])
+        self.assertEqual(self.collector._a_state, "ASSIGNED")
+        self.assertEqual(self.collector._a_xact_start, xs_a)
+        # A's transaction ends (backend disappears)
+        self.collector._track_ab_disappearance((900, 200), xs_a, timezone.now(), timezone.now())
+        self.assertTrue(self.collector._a_xact_end_verified)
+        # A's token clears (SUCCEEDED status)
+        self.job_a.status = Job.Status.SUCCEEDED
+        self.job_a.execution_token = ""
+        self.job_a.save()
+        # B claims new port (101, 201) with new xact_start
+        self._simulate_poll({(101, 201)}, [
+            {'pid': 901, 'client_port': 201, 'xact_start': xs_b, 'state': 'active'},
+        ])
+        self._simulate_poll({(101, 201)}, [
+            {'pid': 901, 'client_port': 201, 'xact_start': xs_b, 'state': 'active'},
+        ])
+        self.assertEqual(self.collector._b_state, "ASSIGNED")
+        self.assertEqual(self.collector._b_xact_start, xs_b)
+
+    # ----------------------------------------------------------------
+    # F4: stale/current attempt overlap negative test
+    # ----------------------------------------------------------------
+
+    def test_stale_attempt_overlap_rejected(self):
+        """F4: Same job+worker, different token → stale attempt not tracked as current."""
+        self.collector.set_job_ids(self.job_a.job_id, None)
+        self._register_pid(100, "test-job-a")
+        # A's token changes (stale attempt detected)
+        xs = timezone.now()
+        self._simulate_poll(set(), [])
+        self._simulate_poll({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs, 'state': 'active'},
+        ])
+        self._simulate_poll({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs, 'state': 'active'},
+        ])
+        self.assertEqual(self.collector._a_state, "ASSIGNED")
+        self.assertEqual(self.collector._a_xact_start, xs)
+        # Change token (simulates stale/current overlap)
+        self.job_a.execution_token = "tok-a-new"
+        self.job_a.save()
+        self._simulate_poll({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs, 'state': 'active'},
+        ])
+        self.assertEqual(self.collector._a_state, "FAILED")
+
+    # ----------------------------------------------------------------
+    # F8: error_codes bounded dict behavior
+    # ----------------------------------------------------------------
+
+    def test_error_codes_bounded(self):
+        """F8/F5: _error_codes is a bounded dict; existing codes always increment."""
+        self.collector._add_error_code("test_1")
+        self.assertEqual(self.collector._error_codes.get("test_1", 0), 1)
+        self.collector._add_error_code("test_1")
+        self.assertEqual(self.collector._error_codes.get("test_1", 0), 2)
+        # Fill to max with distinct codes (0..31)
+        for i in range(32):
+            self.collector._add_error_code(f"code_{i}")
+        self.assertEqual(len(self.collector._error_codes), 32)
+        # New distinct code beyond cap is rejected
+        self.collector._add_error_code("extra_code")
+        self.assertEqual(len(self.collector._error_codes), 32)
+        self.assertNotIn("extra_code", self.collector._error_codes)
+        # BUT existing code still increments beyond cap (F5 fix)
+        self.collector._add_error_code("test_1")
+        self.assertEqual(self.collector._error_codes["test_1"], 3)
+        self.collector._add_error_code("code_0")
+        self.assertEqual(self.collector._error_codes["code_0"], 2)
+
+    def test_error_codes_in_get_transactions_message(self):
+        """F8: FAILED error includes error code context (F4)."""
+        self.collector.set_job_ids(self.job_a.job_id, self.job_b.job_id)
+        self._register_pid(100, "test-job-a")
+        self._register_pid(101, "test-job-a")
+        self._simulate_poll(set(), [])
+        self._simulate_poll({(100, 200), (101, 201)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': timezone.now(), 'state': 'active'},
+            {'pid': 901, 'client_port': 201, 'xact_start': timezone.now(), 'state': 'active'},
+        ])
+        # Window closes → 2 candidates → FAILED
+        self._simulate_poll({(100, 200), (101, 201)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': timezone.now(), 'state': 'active'},
+            {'pid': 901, 'client_port': 201, 'xact_start': timezone.now(), 'state': 'active'},
+        ])
+        with self.assertRaises(RuntimeError) as ctx:
+            self.collector.get_transactions(timeout=1)
+        msg = str(ctx.exception)
+        # Must contain state info
+        self.assertIn("A_state=FAILED", msg)
+        # Must contain error code names (F6: human-readable, not just hash)
+        self.assertIn("error_codes=[", msg, "F6: error code names must appear in FAILED message")
+
+    # ----------------------------------------------------------------
+    # P0-2: Transaction boundary accuracy tests
+    # ----------------------------------------------------------------
+
+    def _simulate_poll_seq(self, worker_ports, backends, clock_time, set_addr_map=True):
+        """Like _simulate_poll but with explicit clock_time for before/after."""
+        if set_addr_map:
+            for pid, port in worker_ports:
+                if (pid, port) not in self.collector._addr_map:
+                    self.collector._addr_map[(pid, port)] = "127.0.0.1"
+        enriched = []
+        for b in backends:
+            if "client_addr" not in b:
+                b = dict(b, client_addr="127.0.0.1")
+            enriched.append(b)
+        with patch.object(self.collector, '_get_worker_child_ports', return_value=worker_ports):
+            with patch('quality.s2_cr08_canonical.poll_active_backends', return_value=enriched):
+                with patch('quality.s2_cr08_canonical._db_clock', return_value=clock_time):
+                    self.collector._poll_once()
+
+    def test_start_bound_clock_ordering(self):
+        """P0-2 #1: START bound (clock_before) recorded and ordered correctly."""
+        self.collector.set_job_ids(self.job_a.job_id, self.job_b.job_id)
+        self._register_pid(100, "test-job-a")
+        self._register_pid(101, "test-job-b")
+        t0 = timezone.now()
+        t1 = t0 + timezone.timedelta(seconds=1)
+        t2 = t0 + timezone.timedelta(seconds=2)
+        xs_a = t0 + timezone.timedelta(microseconds=100)
+        xs_b = t1 + timezone.timedelta(microseconds=100)
+        # Empty baseline
+        self._simulate_poll_seq(set(), [], t0)
+        # First poll: A appears with xact_start
+        self._simulate_poll_seq({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs_a, 'state': 'active'},
+        ], t1)
+        # Close A window
+        self._simulate_poll_seq({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs_a, 'state': 'active'},
+        ], t2)
+        # A has ASSIGNED state with start_bound
+        self.assertEqual(self.collector._a_state, "ASSIGNED")
+        self.assertIsNotNone(self.collector._a_start_bound)
+        # start_bound (clock_before) must be >= xact_start
+        # (xact_start was set earlier than our poll clock_before)
+        self.assertGreaterEqual(self.collector._a_start_bound, self.collector._a_xact_start,
+                            "start_bound (clock_before) represents poll time, must not be before xact_start")
+
+    def test_same_port_transition_bounds_shared_snapshot(self):
+        """P0-2 #2: Same-port old END and new START use the same snapshot bounds."""
+        self.collector.set_job_ids(self.job_a.job_id, None)
+        self._register_pid(100, "test-job-a")
+        t0 = timezone.now()
+        t1 = t0 + timezone.timedelta(seconds=1)
+        t2 = t0 + timezone.timedelta(seconds=2)
+        t3 = t0 + timezone.timedelta(seconds=3)
+        xs_a = t1 + timezone.timedelta(microseconds=100)
+        xs_b = t2 + timezone.timedelta(microseconds=100)
+        self._simulate_poll_seq(set(), [], t0)
+        # A appears
+        self._simulate_poll_seq({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs_a, 'state': 'active'},
+        ], t1)
+        self._simulate_poll_seq({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs_a, 'state': 'active'},
+        ], t2)
+        # A is assigned with target xact_start
+        self.assertEqual(self.collector._a_state, "ASSIGNED")
+        self.assertEqual(self.collector._a_xact_start, xs_a)
+        # Same-port transition: xact_start changes to xs_b in same poll
+        self._simulate_poll_seq({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs_b, 'state': 'active'},
+        ], t3)
+        # END upper = xs_b (new xact_start), END lower = _last_poll_after (t2)
+        self.assertIsNotNone(self.collector._a_xact_end_lower)
+        self.assertIsNotNone(self.collector._a_xact_end_upper)
+        self.assertEqual(self.collector._a_xact_start, xs_b)
+        self.assertIsNotNone(self.collector._a_start_bound)
+        self.assertLessEqual(self.collector._a_xact_end_lower, self.collector._a_xact_end_upper,
+                            "same-port: END lower <= END upper")
+        self.assertLessEqual(self.collector._a_xact_end_upper, self.collector._a_start_bound,
+                            "same-port: END upper (xs_b) <= start_bound (before of transition poll)")
+
+    def test_disappearance_end_ordering(self):
+        """P0-2 #3: Disappearance END maintains end_lower <= end_upper ordering."""
+        self.collector.set_job_ids(self.job_a.job_id, None)
+        self._register_pid(100, "test-job-a")
+        t0 = timezone.now()
+        t1 = t0 + timezone.timedelta(seconds=1)
+        t2 = t0 + timezone.timedelta(seconds=2)
+        t3 = t0 + timezone.timedelta(seconds=3)
+        xs_a = t1 + timezone.timedelta(microseconds=100)
+        self._simulate_poll_seq(set(), [], t0)
+        # A appears and is tracked
+        self._simulate_poll_seq({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs_a, 'state': 'active'},
+        ], t1)
+        self._simulate_poll_seq({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs_a, 'state': 'active'},
+        ], t2)
+        self.assertEqual(self.collector._a_state, "ASSIGNED")
+        self.assertEqual(self.collector._a_xact_start, xs_a)
+        # Backend disappears in next poll
+        self._simulate_poll_seq(set(), [], t3)
+        # END should be recorded with _last_poll_before (t2) as lower, t3 as upper
+        self.assertIsNotNone(self.collector._a_xact_end_lower)
+        self.assertIsNotNone(self.collector._a_xact_end_upper)
+        self.assertLessEqual(self.collector._a_xact_end_lower, self.collector._a_xact_end_upper)
+        self.assertEqual(self.collector._a_xact_end_lower, t2,
+                         "disappearance lower bound should be previous poll's before (last confirmed active)")
+
+    def test_field_separation_xact_start_not_end(self):
+        """P0-2 #4: For same-port transition, end_lower differed from xact_start (time vs xs)."""
+        self.collector.set_job_ids(self.job_a.job_id, None)
+        self._register_pid(100, "test-job-a")
+        t0 = timezone.now()
+        t1 = t0 + timezone.timedelta(seconds=1)
+        t2 = t0 + timezone.timedelta(seconds=2)
+        t3 = t0 + timezone.timedelta(seconds=3)
+        xs_a = t1 + timezone.timedelta(microseconds=100)
+        xs_b = t2 + timezone.timedelta(microseconds=100)
+        self._simulate_poll_seq(set(), [], t0)
+        self._simulate_poll_seq({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs_a, 'state': 'active'},
+        ], t1)
+        self._simulate_poll_seq({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs_a, 'state': 'active'},
+        ], t2)
+        self._simulate_poll_seq({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs_b, 'state': 'active'},
+        ], t3)
+        # Same-port transition: end_lower = _last_poll_before (t2, a time, not xs_a)
+        # end_upper = xs_b (the new xact_start)
+        # Field separation: end_lower must differ from any xs
+        self.assertIsNotNone(self.collector._a_xact_end_lower)
+        self.assertIsNotNone(self.collector._a_xact_end_upper)
+        self.assertNotEqual(self.collector._a_xact_end_lower, xs_a,
+                            "end_lower is a poll timestamp, not xact_start")
+        self.assertNotEqual(self.collector._a_xact_end_lower, xs_b,
+                            "end_lower is a poll timestamp, not xact_start")
+
+    def test_unrelated_end_not_mixed_into_ab_target(self):
+        """P0-2 #5: Unrelated END events don't update A/B target END fields."""
+        self.collector.set_job_ids(self.job_a.job_id, None)
+        self._register_pid(100, "test-job-a")
+        t0 = timezone.now()
+        t1 = t0 + timezone.timedelta(seconds=1)
+        t2 = t0 + timezone.timedelta(seconds=2)
+        xs_a = t1 + timezone.timedelta(microseconds=100)
+        # A appears normally
+        self._simulate_poll_seq(set(), [], t0)
+        self._simulate_poll_seq({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs_a, 'state': 'active'},
+        ], t1)
+        self._simulate_poll_seq({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs_a, 'state': 'active'},
+        ], t2)
+        self.assertEqual(self.collector._a_state, "ASSIGNED")
+        self.assertEqual(self.collector._a_xact_start, xs_a)
+        # An unrelated END event (different pid,port) is added externally
+        # This should NOT affect A's end fields
+        self.collector._events.append(("END", 999, 999, xs_a, t2, t2))
+        # A's end fields must be unchanged
+        self.assertIsNone(self.collector._a_xact_end_lower,
+                          "unrelated END event must not touch A target end_lower")
+        self.assertIsNone(self.collector._a_xact_end_upper,
+                          "unrelated END event must not touch A target end_upper")
+
+    def test_wait_for_completion_timeout_raises(self):
+        """P0-2 #6: wait_for_completion timeout raises RuntimeError, not False."""
+        xs_a = timezone.now()
+        xs_b = xs_a + timezone.timedelta(seconds=1)
+        a_event = (900, 200, xs_a, timezone.now(), None, None)
+        b_event = (901, 201, xs_b, timezone.now(), None, None)
+        with self.assertRaises(RuntimeError) as ctx:
+            self.collector.wait_for_completion(a_event, b_event, timeout=0.1)
+        self.assertIn("wait_for_completion timed out", str(ctx.exception))
+
+    def test_collector_stop_fail_closed(self):
+        """P0-2 #7: collector stop raises on thread join timeout or internal exception."""
+        # Internal exception in collector thread should propagate on stop
+        self.collector._exception = RuntimeError("collector internal crash")
+        self.collector._thread = None  # no real thread
+        with self.assertRaises(RuntimeError):
+            self.collector.stop()
+
+    def test_poll_exception_fail_closed(self):
+        """P0-2 #8: DB clock/poll exception stored and propagated on stop."""
+        self.collector.set_job_ids(self.job_a.job_id, None)
+        self._register_pid(100, "test-job-a")
+        with self.assertRaises(RuntimeError):
+            with patch.object(self.collector, '_get_worker_child_ports',
+                              side_effect=RuntimeError("poll crash")):
+                self.collector.pre_arm()
+                self.collector._thread.join(timeout=5)
+                self.collector.stop()
+
+    def test_ab_same_port_formal_ordering(self):
+        """P0-2 #9: A/B same-port sequential: A end_upper <= B xact_start ordering."""
+        self.collector.set_job_ids(self.job_a.job_id, self.job_b.job_id)
+        self._register_pid(100, "test-job-a")
+        t0 = timezone.now()
+        t1 = t0 + timezone.timedelta(seconds=1)
+        t2 = t0 + timezone.timedelta(seconds=2)
+        t3 = t0 + timezone.timedelta(seconds=3)
+        t4 = t0 + timezone.timedelta(seconds=4)
+        xs_a = t1 + timezone.timedelta(microseconds=100)
+        xs_b = t3 + timezone.timedelta(microseconds=100)
+        self._simulate_poll_seq(set(), [], t0)
+        # A appears
+        self._simulate_poll_seq({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs_a, 'state': 'active'},
+        ], t1)
+        self._simulate_poll_seq({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs_a, 'state': 'active'},
+        ], t2)
+        self.assertEqual(self.collector._a_state, "ASSIGNED")
+        # A disappears (backend gone)
+        self._simulate_poll_seq(set(), [], t3)
+        self.assertIsNotNone(self.collector._a_xact_end_lower)
+        self.assertTrue(self.collector._a_xact_end_verified)
+        # Register B's PID on the same port (200)
+        self._register_pid(100, "test-job-b")
+        self.job_b.worker_id = "worker-1"
+        self.job_b.execution_token = "tok-b"
+        self.job_b.status = Job.Status.RUNNING
+        self.job_b.save()
+        # B appears on same port with new xact_start
+        self._simulate_poll_seq({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs_b, 'state': 'active'},
+        ], t4)
+        # B should be ASSIGNED
+        self._simulate_poll_seq({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs_b, 'state': 'active'},
+        ], t4 + timezone.timedelta(seconds=1))
+        self.assertEqual(self.collector._b_state, "ASSIGNED")
+        # Same-port ordering check via get_transactions
+        a_info, b_info = self.collector.get_transactions(timeout=5)
+        self.assertEqual(a_info[0], 900)
+        self.assertEqual(a_info[1], 200)
+        self.assertEqual(b_info[0], 900)
+        self.assertEqual(b_info[1], 200)
+        # A end_upper <= B xact_start
+        a_end_upper = a_info[5]
+        b_xs = b_info[2]
+        self.assertIsNotNone(a_end_upper)
+        self.assertIsNotNone(b_xs)
+        self.assertLessEqual(a_end_upper, b_xs)
+
+    def test_wait_for_completion_missing_end_raises(self):
+        """P0-2 #6b: wait_for_completion with missing END events raises RuntimeError."""
+        xs_a = timezone.now()
+        xs_b = xs_a + timezone.timedelta(seconds=1)
+        a_event = (900, 200, xs_a, timezone.now(), None, None)
+        b_event = (901, 201, xs_b, timezone.now(), None, None)
+        # No END events added → timeout → raise
+        with self.assertRaises(RuntimeError):
+            self.collector.wait_for_completion(a_event, b_event, timeout=0.1)
+
+    def test_unrelated_end_completion_probe(self):
+        """P0-2 F2: Unrelated END with same xs does not fool shim or wait_for_completion."""
+        xs_a = timezone.now()
+        self.collector._a_child_pid = 900
+        self.collector._a_child_port = 200
+        self.collector._a_xact_start = xs_a
+        # Add unrelated END with same xs but different (pid,port)
+        self.collector._events.append(("END", 999, 999, xs_a,
+                                        timezone.now(), timezone.now()))
+        # Shim must reflect NOT completed
+        self.assertFalse(self.collector.observer_a.transaction_completed,
+                         "unrelated END with same xs must not set shim completed")
+        # wait_for_completion must timeout (not return True)
+        a_event = (900, 200, xs_a, timezone.now(), None, None)
+        b_event = (901, 201, timezone.now(), timezone.now(), None, None)
+        self.collector._b_xact_start = timezone.now()
+        with self.assertRaises(RuntimeError):
+            self.collector.wait_for_completion(a_event, b_event, timeout=0.1)
+
+    def test_race_xs_before_previous_after_transition(self):
+        """F1: Race repro — new xact_start < previous after does NOT invert bounds
+        because lower bound uses _last_poll_before (not _last_poll_after).
+        """
+        t0 = timezone.now()
+        t1 = t0 + timezone.timedelta(seconds=1)
+        t2 = t0 + timezone.timedelta(seconds=2)
+        t3 = t0 + timezone.timedelta(seconds=3)
+        xs_a = t1 + timezone.timedelta(microseconds=100)
+        xs_b = t2 + timezone.timedelta(microseconds=50)
+        self.collector.set_job_ids(self.job_a.job_id, None)
+        self._register_pid(100, "test-job-a")
+        self._simulate_poll_seq(set(), [], t0)
+        self._simulate_poll_seq({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs_a, 'state': 'active'},
+        ], t1)
+        self._simulate_poll_seq({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs_a, 'state': 'active'},
+        ], t2)
+        self.assertEqual(self.collector._a_state, "ASSIGNED")
+        self.assertEqual(self.collector._a_xact_start, xs_a)
+        # _last_poll_after = t2 (previous poll's after) — xs_b (t2+50μs) < t2 would race
+        # Simulate the race: set _last_poll_after artificially AFTER xs_b
+        self.collector._last_poll_after = t2 + timezone.timedelta(microseconds=100)
+        # xs_b (= t2+50μs) is now < _last_poll_after (= t2+100μs)
+        # With OLD code (using _last_poll_after): end_lower=t2+100μs > end_upper=t2+50μs
+        # With FIX (using _last_poll_before): end_lower=t2 <= end_upper=t2+50μs
+        self._simulate_poll_seq({(100, 200)}, [
+            {'pid': 900, 'client_port': 200, 'xact_start': xs_b, 'state': 'active'},
+        ], t3)
+        self.assertIsNotNone(self.collector._a_xact_end_lower)
+        self.assertIsNotNone(self.collector._a_xact_end_upper)
+        # OLD: _last_poll_after (= t2+100μs) > xs_b (= t2+50μs) → inverted
+        # FIXED: _last_poll_before (= t2) <= xs_b (= t2+50μs) → safe
+        self.assertLessEqual(self.collector._a_xact_end_lower, self.collector._a_xact_end_upper,
+                         "race scenario must not invert: end_lower <= end_upper")
+
+    def test_inverted_bounds_fail_closed_in_get_transactions(self):
+        """F1: Inverted END bounds (lower > upper) cause RuntimeError in get_transactions."""
+        self.collector.set_job_ids(self.job_a.job_id, self.job_b.job_id)
+        self.collector._a_state = "ASSIGNED"
+        self.collector._a_child_pid = 900
+        self.collector._a_child_port = 200
+        self.collector._a_xact_start = timezone.now()
+        self.collector._a_start_bound = timezone.now()
+        self.collector._a_xact_end_lower = timezone.now() + timezone.timedelta(hours=1)
+        self.collector._a_xact_end_upper = timezone.now() - timezone.timedelta(hours=1)
+        self.collector._a_xact_end_verified = True
+        self.collector._b_state = "ASSIGNED"
+        self.collector._b_child_pid = 901
+        self.collector._b_child_port = 201
+        self.collector._b_xact_start = timezone.now()
+        self.collector._b_start_bound = timezone.now()
+        self.collector._b_xact_end_lower = timezone.now()
+        self.collector._b_xact_end_upper = timezone.now()
+        self.collector._b_xact_end_verified = True
+        with self.assertRaises(RuntimeError) as ctx:
+            self.collector.get_transactions(timeout=1)
+        self.assertIn("END bounds inverted", str(ctx.exception))
+
+
+class TransactionCollectorPgIntegrationTests(TransactionTestCase):
+    """Real PostgreSQL integration tests for advisory lock + application_name marker (F1/F2/F4/F6).
+    No global mocks — uses real _check_advisory_lock with separate connections.
+    """
+
+    reset_sequences = True
+
+    def setUp(self):
+        if connection.vendor != "postgresql":
+            self.skipTest("Requires PostgreSQL")
+        self.collector = TransactionCollector(poll_seconds=0.1)
+        self.job_a = Job.objects.create(
+            job_id="int-job-a",
+            job_type=Job.JobType.MASTER_UPDATE,
+            status=Job.Status.RUNNING,
+            worker_id="int-worker",
+            execution_token="int-tok-a",
+        )
+
+    def tearDown(self):
+        if self.collector._thread and self.collector._thread.is_alive():
+            self.collector.stop()
+
+    def _producer_acquire(self, job_id, execution_token):
+        """Create a new DB connection, acquire advisory lock + set app_name."""
+        from quality.s2_cr08_shared import make_advisory_lock_id, make_application_name_marker
+        conn = self._make_producer_conn()
+        cursor = conn.cursor()
+        lock_id = make_advisory_lock_id(job_id, execution_token)
+        app_name = make_application_name_marker(job_id, execution_token)
+        cursor.execute("SELECT pg_advisory_xact_lock(%s, %s)", [42, lock_id])
+        cursor.execute(f"SET LOCAL application_name = '{app_name}'")
+        pid = cursor.execute("SELECT pg_backend_pid()").fetchone()[0]
+        return conn, pid
+
+    def _observer_check(self, pid, job_id, execution_token):
+        return self.collector._check_advisory_lock(pid, job_id, execution_token)
+
+    def test_pg_held_with_correct_token(self):
+        conn, pid = self._producer_acquire(self.job_a.job_id, self.job_a.execution_token)
+        try:
+            result = self._observer_check(pid, self.job_a.job_id, self.job_a.execution_token)
+            self.assertEqual(result, _LOCK_HELD)
+        finally:
+            conn.rollback()
+            conn.close()
+
+    def test_pg_wrong_token_not_held(self):
+        conn, pid = self._producer_acquire(self.job_a.job_id, "wrong-token")
+        try:
+            result = self._observer_check(pid, self.job_a.job_id, self.job_a.execution_token)
+            self.assertEqual(result, _LOCK_NOT_HELD)
+        finally:
+            conn.rollback()
+            conn.close()
+
+    def _make_producer_conn(self):
+        """Create a new standalone psycopg connection."""
+        from django.db import connections as dj_connections
+        db_settings = dj_connections['default'].settings_dict
+        import psycopg
+        conn = psycopg.connect(
+            host=db_settings['HOST'] or None,
+            port=db_settings['PORT'] or None,
+            dbname=db_settings['NAME'],
+            user=db_settings['USER'] or None,
+            password=db_settings['PASSWORD'] or None,
+        )
+        conn.autocommit = False
+        return conn
+
+    def test_pg_lock_only_mismatch_app_not_held(self):
+        from quality.s2_cr08_shared import make_advisory_lock_id
+        conn = self._make_producer_conn()
+        cursor = conn.cursor()
+        lock_id = make_advisory_lock_id(self.job_a.job_id, self.job_a.execution_token)
+        cursor.execute("SELECT pg_advisory_xact_lock(%s, %s)", [42, lock_id])
+        cursor.execute("SET LOCAL application_name = 'wrong_app'")
+        pid = cursor.execute("SELECT pg_backend_pid()").fetchone()[0]
+
+        try:
+            result = self._observer_check(pid, self.job_a.job_id, self.job_a.execution_token)
+            self.assertEqual(result, _LOCK_NOT_HELD)
+        finally:
+            conn.rollback()
+            conn.close()
+
+    def test_pg_released_after_commit(self):
+        from quality.s2_cr08_shared import make_advisory_lock_id, make_application_name_marker
+        conn = self._make_producer_conn()
+        cursor = conn.cursor()
+        lock_id = make_advisory_lock_id(self.job_a.job_id, self.job_a.execution_token)
+        app_name = make_application_name_marker(self.job_a.job_id, self.job_a.execution_token)
+        cursor.execute("SELECT pg_advisory_xact_lock(%s, %s)", [42, lock_id])
+        cursor.execute(f"SET LOCAL application_name = '{app_name}'")
+        pid = cursor.execute("SELECT pg_backend_pid()").fetchone()[0]
+        conn.commit()
+        conn.close()
+        result = self._observer_check(pid, self.job_a.job_id, self.job_a.execution_token)
+        self.assertEqual(result, _LOCK_NOT_HELD)
+
+    def test_pg_observer_query_error_returns_error(self):
+        """F1: Query error → ERROR, not crash."""
+        from unittest.mock import patch
+        with patch.object(connection, 'cursor', side_effect=Exception("DB error")):
+            result = self.collector._check_advisory_lock(
+                123, self.job_a.job_id, self.job_a.execution_token)
+        self.assertEqual(result, _LOCK_ERROR)
+
+    def test_pg_marker_length_properties(self):
+        from quality.s2_cr08_shared import make_application_name_marker, ADVISORY_LOCK_MARKER_PREFIX
+        marker = make_application_name_marker(self.job_a.job_id, self.job_a.execution_token)
+        self.assertTrue(marker.startswith(ADVISORY_LOCK_MARKER_PREFIX))
+        self.assertEqual(len(marker), len(ADVISORY_LOCK_MARKER_PREFIX) + 32)
+        marker2 = make_application_name_marker(self.job_a.job_id, self.job_a.execution_token)
+        self.assertEqual(marker, marker2)
+        marker3 = make_application_name_marker(self.job_a.job_id, "other-token")
+        self.assertNotEqual(marker, marker3)
+
+
+class VerifyChildProcessDirectTests(TransactionTestCase):
+    """F5: Direct tests for _verify_child_process WMI command parser."""
+
+    def _mock_run(self, stdout="", returncode=0):
+        return type("Proc", (), {"stdout": stdout, "stderr": "", "returncode": returncode})()
+
+    def test_exact_job_and_worker_match(self):
+        """Exact job_id and worker_id match."""
+        vp = TransactionCollector._verify_child_process
+        cmdline = (
+            r'C:\Python\python.exe manage.py execute_claimed_job job_123 --worker-id worker-1 '
+            r'--other-flag value'
+        )
+        with patch('quality.s2_cr08_canonical.subprocess.run',
+                   return_value=self._mock_run(stdout=cmdline)):
+            result = vp(100, "job_123", "worker-1")
+            self.assertTrue(result)
+
+    def test_worker_id_mismatch_rejected(self):
+        """worker_id mismatch should be rejected."""
+        vp = TransactionCollector._verify_child_process
+        cmdline = (
+            r'C:\Python\python.exe manage.py execute_claimed_job job_123 --worker-id stale-worker'
+        )
+        with patch('quality.s2_cr08_canonical.subprocess.run',
+                   return_value=self._mock_run(stdout=cmdline)):
+            result = vp(100, "job_123", "current-worker")
+            self.assertFalse(result)
+
+    def test_job_id_mismatch_rejected(self):
+        """Different job_id should be rejected."""
+        vp = TransactionCollector._verify_child_process
+        cmdline = (
+            r'C:\Python\python.exe manage.py execute_claimed_job job_456 --worker-id worker-1'
+        )
+        with patch('quality.s2_cr08_canonical.subprocess.run',
+                   return_value=self._mock_run(stdout=cmdline)):
+            result = vp(100, "job_123", "worker-1")
+            self.assertFalse(result)
+
+    def test_substring_job_id_rejected(self):
+        """Substring match should not succeed (job_1 vs job_123)."""
+        vp = TransactionCollector._verify_child_process
+        cmdline = (
+            r'C:\Python\python.exe manage.py execute_claimed_job job_123 --worker-id worker-1'
+        )
+        with patch('quality.s2_cr08_canonical.subprocess.run',
+                   return_value=self._mock_run(stdout=cmdline)):
+            result = vp(100, "job_1", "worker-1")
+            self.assertFalse(result)
+
+    def test_quoted_path_in_command_line(self):
+        """Quoted Python path should still parse correctly."""
+        vp = TransactionCollector._verify_child_process
+        cmdline = (
+            r'"C:\Program Files\Python\python.exe" manage.py execute_claimed_job job_123 '
+            r'--worker-id worker-1'
+        )
+        with patch('quality.s2_cr08_canonical.subprocess.run',
+                   return_value=self._mock_run(stdout=cmdline)):
+            result = vp(100, "job_123", "worker-1")
+            self.assertTrue(result)
+
+    def test_missing_process_returns_false(self):
+        """subprocess.run exception (missing process) → False."""
+        vp = TransactionCollector._verify_child_process
+        with patch('quality.s2_cr08_canonical.subprocess.run',
+                   side_effect=Exception("Process not found")):
+            result = vp(99999, "job_123", "worker-1")
+            self.assertFalse(result)
+
+    def test_nonzero_exit_returns_false(self):
+        """Non-zero return code from WMI → empty stdout → False."""
+        vp = TransactionCollector._verify_child_process
+        with patch('quality.s2_cr08_canonical.subprocess.run',
+                   return_value=self._mock_run(stdout="", returncode=1)):
+            result = vp(100, "job_123", "worker-1")
+            self.assertFalse(result)
+
+    def test_empty_stdout_returns_false(self):
+        """Empty stdout from WMI → False."""
+        vp = TransactionCollector._verify_child_process
+        with patch('quality.s2_cr08_canonical.subprocess.run',
+                   return_value=self._mock_run(stdout="")):
+            result = vp(100, "job_123", "worker-1")
+            self.assertFalse(result)

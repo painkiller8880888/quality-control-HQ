@@ -324,7 +324,7 @@ class Command(BaseCommand):
 
                 self.stdout.write("Waiting for A/B transaction assignment...")
                 a_event, b_event = coordinator.get_transactions()
-                # a_event = (pid, port, xact_start, start_bound, end_bound)
+                # a_event = (pid, port, xact_start, start_bound, end_lower, end_upper)
                 port_a, port_b = a_event[1], b_event[1]
                 self.stdout.write(f"Transaction A: pid={a_event[0]}, port={port_a}, xact_start={a_event[2]}")
                 self.stdout.write(f"Transaction B: pid={b_event[0]}, port={port_b}, xact_start={b_event[2]}")
@@ -526,11 +526,13 @@ class Command(BaseCommand):
                     if coordinator:
                         evidence["observer_a"] = {
                             "transaction_completed": coordinator.observer_a.transaction_completed,
-                            "correlation_unique": True, "observation_ok": True,
+                            "correlation_unique": coordinator.observer_a.correlation_unique,
+                            "observation_ok": coordinator.observer_a.observation_ok,
                         }
                         evidence["observer_b"] = {
                             "transaction_completed": coordinator.observer_b.transaction_completed,
-                            "correlation_unique": True, "observation_ok": True,
+                            "correlation_unique": coordinator.observer_b.correlation_unique,
+                            "observation_ok": coordinator.observer_b.observation_ok,
                         }
                 except Exception as e:
                     enrichment_errors.append(f"observer_info: {_privacy_safe_str(str(e))}")

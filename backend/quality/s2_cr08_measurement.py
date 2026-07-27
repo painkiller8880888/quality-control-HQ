@@ -11,6 +11,7 @@ TRANSACTION_SNAPSHOT_QUERY = """
 SELECT
     pid,
     client_port,
+    client_addr,
     xact_start,
     state
 FROM pg_stat_activity
