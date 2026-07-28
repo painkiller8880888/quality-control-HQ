@@ -1,135 +1,170 @@
-# Handoff: reviewer → implementer
+# Handoff: reviewer → planner / implementer
 
 ## Review Scope
 
-- 対象: 第二P0「transaction境界の正確性」、前回F1〜F4の再レビュー
-- 確認対象:
-  - `backend/quality/s2_cr08_canonical.py`
-  - `backend/quality/test_s2_cr08_canonical.py`
-  - `.implementer/HANDOFF.md`
-- 実施: 差分レビュー、race direct probe、対象50 tests、Django check、migration drift、diff check
-- 非実施: 疑似本番dry-run/live、Job投入、service操作、backup/restore
-- `LIVE_BLOCKED = True`維持を確認
+- `.planner/HANDOFF.md`
+- latest `.implementer/HANDOFF.md`
+- previous findings F1–F5
+- semantic consistency gap
+- retained/removed test bodies
+- distribution/privacy direct tests
+- test definitions / uniqueness
+- `LIVE_BLOCKED = True`
+- `git diff --check`
 
 ## Verdict
 
-**FAIL**
+**FAIL — Safety Stop / planner decision required**
 
-前回F2、F3、F4はコード上で解消したが、F1のsame-port transition lower boundにraceが残る。前回snapshot直後からclock `after`取得までにtransactionが切り替わると、`end_lower > end_upper`となり、formal evidenceへ負のmeasurement errorを出力する。
+implementerは、`measurement_status`、`failure_reason`、`live_verification`のsemantic consistency validatorがproductionに存在しないことを正しくgapとして報告した。
 
-第二P0は未達。P0 final gateへ進まず、`LIVE_BLOCKED = True`を維持する。
+これはP1 acceptance criterion 4の必須fail-closed条件そのものであるため、reviewerはgapを受容してPASSへ変更できない。production/schema互換性へ影響する可能性がある変更は現planner scopeで禁止されており、implementerのSafety Stopは妥当である。
 
-## Confirmed Fixes
+P2へ進まない。`LIVE_BLOCKED = True`を維持する。
 
-### 前回F2: unrelated END false completion
+## Resolved Findings
 
-解消を確認した。
+次は解消済み:
 
-- `wait_for_completion()`はA/Bそれぞれの`_xact_end_verified`を確認する。
-- observer shimの`transaction_completed`も専用verified stateを返す。
-- unrelated END negative testが追加された。
+- distribution bool priority key rejection: preflight/postflight
+- distribution negative count rejection: preflight/postflight
+- total mismatch testのtraceability
+- privacy dynamic integer priority key: preflight/postflight
+- raw path実入力のprivacy rejection
+- canonical test method重複
+- test count / uniqueness
+- repository rootでの`git diff --check`
+- semantic contradictionを受理する`test_build_evidence_semantic_contradiction_completed_with_failure_reason`の削除
+- 不存在F4 testを追加済みとする記載の撤回
 
-### 前回F3: disappearance lower bound
+reviewer静的実測:
 
-解消を確認した。
+| Target | Definitions | Unique | Duplicates |
+|---|---:|---:|---:|
+| canonical | 267 | 267 | 0 |
+| measurement | 34 | 34 | 0 |
 
-- disappearance END lowerは`_last_poll_before`を使用する。
-- previous snapshotでactiveだったことから保証できる安全側のlowerになった。
+次も確認済み:
 
-### 前回F4: START ordering test
+- module/command双方で`LIVE_BLOCKED = True`
+- reviewer `git diff --check`: exit 0、CRLF warningのみ
+- implementer申告fresh DB: canonical 267/267、measurement 34/34、queue + PhaseTwo 49/49 PASS
 
-解消を確認した。
+## Blocking Finding
 
-- `start_bound >= xact_start`を直接assertする。
-- `start_bound`をtransaction開始下限ではなく、観測poll時刻として扱うことがtest上で明確になった。
+### B1 — High: formal evidence semantic consistencyは未実装
 
-## Findings
+implementer gap analysis:
 
-### F1 — Critical: same-port transitionのlowerにprevious `after`を使うため、END boundsが反転する
+> `measurement_status`、`failure_reason`、`live_verification`の自己矛盾を拒否するsemantic consistency validatorは現状存在しない。
 
-same-port transitionは次の値を記録する。
+reviewerのコード確認とも一致する。`build_canonical_evidence()`は次のような矛盾を構築可能である:
+
+- `measurement_status="completed"` + non-empty `failure_reason`
+- `measurement_status="completed"` + failed `live_verification` gate
+- `measurement_status="failed"` + empty `failure_reason`
+
+`run_canonical()`がfailed Jobを早期拒否することは重要だが、完成したformal evidenceのsemantic validationとは別契約である。builder、writer、またはfinal evidence gateの別経路から矛盾が入った場合をfail-closedで拒否する保証がない。
+
+必要なplanner判断:
+
+1. production semantic validatorの追加を新しい明示scopeとして許可する
+2. validatorの適用地点を決める
+   - evidence build直後
+   - privacy check前
+   - evidence write直前
+   - writer再読込後
+3. schema互換性への影響を評価する
+4. direct positive/negative testと既存suite回帰を必須にする
+
+この判断なしにimplementerがproduction変更へ進んではならない。
+
+## Remaining Documentation/Test Cleanup
+
+### F1 — Medium: misleading semantic testが1件残っている
+
+次が`JobResultVerifierTests`内に残る:
 
 ```text
-end_lower = _last_poll_after
-end_upper = new xact_start
+test_run_canonical_rejects_completed_status_with_failed_job_a_in_live_verification
 ```
 
-前回pollの順序は次のとおり。
+周辺commentは「Semantic contradiction direct negative tests」、docstringはcompleted statusとfailed live verificationの矛盾拒否を主張するが、実際にはfailed Jobを渡して既存Job final gateのraiseを確認する長大testである。
 
-```text
-previous before → snapshot(old active) → transaction transition/new xact_start → previous after
-```
-
-transitionがsnapshot直後、`previous after`取得前に起きることは可能である。この場合:
-
-```text
-new xact_start < previous after
-end_upper < end_lower
-```
-
-reviewer race probe:
-
-```text
-lower_gt_upper=True
-duration_lower_bound_seconds=3.0
-duration_upper_bound_seconds=2.0
-max_measurement_error_seconds=-1.0
-```
-
-`get_transactions()`はsame-portで`end_upper <= B xact_start`だけを確認するため、`end_lower > end_upper`でも受理し得る。続くformal evidence生成もorderingをrejectせず、負の`max_measurement_error_seconds`を出力する。
-
-追加testは`xs_b`をprevious `after`より100µs後に固定しており、問題のraceを覆っていない。
-
-該当箇所:
-
-- `backend/quality/s2_cr08_canonical.py:779-780`
-- `backend/quality/s2_cr08_canonical.py:800-812`
-- `backend/quality/s2_cr08_canonical.py:827-839`
-- `backend/quality/s2_cr08_canonical.py:898-905`
-- `backend/quality/s2_cr08_canonical.py:2071-2074`
-- `backend/quality/test_s2_cr08_canonical.py:2036-2069`
+同じJob A failure契約は`RunCanonicalTests.test_run_canonical_job_gate_fails_closed_when_job_a_failed`と重複する。
 
 必要対応:
 
-- same-port transition lowerにも、previous snapshotがold transactionを観測したことから保証できる安全側の時刻を使う。既に保持している`_last_poll_before`を候補として検討する。
-- `new xact_start < previous after`を再現するdirect testを追加する。
-- `end_lower <= end_upper`を正式経路およびevidence生成前のfail-closed invariantとして検証する。
-- negative duration / negative measurement errorを許可しないtestを追加する。
+- この残存testを削除する
+- semantic direct testとしてmatrix/reportへ含めない
+- pure Job final gate testの重複を増やさない
 
-### F2 — Medium: implementer handoffが現在コードと検証件数を反映していない
+### F2 — Medium: “matrix 267 FQN”はtraceability matrixの集合ではない
 
-handoffは前回修正前の内容のままで、現在コードと矛盾する。
+handoffは「matrix references 267 / unique 267」とするが、267はcanonical file全test definitionsの件数である。表示されたtraceability matrixは代表testだけを記載し、多くは`Class.test_method`形式で、plannerが要求した完全修飾名ではない。
 
-- disappearance lowerを`_last_poll_after`と記載しているが、コードは`_last_poll_before`
-- same-port ENDを同一poll `before/after`と記載しているが、コードはprevious `after` / new `xact_start`
-- new testsを10件、対象suiteを49件と記載しているが、現在はunrelated END probe追加後の50件
-- 前回reviewer F1〜F4への対応内容がChangesに含まれていない
+full canonical suiteが267件PASSすることと、traceability matrixの各参照を完全修飾名で機械検証することは別である。
 
-Handoff Rulesに従い、次review前に実装事実と独立して再現可能な検証件数へ更新する。
+必要対応:
 
-該当箇所:
+- matrixの参照だけを抽出してreferences / unique / missingを報告する
+- canonical参照も`quality.test_s2_cr08_canonical.Class.test_method`形式にする
+- measurement参照と同じ完全修飾形式へ統一する
+- full suite 267件の件数は別表として扱う
 
-- `.implementer/HANDOFF.md`
+### F3 — Medium: partial coverageとmissing ENDを同一扱いしている
 
-## Independent Validation
+handoff:
 
-| Check | Result |
-|---|---|
-| `TransactionCollectorCorrelationTests` | PASS: 50/50, 20.574s |
-| same-port transition race probe | **FAIL: lower > upperを再現** |
-| formal transaction evidence probe | **FAIL: max_measurement_error_seconds=-1.0** |
-| unrelated END completion | PASS: verified stateへ変更確認 |
-| disappearance lower | PASS: `_last_poll_before`使用確認 |
-| START ordering direct assert | PASS: test追加確認 |
-| `manage.py check` | PASS |
-| `manage.py makemigrations --check --dry-run` | PASS: No changes detected |
-| `git diff --check` | PASS（line-ending warningのみ） |
-| `LIVE_BLOCKED = True` | 維持確認 |
+> partial coverageは既存の`test_wait_for_completion_missing_end_raises`でカバーされる
 
-既存test DBが存在したため、対象50 testsは`--keepdb`で実行した。最初の短いtest呼出はtimeoutで中断し、その後の完走runのみを結果として記録した。
+missing ENDはpartial coverageの一例だが、observer fieldの部分欠測、metrics coverage不足、time windowの一部未観測すべてを代表するわけではない。
 
-reviewerは疑似本番dry-run/live、Job投入、service操作、backup/restore、業務data変更を行っていない。
+既存の次を要件別に再評価する:
 
-## Next Scope
+- `TransactionCollectorCorrelationTests.test_wait_for_completion_missing_end_raises`
+- `S2Cr08MeasurementTests.test_build_evidence_partial_transaction_observer`
+- `RunCanonicalTests.test_run_canonical_fails_closed_when_metrics_insufficient`
+- observer field欠測を拒否する既存RunCanonical test
 
-次iterationはF1のsafe lower/invariant修正、race direct test、F2 handoff整合のみを対象とする。第二P0のreviewer PASSまでは第三P0 final gateへ進まない。
+単に「partial coverage」と総称せず、各testが拒否する具体的なmissing field/conditionを記載すること。
+
+## Required Next Step
+
+### Planner
+
+semantic consistency validatorをproductionへ追加する新scopeを作成するか判断する。
+
+新scopeを作る場合の最低要件:
+
+1. semantic validatorはpure functionとして最小実装
+2. completed/failed状態、failure reason、全live verification gateの整合を検証
+3. unknown/missing/malformed typeをfail-closed
+4. final evidence write前に必ず呼ばれる
+5. contradictionごとのdirect negative test
+6. valid completed/failed evidenceのpositive test
+7. privacy・manifest・fresh DB全回帰
+8. `LIVE_BLOCKED = True`維持
+
+### Implementer
+
+plannerがscopeを更新するまではproduction変更を行わない。
+
+許可されるcleanupは:
+
+- 残存するmisleading/duplicate semantic testの削除
+- handoffのmatrix count/FQN表記/coverage説明の訂正
+
+cleanup後もsemantic validator未実装のため、P1 verdictはFAILのままとする。
+
+## Non-Goals
+
+- P2
+- canonical `--dry-run` / `--live`
+- 疑似本番または実Job投入
+- service操作
+- backup/restore
+- threshold承認・変更
+- `specification/RELEASE.md`の状態変更
+- model/migration変更
+- stage/commit

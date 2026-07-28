@@ -189,6 +189,28 @@ Job状態は当面`queued / running / succeeded / failed`を維持し、依存�
 | S2-PAR-01 | 独立Job用の並列workerを第2段階で導入するか後段へ延期するか判断する | 延期 | 2026-07-23 | 設計・運用判断 | 判断日2026-07-23。approval ID: PAR01-DEC-20260723-001。期限2026-08-21またはgo-live/第3段階capacity reviewの早い方。owner: 運用責任者、co-review: 業務責任者 / アプリ責任者。concurrency=1、quality_master排他、依存待機を維持。acception criterion 7はN/A/deferred。applicable criteria(1–6,8)全件成功を第2段階合格条件とする。並列化導入時criterion 7必須化。再検討trigger全7条件をpar01-decision.jsonに定義 | 本記録（延期判断日2026-07-23）および `runtime/pseudoprod/evidence/par01-decision.json`（PAR01-DEC-20260723-001）。decision evidenceとRELEASEの双方に同一approval情報を記録済み | 正式延期のためrelease blockerではない。再検討trigger条件を監視する運用ルールの確立が必要 |
 | S2-CR-08 | 受入基準8（transaction時間、lock待ち、CPU、メモリ、DB接続数、後続Job待ち時間）の現存証跡監査 | 部分実施 | 2026-07-23 | 疑似本番証跡監査 | 3証跡のSHA-256一致確認。CPU最大21.7%、メモリ最大66.3%、DB接続2〜4、waiting locks 0、granted locks 1〜65、Job実行時間641.118秒。FIFO A→B dispatch/handoff gap 2.177秒。CPU・メモリ・DB接続数・lock待ち・transaction時間・後続Job待ち時間のいずれも承認済み閾値なし。S2-HTTP-01のIFC20260723-001はWeb応答/master更新完了時間の閾値でありcriterion 8の対象外。**測定fixture拡充**: Jobごとに独立した`TransactionObserver`を`start_watching()`フェーズ制御で運用し、transaction時間とJob作成時刻を`job_a_transaction`/`job_b_transaction`として分離記録する。CLIはsmoke fixture専用に制限。fixture単体検証自動試験34件(quality.test_s2_cr08_measurement)が合格。疑似本番再測定は全preflight gate未充足のため安全停止（未実行）。6指標とも承認済み閾値なしのためverdictは`not_evaluable`、S2-CR-08は「部分実施」を維持 | `runtime/pseudoprod/evidence/s2-criterion-8-20260723-095921/`（summary・addendum・checksums.sha256）。測定fixture: `backend/quality/s2_cr08_measurement.py`（evidence schema v3・observer・検証）、`backend/quality/management/commands/measure_s2_cr08.py`（smoke fixture CLI）、`backend/quality/test_s2_cr08_measurement.py`（fixture単体検証自動試験34件）。`backend/quality/models.py` + `migrations/0029_job_created_at.py`（Job.created_atフィールド追加） | 承認済み閾値の設定と記録。疑似本番でのcanonical再測定（全preflight gate充足後）。fixture検証自動試験合格確認 |
 
+#### S2-CR-08 自動試験・review実施記録（2026-07-28）
+
+P0「final gateとformal evidence」の実装および回帰試験をfresh test DBで検証し、reviewer判定は**PASS**となった。今回のPASSはコード・契約・回帰試験の範囲に対するものであり、疑似本番でのcanonical `--dry-run`、backup/restore検証、live A/B測定、6指標の閾値承認を完了したことを意味しない。したがって、S2-CR-08全体の状態は引き続き**部分実施**、6指標のverdictは`not_evaluable`とし、`LIVE_BLOCKED = True`を維持する。
+
+| 検証対象 | 結果 | 補足 |
+|---|---:|---|
+| `quality.test_s2_cr08_canonical` | PASS: 248/248 | fresh test DB。test methodは248 definitions / 248 uniqueで重複なし |
+| `quality.test_s2_cr08_measurement` | PASS: 34/34 | fresh test DB |
+| `PersistentJobQueueApiTests` | PASS: 4/4 | fresh test DB |
+| `PersistentJobQueueRecoveryTests` | PASS: 12/12 | fresh test DB |
+| `PhaseTwoMasterUpdateTests` | PASS: 33/33 | fresh test DB |
+| queue + PhaseTwo合同 | PASS: 49/49 | 上記4/12/33の合同実行 |
+| real collector postflight contract | PASS: 2/2 | 実`Master`・`InspectionFile`からcollector出力を作成し、positive shapeと`baseline_matched=False`のnegative shapeを検証 |
+| Django system check | PASS | 問題なし |
+| migration drift | PASS | `makemigrations --check --dry-run`: No changes detected |
+| diff integrity | PASS | `git diff --check` exit 0。WindowsのCRLF warningのみ |
+| safety gate | PASS | canonical `--dry-run` / `--live`、疑似本番Job投入、service操作、backup/restoreは未実施。module/command双方の`LIVE_BLOCKED = True`を確認 |
+
+契約検証では、実`_inspection_file_distribution()`出力の整数priority key、非負count、`total == sum(by_priority.values())`、preflight/postflight共通shape、privacy filter通過を確認した。postflightは実collector出力に`passed=True`と`baseline_matched=True`を追加した実運用shapeを受理し、`baseline_matched=False`を拒否する。既存negative testでは`bool`・malformed型、total不一致、CPU/メモリの`inf`・`-inf`・`nan`をfail-closedで拒否する。
+
+fresh DBでは全対象suiteが合格した。一方、過去のstale `--keepdb`を再利用した実行ではdata migration由来の初期dataが先行`TransactionTestCase`後に残らず、queue + PhaseTwo合同で失敗が再現された。このため正式なrelease証跡はfresh test DBの結果を基準とし、stale keepdbの結果を製品回帰として扱わない。
+
 ### S2-CR-08 テスト方針の優先順位と暫定推奨閾値（未承認）
 
 S2-CR-08は、既存回帰試験の件数増加よりも、測定対象の同一性、欠測時の安全停止、正式証跡の合否判定可能性を優先する。次の優先順位を崩さず、各修正とそのdirect positive/negative testを同一iterationで完了させる。後続優先度への着手は、先行優先度のreviewer PASS後とする。

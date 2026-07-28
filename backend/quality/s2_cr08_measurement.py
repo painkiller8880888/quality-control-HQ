@@ -358,11 +358,57 @@ def write_evidence(evidence, output_dir):
         raise FileExistsError(f"Output directory already exists and is not empty: {path}")
     path.mkdir(parents=True, exist_ok=True)
     evidence_path = path / "measurement.json"
-    evidence_path.write_text(
-        json.dumps(evidence, ensure_ascii=False, indent=2, default=str),
-        encoding="utf-8",
-    )
-    digest = hashlib.sha256(evidence_path.read_bytes()).hexdigest()
     manifest_path = path / "checksums.sha256"
-    manifest_path.write_text(f"{digest}  measurement.json\n", encoding="utf-8")
+    # Atomic write: temp file -> flush -> fsync -> atomic replace
+    tmp_path = path / ".measurement.json.tmp"
+    try:
+        with tmp_path.open("wb") as f:
+            f.write(json.dumps(evidence, ensure_ascii=False, indent=2, default=str).encode("utf-8"))
+            f.flush()
+            import os
+            os.fsync(f.fileno())
+        os.replace(tmp_path, evidence_path)
+        # Verify JSON after replace: parse to ensure valid JSON
+        json.loads(evidence_path.read_text(encoding="utf-8"))
+        # Manifest
+        digest = hashlib.sha256(evidence_path.read_bytes()).hexdigest()
+        tmp_manifest = path / ".checksums.sha256.tmp"
+        try:
+            with tmp_manifest.open("wb") as f:
+                f.write(f"{digest}  measurement.json\n".encode("utf-8"))
+                f.flush()
+                import os
+                os.fsync(f.fileno())
+            os.replace(tmp_manifest, manifest_path)
+        except Exception:
+            if tmp_manifest.exists():
+                tmp_manifest.unlink()
+            raise
+        # Verify manifest: re-read and validate
+        manifest_content = manifest_path.read_text(encoding="utf-8").strip()
+        manifest_lines = manifest_content.splitlines()
+        if len(manifest_lines) != 1:
+            raise RuntimeError(f"Manifest must have exactly 1 entry, got {len(manifest_lines)}")
+        parts = manifest_lines[0].split()
+        if len(parts) != 2:
+            raise RuntimeError(f"Manifest line must have 2 parts (digest filename), got {len(parts)}")
+        manifest_digest, manifest_filename = parts
+        if manifest_filename != "measurement.json":
+            raise RuntimeError(f"Manifest filename mismatch: expected 'measurement.json', got '{manifest_filename}'")
+        if len(manifest_digest) != 64 or not all(c in "0123456789abcdef" for c in manifest_digest):
+            raise RuntimeError(f"Manifest digest must be 64-char hex, got '{manifest_digest}'")
+        if manifest_digest != digest:
+            raise RuntimeError(f"Manifest digest does not match computed digest")
+        # Re-compute file hash and verify against manifest
+        recomputed = hashlib.sha256(evidence_path.read_bytes()).hexdigest()
+        if recomputed != manifest_digest:
+            raise RuntimeError(f"File hash mismatch: recomputed={recomputed}, manifest={manifest_digest}")
+    except Exception:
+        if tmp_path.exists():
+            tmp_path.unlink()
+        if evidence_path.exists():
+            evidence_path.unlink()
+        if manifest_path.exists():
+            manifest_path.unlink()
+        raise
     return path

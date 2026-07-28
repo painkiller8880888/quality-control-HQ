@@ -15,6 +15,7 @@ from quality.s2_cr08_canonical import (
     build_canonical_evidence,
     run_preflight,
     run_postflight,
+    run_canonical,
     _privacy_check_passed,
     _all_preflight_pass,
     _table_counts,
@@ -159,7 +160,7 @@ class Command(BaseCommand):
             web_service_name=options["web_service"],
             worker_service_name=options["worker_service"],
             unc_paths=options["unc_paths"] or None,
-            output_dir=str(output) if dry_run else None,
+            output_dir=str(output),
         )
         preflight["canonical_payload"] = payload_verification
 
@@ -307,7 +308,7 @@ class Command(BaseCommand):
                 coordinator.set_job_ids(job_a.job_id, job_b.job_id)
 
                 self.stdout.write("Starting metrics monitor (before service start)...")
-                metrics_monitor = SystemMetricsMonitor(interval_seconds=min(poll_seconds * 5, 30.0))
+                metrics_monitor = SystemMetricsMonitor(interval_seconds=poll_seconds)
                 metrics_monitor.start()
 
                 self.stdout.write("Starting worker and web services...")
@@ -353,10 +354,14 @@ class Command(BaseCommand):
             finally:
                 # 1. Stop monitoring/coordinator (protected)
                 if metrics_monitor:
+                    # Capture thread alive state before stopping (for final gate)
+                    metrics_thread_alive = metrics_monitor._thread.is_alive() if metrics_monitor._thread else False
                     try:
                         metrics_monitor.stop()
                     except Exception as e:
                         cleanup_failures.append(f"metrics_monitor.stop: {e}")
+                else:
+                    metrics_thread_alive = False
                 if coordinator:
                     try:
                         coordinator.stop()
@@ -570,63 +575,43 @@ class Command(BaseCommand):
 
                 evidence["enrichment_errors"] = enrichment_errors
 
-                # 6. Compute final gate variables
-                emc = CANONICAL_BASELINE_EXPECTED_MASTER_COUNT
-                ecc = CANONICAL_BASELINE_EXPECTED_CLASS_COUNT
-                esc = CANONICAL_BASELINE_EXPECTED_STRUCTURE_COUNT
-                job_a_result = _verify_job_safe(job_a, "job_a")
-                job_b_result = _verify_job_safe(job_b, "job_b")
-                job_a_ok = job_a_result["passed"]
-                job_b_ok = job_b_result["passed"]
-                obs_a_ok = coordinator.observer_a.transaction_completed and coordinator.observer_a.correlation_unique and coordinator.observer_a.observation_ok
-                obs_b_ok = coordinator.observer_b.transaction_completed and coordinator.observer_b.correlation_unique and coordinator.observer_b.observation_ok
-                transactions_distinct = (
-                    coordinator.observer_a.xact_start is not None
-                    and coordinator.observer_b.xact_start is not None
-                    and coordinator.observer_a.xact_start != coordinator.observer_b.xact_start
-                )
-                
-                metrics_sample_count = evidence["system_metrics"].get("sample_count", 0)
-                metrics_ok = metrics_sample_count > 0 and evidence["system_metrics"].get("has_data", False)
-                metrics_alive_ok = not (metrics_monitor._thread and metrics_monitor._thread.is_alive()) if metrics_monitor else True
-                coverage_ok = True
-                if evidence["system_metrics"].get("first_sample") and evidence["system_metrics"].get("last_sample"):
-                    # TODO: add coverage check with job timestamps
-                    pass
-                
-                recovery_ok = all(r.get("success", False) for r in recovery_results)
-                
-                all_gates_pass = all([job_a_ok, job_b_ok, obs_a_ok, obs_b_ok, transactions_distinct, metrics_ok, metrics_alive_ok, coverage_ok, recovery_ok])
-                privacy_ok = True
-                privacy_issues = []
+                # 6. Final gate and formal evidence via run_canonical()
                 try:
-                    privacy_ok, privacy_issues = _privacy_check_passed(evidence)
+                    evidence = run_canonical(
+                        job_a=job_a,
+                        job_b=job_b,
+                        observer_a=coordinator.observer_a if coordinator else None,
+                        observer_b=coordinator.observer_b if coordinator else None,
+                        preflight=preflight,
+                        postflight=postflight,
+                        system_metrics=evidence.get("system_metrics", {}),
+                        baseline_counts=baseline_counts,
+                        baseline_hashes=baseline_hashes,
+                        postflight_counts=evidence.get("postflight_counts"),
+                        postflight_hashes=evidence.get("postflight_hashes"),
+                        correlation_info=None,
+                        backup_evidence=backup_result,
+                        poll_seconds=poll_seconds,
+                        evidence_output_dir=str(output) if output else None,
+                        web_service_name=options["web_service"],
+                        worker_service_name=options["worker_service"],
+                        metrics_thread_alive=metrics_thread_alive,
+                        cleanup_failures=cleanup_failures,
+                        recovery_results=recovery_results,
+                    )
+                    self.stdout.write("Final gate passed. Evidence finalized.")
+                except RuntimeError as gate_err:
+                    raise CommandError(f"Final gate failed: {gate_err}") from gate_err
+
+                # Evidence write: fail-closed on write failure
+                try:
+                    write_evidence(evidence, output)
+                    self.stdout.write(f"Evidence written to: {output}")
                 except Exception as e:
-                    privacy_ok = False
-                    privacy_issues = [{"field": "privacy_check", "reason": f"check crashed: {_privacy_safe_str(str(e))}"}]
-
-                if not privacy_ok:
-                    for issue in privacy_issues:
-                        self.stderr.write(f"Privacy issue: {issue['field']} - {issue['reason']}")
-                    self.stderr.write("Privacy check failed. Evidence will not be written.")
-
-                evidence["privacy_check_passed"] = privacy_ok
-
-                # Write evidence (protected)
-                if privacy_ok:
-                    try:
-                        write_evidence(evidence, output)
-                        self.stdout.write(f"Evidence written to: {output}")
-                    except Exception as e:
-                        self.stderr.write(f"Evidence write failed: {_privacy_safe_str(str(e))}")
-                else:
-                    self.stderr.write("Skipping evidence write due to privacy failure.")
+                    raise CommandError(f"Evidence write failed: {_privacy_safe_str(str(e))}") from e
 
                 if _live_exception:
                     raise CommandError(f"Live measurement failed: {failure_reason}") from _live_exception
-
-                if not all_gates_pass:
-                    raise CommandError(f"Live measurement completed with issues: {failure_reason}. See evidence for details.")
 
 
 def _check_passed(value):

@@ -1,9 +1,10 @@
+import math
 import hashlib
 import json
 import os
 import subprocess
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from threading import Thread, Event
 
@@ -845,7 +846,7 @@ class TransactionCollector:
         """Track A/B END when owned backend disappears using exact (pid, port).
         Only records END when target START was confirmed by positive marker (F2).
         Requires xs matches saved _a_xact_start to ensure we end the correct transaction.
-        Uses end_lower (last observed poll after) and end_upper (current poll after)
+        Uses end_lower (previous poll before) and end_upper (current poll after)
         as disappearance bounds (P0-2 #5).
         """
         if (self._a_state == "ASSIGNED" and self._a_child_pid == key[0]
@@ -1055,8 +1056,9 @@ TransactionCoordinator = TransactionCollector
 class SystemMetricsMonitor:
     """Sample system metrics at regular intervals during measurement."""
 
-    def __init__(self, interval_seconds=30.0):
-        self.interval_seconds = max(interval_seconds, 5.0)
+    def __init__(self, interval_seconds=2.0):
+        # F2: Enforce max 5s interval for gate coverage check
+        self.interval_seconds = min(max(interval_seconds, 0.5), 5.0)
         self._samples = []
         self._stop = Event()
         self._thread = None
@@ -1710,6 +1712,9 @@ PRIVACY_ALLOWLIST = {
     "cpu_percent_max", "memory_percent_max",
     "db_connections_max", "waiting_locks_max",
     "samples",
+    # sample fields
+    "timestamp", "db_connections", "waiting_locks", "granted_locks",
+    "cpu_percent", "memory_percent",
     # preflight / postflight top-level keys
     "unc_paths", "system_metrics",
     # canonical payload verification fields
@@ -1798,6 +1803,9 @@ PRIVACY_ALLOWLIST = {
     "folder_warnings",
     "status",
     "job_hash",
+    "job_type",
+    "baseline_matched",
+    "service_status",
 }
 
 PRIVACY_PASSTHROUGH_CONTAINERS = {"preflight", "postflight"}
@@ -1859,10 +1867,12 @@ def _privacy_filter(evidence):
                     pattern = PRIVACY_DYNAMIC_CONTAINERS[path]
                     if pattern is None:
                         dynamic_key_ok = True
-                    else:
+                    elif isinstance(k, str):
                         import re
                         if re.match(pattern, k):
                             dynamic_key_ok = True
+                    else:
+                        dynamic_key_ok = True
                 if key_allowlisted or dynamic_key_ok:
                     # Check ALL string values for raw paths
                     if isinstance(v, str) and _string_contains_raw_path(v):
@@ -2051,6 +2061,14 @@ def _canonical_job_section(job):
 
 
 def _canonical_transaction_section(obs):
+    if obs.end_lower_bound and obs.end_upper_bound and obs.end_lower_bound > obs.end_upper_bound:
+        raise RuntimeError(
+            f"END bounds inverted: lower={obs.end_lower_bound} > upper={obs.end_upper_bound}"
+        )
+    if obs.xact_start is not None and obs.end_upper_bound is not None and obs.end_upper_bound < obs.xact_start:
+        raise RuntimeError(
+            f"end_upper={obs.end_upper_bound} is before xact_start={obs.xact_start}"
+        )
     txn = {
         "backend_hash": obs.backend_hash,
         "xact_start": _iso(obs.xact_start),
@@ -2062,9 +2080,8 @@ def _canonical_transaction_section(obs):
         "correlation_unique": obs.correlation_unique,
     }
     if obs.xact_start and obs.end_lower_bound:
-        txn["duration_lower_bound_seconds"] = round(
-            (obs.end_lower_bound - obs.xact_start).total_seconds(), 6
-        )
+        duration_lower = (obs.end_lower_bound - obs.xact_start).total_seconds()
+        txn["duration_lower_bound_seconds"] = round(max(0, duration_lower), 6)
     if obs.xact_start and obs.end_upper_bound:
         txn["duration_upper_bound_seconds"] = round(
             (obs.end_upper_bound - obs.xact_start).total_seconds(), 6
@@ -2079,27 +2096,92 @@ def _canonical_transaction_section(obs):
 
 
 
+def _preflight_key_passed(key, value):
+    """Check if a single preflight key passes validation.
+    Returns True if the key passes, False otherwise.
+    """
+    if not isinstance(value, dict):
+        return bool(value)
+    if value.get("passed") is False:
+        return False
+    if value.get("available") is False:
+        return False
+    if value.get("all_accessible") is False:
+        return False
+    if value.get("found") is False and value.get("status") != "not_found":
+        return False
+    if value.get("unique") is False:
+        return False
+    if value.get("migration_0029_applied") is False:
+        return False
+    if value.get("status") in ("not_provided", "no_app_setting", "incomplete", "error"):
+        return False
+    if value.get("baseline_matched") is False:
+        return False
+    # Per-key schema validation for informational keys
+    schema_passed = False
+    if key == "table_counts":
+        required = {"master_count", "master_class_count", "structure_count", "inspection_file_count"}
+        if all(k in value for k in required):
+            if all(type(value[k]) is int and value[k] >= 0 for k in required):
+                schema_passed = True
+    elif key == "table_hashes":
+        required = {"master_hash", "master_class_hash", "structure_hash", "inspection_file_hash"}
+        if all(k in value for k in required):
+            if all(isinstance(value[k], str) and len(value[k]) == 64 and all(c in "0123456789abcdef" for c in value[k]) for k in required):
+                schema_passed = True
+    elif key == "inspection_file_distribution":
+        if all(k in value for k in ("total", "by_priority")):
+            total = value["total"]
+            if type(total) is int and total >= 0:
+                bp = value["by_priority"]
+                if isinstance(bp, dict):
+                    if (all(type(k) is int for k in bp) and
+                        all(type(v) is int and v >= 0 for v in bp.values()) and
+                        total == sum(bp.values())):
+                        schema_passed = True
+    elif key == "inspection_file_pathset_hash":
+        if isinstance(value.get("pathset_hash"), str) and len(value["pathset_hash"]) == 64 and all(c in "0123456789abcdef" for c in value["pathset_hash"]):
+            schema_passed = True
+    elif key == "system_metrics":
+        required = {"db_connections", "waiting_locks", "granted_locks", "cpu_percent", "memory_percent", "passed"}
+        if all(k in value for k in required):
+            if value.get("passed") is True:
+                dc = value["db_connections"]
+                wl = value["waiting_locks"]
+                gl = value["granted_locks"]
+                cp = value["cpu_percent"]
+                mp = value["memory_percent"]
+                if (type(dc) is int and dc >= 0 and
+                    type(wl) is int and wl >= 0 and
+                    type(gl) is int and gl >= 0 and
+                    isinstance(cp, (int, float)) and type(cp) is not bool and cp >= 0 and math.isfinite(cp) and
+                    isinstance(mp, (int, float)) and type(mp) is not bool and mp >= 0 and math.isfinite(mp)):
+                    schema_passed = True
+    # Known schema keys: return schema result directly, no fallback to generic positive
+    known_schema_keys = {"table_counts", "table_hashes", "inspection_file_distribution", "inspection_file_pathset_hash", "system_metrics"}
+    if key in known_schema_keys:
+        return schema_passed
+    # Fail-closed on empty dicts or missing positive indicator
+    if not value:
+        return False
+    has_positive = False
+    for v in value.values():
+        if v is True:
+            has_positive = True
+            break
+    if not has_positive and "status" not in value:
+        return False
+    return True
+
+
 def _all_preflight_pass(preflight):
+    """Fail-closed: return True only when all preflight checks have positive pass results."""
     if not preflight:
         return False
     for key, value in preflight.items():
-        if isinstance(value, dict):
-            if value.get("passed") is False:
-                return False
-            if value.get("available") is False:
-                return False
-            if value.get("all_accessible") is False:
-                return False
-            if value.get("found") is False and value.get("status") != "not_found":
-                return False
-            if value.get("unique") is False:
-                return False
-            if value.get("migration_0029_applied") is False:
-                return False
-            if value.get("status") in ("not_provided", "no_app_setting", "incomplete", "error"):
-                return False
-            if value.get("baseline_matched") is False:
-                return False
+        if not _preflight_key_passed(key, value):
+            return False
     return True
 
 
@@ -2443,3 +2525,544 @@ def _verify_job_result(job, label="job", expected_master_count=None, expected_cl
         expected_ok = False
     result["passed"] = all([succeeded, single_attempt, counts_present, insp_count_ok, strategy_ok, warnings_ok, expected_ok])
     return result
+
+
+LIVE_BLOCKED = True
+
+
+def run_canonical(
+    job_a=None,
+    job_b=None,
+    observer_a=None,
+    observer_b=None,
+    preflight=None,
+    postflight=None,
+    system_metrics=None,
+    baseline_counts=None,
+    baseline_hashes=None,
+    postflight_counts=None,
+    postflight_hashes=None,
+    correlation_info=None,
+    backup_evidence=None,
+    poll_seconds=2.0,
+    measurement_date=None,
+    evidence_output_dir=None,
+    web_service_name="QualityControlHQ-Pseudoprod",
+    worker_service_name="QualityControlHQ-Worker-Pseudoprod",
+    metrics_thread_alive=True,
+    cleanup_failures=None,
+    recovery_results=None,
+    run_mode="live",
+):
+    """Third P0: Final gate and formal evidence orchestration.
+
+    Runs all final gate checks in sequence and produces privacy-safe
+    formal evidence. Fail-closed: any insufficiency, inconsistency or
+    exception is treated as failure (RuntimeError). Success is only
+    returned when all gates pass.
+
+    LIVE_BLOCKED = True is maintained throughout; pseudoprod live,
+    real Job execution, service operations, and backup/restore are
+    out of scope for this function.
+    """
+    if not LIVE_BLOCKED:
+        raise RuntimeError("LIVE_BLOCKED must be True before running canonical evidence")
+
+    if run_mode == "live":
+        if job_a is None:
+            raise RuntimeError("job_a is required for live final gate")
+        if job_b is None:
+            raise RuntimeError("job_b is required for live final gate")
+        if observer_a is None:
+            raise RuntimeError("observer_a is required for live final gate")
+        if observer_b is None:
+            raise RuntimeError("observer_b is required for live final gate")
+        if not evidence_output_dir:
+            raise RuntimeError("evidence_output_dir is required for live final gate")
+
+    enrichment_errors = []
+
+    # ── Gate 1: Preflight ──
+    if preflight is None:
+        raise RuntimeError("preflight is required for final gate")
+    # F4: Required preflight keys per planner spec
+    required_preflight_keys = {
+        "env_identity", "django_check", "migrations", "migration_0029",
+        "web_service", "worker_service", "http_check", "active_jobs", "running_jobs",
+        "backup_tool", "backup_preparedness", "worker_process_tree",
+        "table_counts", "table_hashes", "system_metrics",
+        "inspection_file_distribution", "inspection_file_pathset_hash",
+        "canonical_input", "canonical_payload", "unc_paths"
+    }
+    missing_preflight_keys = required_preflight_keys - set(preflight.keys())
+    if missing_preflight_keys:
+        raise RuntimeError(f"Preflight missing required keys: {missing_preflight_keys}")
+    if not _all_preflight_pass(preflight):
+        failed_keys = [k for k, v in preflight.items() if not _preflight_key_passed(k, v)]
+        raise RuntimeError(f"Preflight gate failed: {failed_keys}")
+
+    # ── Gate 2: Job A/B results (required for live) ──
+    job_a_verification = None
+    job_b_verification = None
+    if job_a is None:
+        raise RuntimeError("job_a is required for final gate")
+    if job_b is None:
+        raise RuntimeError("job_b is required for final gate")
+    # F5: Pass expected baseline counts for approved baseline validation
+    job_a_verification = _verify_job_result(
+        job_a, label="job_a",
+        expected_master_count=CANONICAL_BASELINE_EXPECTED_MASTER_COUNT if CANONICAL_BASELINE_EXPECTED_MASTER_COUNT >= 0 else None,
+        expected_class_count=CANONICAL_BASELINE_EXPECTED_CLASS_COUNT if CANONICAL_BASELINE_EXPECTED_CLASS_COUNT >= 0 else None,
+        expected_structure_count=CANONICAL_BASELINE_EXPECTED_STRUCTURE_COUNT if CANONICAL_BASELINE_EXPECTED_STRUCTURE_COUNT >= 0 else None,
+    )
+    if not job_a_verification.get("passed"):
+        raise RuntimeError(f"Job A final gate failed: status={job_a.status}, result={job_a.result}")
+    job_b_verification = _verify_job_result(
+        job_b, label="job_b",
+        expected_master_count=CANONICAL_BASELINE_EXPECTED_MASTER_COUNT if CANONICAL_BASELINE_EXPECTED_MASTER_COUNT >= 0 else None,
+        expected_class_count=CANONICAL_BASELINE_EXPECTED_CLASS_COUNT if CANONICAL_BASELINE_EXPECTED_CLASS_COUNT >= 0 else None,
+        expected_structure_count=CANONICAL_BASELINE_EXPECTED_STRUCTURE_COUNT if CANONICAL_BASELINE_EXPECTED_STRUCTURE_COUNT >= 0 else None,
+    )
+    if not job_b_verification.get("passed"):
+        raise RuntimeError(f"Job B final gate failed: status={job_b.status}, result={job_b.result}")
+
+    # ── Gate 3: Observer A/B final state (required for live) ──
+    if observer_a is None:
+        raise RuntimeError("observer_a is required for final gate")
+    if observer_b is None:
+        raise RuntimeError("observer_b is required for final gate")
+    for label, obs in [("observer_a", observer_a), ("observer_b", observer_b)]:
+        if not obs.transaction_completed:
+            raise RuntimeError(f"{label} transaction not completed")
+        if obs.xact_start is None:
+            raise RuntimeError(f"{label} xact_start is None")
+        if obs.correlation_unique is not True:
+            raise RuntimeError(f"{label} correlation is not unique")
+        if not obs.observation_ok:
+            raise RuntimeError(f"{label} observation not ok")
+        if obs.end_lower_bound is not None and obs.end_upper_bound is not None:
+            if obs.end_lower_bound > obs.end_upper_bound:
+                raise RuntimeError(f"{label} END bounds inverted")
+        if obs.xact_start is not None and obs.end_upper_bound is not None:
+            if obs.end_upper_bound < obs.xact_start:
+                raise RuntimeError(f"{label} end_upper < xact_start")
+        if obs.end_lower_bound is None or obs.end_upper_bound is None:
+            raise RuntimeError(f"{label} END bounds not fully observed")
+    # A/B transaction identity must be distinct (F3)
+    if observer_a.xact_start == observer_b.xact_start:
+        raise RuntimeError("observer_a and observer_b share the same transaction (A.xact_start == B.xact_start)")
+    # F1: Dependency semantics require A→B ordering ALWAYS, not just non-overlap.
+    # The earlier-starting transaction MUST be A (observer_a).
+    if observer_a.xact_start >= observer_b.xact_start:
+        raise RuntimeError(
+            "observer_a.xact_start must be < observer_b.xact_start (A must start before B by dependency)"
+        )
+    # Normal order: A starts before B, and A must end before B starts
+    if observer_a.end_upper_bound is not None and observer_a.end_upper_bound > observer_b.xact_start:
+        raise RuntimeError("observer_a end_upper must be <= observer_b xact_start (A must end before B starts)")
+    # Verify A end <= B start via Job dependency ordering
+    if job_a.finished_at and job_b.started_at and job_a.finished_at > job_b.started_at:
+        raise RuntimeError("Job A finished_at must be <= Job B started_at (dependency ordering)")
+
+    # ── F2: Job/Observer time-window correlation ──
+    # Each observer's transaction must fall within its job's execution window.
+    # Job A -> Observer A, Job B -> Observer B
+    for label, job, obs in [("observer_a", job_a, observer_a), ("observer_b", job_b, observer_b)]:
+        if job.started_at is not None and obs.xact_start is not None:
+            if job.started_at > obs.xact_start:
+                raise RuntimeError(f"{label}: xact_start ({obs.xact_start.isoformat()}) is before job started_at ({job.started_at.isoformat()})")
+        if job.finished_at is not None and obs.xact_start is not None:
+            if obs.xact_start > job.finished_at:
+                raise RuntimeError(f"{label}: xact_start ({obs.xact_start.isoformat()}) is after job finished_at ({job.finished_at.isoformat()})")
+        # END bounds: finished_at must be within [end_lower_bound, end_upper_bound)
+        if job.finished_at is not None and obs.end_upper_bound is not None:
+            if job.finished_at > obs.end_upper_bound:
+                raise RuntimeError(f"{label}: job finished_at ({job.finished_at.isoformat()}) is after end_upper_bound ({obs.end_upper_bound.isoformat()})")
+
+    # ── Gate 4: Postflight ──
+    if postflight is None:
+        raise RuntimeError("postflight is required for final gate")
+    # F4: Required postflight keys per planner spec
+    required_postflight_keys = {
+        "table_counts", "table_hashes", "web_service", "worker_service",
+        "http_check", "unc_paths", "inspection_file_distribution",
+        "inspection_file_pathset_hash", "active_jobs", "running_jobs",
+        "system_metrics"
+    }
+    missing_postflight_keys = required_postflight_keys - set(postflight.keys())
+    if missing_postflight_keys:
+        raise RuntimeError(f"Postflight missing required keys: {missing_postflight_keys}")
+    if not _all_postflight_pass(postflight):
+        failed_keys = [k for k, v in postflight.items() if not _postflight_key_passed(k, v)]
+        raise RuntimeError(f"Postflight gate failed: {failed_keys}")
+
+    # ── Gate 5: Metrics coverage (summary schema from SystemMetricsMonitor) ──
+    if system_metrics is None:
+        raise RuntimeError("system_metrics is required for final gate")
+    if not system_metrics.get("has_data"):
+        enrichment_errors.append("system_metrics has no data")
+    sample_count = system_metrics.get("sample_count", 0)
+    samples = system_metrics.get("samples") or []
+    # F2: sample_count must equal len(samples), min 2 samples
+    if sample_count != len(samples):
+        enrichment_errors.append(f"sample_count ({sample_count}) != len(samples) ({len(samples)})")
+    if sample_count < 2:
+        enrichment_errors.append(f"system_metrics sample_count must be >= 2, got {sample_count}")
+    # F2: Validate each sample has required fields and parseable timestamp
+    first_sample_ts = None
+    last_sample_ts = None
+    for i, s in enumerate(samples):
+        ts = s.get("timestamp")
+        if not ts:
+            enrichment_errors.append(f"sample[{i}] missing timestamp")
+        else:
+            try:
+                dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                if first_sample_ts is None:
+                    first_sample_ts = dt
+                last_sample_ts = dt
+            except (ValueError, TypeError):
+                enrichment_errors.append(f"sample[{i}] timestamp parse failed: {ts}")
+        # Required fields per sample
+        for req in ("db_connections", "waiting_locks", "granted_locks"):
+            if s.get(req) is None:
+                enrichment_errors.append(f"sample[{i}] missing {req}")
+    # F2: Check timestamp monotonic and max 5s gap
+    if len(samples) >= 2:
+        for i in range(1, len(samples)):
+            prev_ts = samples[i - 1].get("timestamp")
+            curr_ts = samples[i].get("timestamp")
+            if prev_ts and curr_ts:
+                try:
+                    prev_dt = datetime.fromisoformat(prev_ts.replace("Z", "+00:00"))
+                    curr_dt = datetime.fromisoformat(curr_ts.replace("Z", "+00:00"))
+                    delta = (curr_dt - prev_dt).total_seconds()
+                    if delta <= 0:
+                        enrichment_errors.append(f"system_metrics timestamp not monotonic at sample[{i}]")
+                    if delta > 5.0:
+                        enrichment_errors.append(f"system_metrics interval gap {delta:.1f}s exceeds 5s between samples")
+                except (ValueError, TypeError):
+                    enrichment_errors.append(f"system_metrics timestamp parse failed for gap check at sample[{i}]")
+    # F2: Coverage - first sample <= A enqueue/start, last sample >= B completion
+    if first_sample_ts and job_a and job_a.created_at:
+        if first_sample_ts > job_a.created_at:
+            enrichment_errors.append(f"first sample {first_sample_ts.isoformat()} > job_a created_at {job_a.created_at.isoformat()}")
+    if last_sample_ts and job_b and job_b.finished_at:
+        if last_sample_ts < job_b.finished_at:
+            enrichment_errors.append(f"last sample {last_sample_ts.isoformat()} < job_b finished_at {job_b.finished_at.isoformat()}")
+    # F3: Require cpu_percent and memory_percent in each sample
+    for i, s in enumerate(samples):
+        if s.get("cpu_percent") is None:
+            enrichment_errors.append(f"sample[{i}] missing cpu_percent")
+        if s.get("memory_percent") is None:
+            enrichment_errors.append(f"sample[{i}] missing memory_percent")
+    for required_max_field in ("cpu_percent_max", "memory_percent_max", "db_connections_max", "waiting_locks_max"):
+        if system_metrics.get(required_max_field) is None:
+            enrichment_errors.append(f"system_metrics missing {required_max_field}")
+    if enrichment_errors:
+        raise RuntimeError(f"Metrics coverage insufficient: {enrichment_errors}")
+
+    # ── Gate 6: Cleanup and service recovery (F5) ──
+    # Use command-provided results when available; validate them fail-closed.
+    # When not provided, perform a fresh re-check (backward compatibility).
+    if cleanup_failures is not None and recovery_results is not None:
+        if cleanup_failures:
+            raise RuntimeError(f"Cleanup failures reported by command: {cleanup_failures}")
+        # F2: Validate recovery entries - require web and worker matching backup original_states
+        if backup_evidence and backup_evidence.get("original_states"):
+            original_states = backup_evidence["original_states"]
+            required_services = set(original_states.keys())
+        else:
+            required_services = {web_service_name, worker_service_name}
+
+        found_services = set()
+        for entry in recovery_results:
+            if isinstance(entry, dict):
+                svc_name = entry.get("name")
+                if svc_name in required_services:
+                    if svc_name in found_services:
+                        raise RuntimeError(f"Duplicate recovery entry for {svc_name}")
+                    found_services.add(svc_name)
+                    # Validate target_state matches expected
+                    expected_state = original_states.get(svc_name, "Running") if backup_evidence and backup_evidence.get("original_states") else "Running"
+                    if entry.get("target_state") != expected_state:
+                        raise RuntimeError(f"Recovery entry for {svc_name} has target_state={entry.get('target_state')} but expected {expected_state}")
+                    if not entry.get("success"):
+                        raise RuntimeError(f"Service recovery failed for {svc_name}: target_state={entry.get('target_state')}, success=False")
+                else:
+                    raise RuntimeError(f"Unknown service in recovery: {svc_name}")
+
+        missing = required_services - found_services
+        if missing:
+            raise RuntimeError(f"Missing recovery entries for: {missing}")
+    else:
+        cleanup_failures = []
+        recovery_results = []
+        for svc_name, label in [(web_service_name, "web"), (worker_service_name, "worker")]:
+            status = _check_service_status(svc_name)
+            is_running = status == "Running"
+            if not is_running:
+                cleanup_failures.append(f"{label} service not Running (status={status})")
+            recovery_results.append({
+                "service": "service",
+                "name": svc_name,
+                "target_state": "Running",
+                "success": is_running,
+                "details": {"service_status": status},
+            })
+        if cleanup_failures:
+            raise RuntimeError(f"Service recovery failed: {cleanup_failures}")
+
+    # ── Determine measurement_status and failure_reason (fail-closed) ──
+    measurement_status = "completed"
+    failure_reason = ""
+
+    if job_a and job_a.status != Job.Status.SUCCEEDED:
+        measurement_status = "failed"
+        failure_reason = "job_a_not_succeeded"
+    if job_b and job_b.status != Job.Status.SUCCEEDED:
+        measurement_status = "failed"
+        failure_reason = "job_b_not_succeeded"
+
+    for label, obs in [("observer_a", observer_a), ("observer_b", observer_b)]:
+        if obs is not None and not obs.transaction_completed:
+            measurement_status = "failed"
+            failure_reason = f"{label}_not_completed"
+
+    for label, obs in [("observer_a", observer_a), ("observer_b", observer_b)]:
+        if obs is not None and hasattr(obs, '_exception') and obs._exception is not None:
+            measurement_status = "failed"
+            failure_reason = f"{label}_collector_exception"
+
+    # ── Build formal evidence ──
+    evidence = build_canonical_evidence(
+        job_a=job_a,
+        job_b=job_b,
+        observer_a=observer_a,
+        observer_b=observer_b,
+        preflight=preflight,
+        postflight=postflight,
+        poll_seconds=poll_seconds,
+        run_mode="live",
+        measurement_date=measurement_date,
+        baseline_counts=baseline_counts,
+        baseline_hashes=baseline_hashes,
+        postflight_counts=postflight_counts,
+        postflight_hashes=postflight_hashes,
+        correlation_info=correlation_info,
+        system_metrics=system_metrics,
+        measurement_status=measurement_status,
+        failure_reason=failure_reason,
+        backup_evidence=backup_evidence,
+    )
+
+    # ── Enrichment fields for formal evidence ──
+    evidence["job_a_verification"] = job_a_verification if job_a_verification else {}
+    evidence["job_b_verification"] = job_b_verification if job_b_verification else {}
+    evidence["observer_a"] = {
+        "transaction_completed": bool(observer_a and observer_a.transaction_completed),
+        "xact_start": _iso(observer_a.xact_start) if observer_a and observer_a.xact_start else None,
+        "end_lower_bound": _iso(observer_a.end_lower_bound) if observer_a and observer_a.end_lower_bound else None,
+        "end_upper_bound": _iso(observer_a.end_upper_bound) if observer_a and observer_a.end_upper_bound else None,
+        "poll_count": observer_a.poll_count if observer_a else 0,
+        "observation_ok": bool(observer_a and observer_a.transaction_completed),
+    } if observer_a else {}
+    evidence["observer_b"] = {
+        "transaction_completed": bool(observer_b and observer_b.transaction_completed),
+        "xact_start": _iso(observer_b.xact_start) if observer_b and observer_b.xact_start else None,
+        "end_lower_bound": _iso(observer_b.end_lower_bound) if observer_b and observer_b.end_lower_bound else None,
+        "end_upper_bound": _iso(observer_b.end_upper_bound) if observer_b and observer_b.end_upper_bound else None,
+        "poll_count": observer_b.poll_count if observer_b else 0,
+        "observation_ok": bool(observer_b and observer_b.transaction_completed),
+    } if observer_b else {}
+    evidence["transaction_completed"] = bool(
+        (observer_a and observer_a.transaction_completed) and
+        (observer_b and observer_b.transaction_completed)
+    )
+    evidence["observation_ok"] = bool(evidence["transaction_completed"])
+    evidence["recovery_ok"] = len(cleanup_failures) == 0
+    evidence["cleanup_failures"] = cleanup_failures
+    evidence["recovery_results"] = recovery_results
+
+    # Gate 7: Live verification
+    metrics_ok = bool(
+        system_metrics.get("has_data")
+        and system_metrics.get("sample_count", 0) > 0
+        and system_metrics.get("cpu_percent_max") is not None
+        and system_metrics.get("memory_percent_max") is not None
+        and system_metrics.get("db_connections_max") is not None
+        and system_metrics.get("waiting_locks_max") is not None
+    )
+    if not metrics_thread_alive:
+        raise RuntimeError("Metrics thread is not alive")
+    live_verification = {
+        "job_a_succeeded": bool(job_a and job_a_verification and job_a_verification.get("succeeded")),
+        "job_b_succeeded": bool(job_b and job_b_verification and job_b_verification.get("succeeded")),
+        "attempt_count_a": job_a.attempt_count if job_a else 0,
+        "attempt_count_b": job_b.attempt_count if job_b else 0,
+        "observer_a_completed": bool(observer_a and observer_a.transaction_completed),
+        "observer_b_completed": bool(observer_b and observer_b.transaction_completed),
+        "postflight_pass": _all_postflight_pass(postflight),
+        "metrics_ok": metrics_ok,
+        "metrics_thread_alive": metrics_thread_alive,
+    }
+    evidence["live_verification"] = live_verification
+    evidence["metrics_coverage_ok"] = metrics_ok and metrics_thread_alive
+    evidence["measurement_status"] = measurement_status
+    evidence["failure_reason"] = failure_reason
+
+    # ── Gate 8: Privacy check (fail-closed) ──
+    privacy_ok, privacy_issues = _privacy_check_passed(evidence)
+    evidence["privacy_check_passed"] = privacy_ok
+    if not privacy_ok:
+        raise RuntimeError(f"Privacy check failed: {privacy_issues}")
+
+    # ── Evidence write: omitted from run_canonical().
+    # The management command writes evidence via write_evidence() as the single writer.
+
+    return evidence
+
+
+def _postflight_key_passed(key, value):
+    """Check if a single postflight key passes validation.
+    Returns True if the key passes, False otherwise.
+    """
+    if not isinstance(value, dict):
+        return bool(value)
+    if value.get("passed") is False:
+        return False
+    if value.get("baseline_matched") is False:
+        return False
+    # Per-key schema validation for informational keys
+    schema_passed = False
+    if key == "table_counts":
+        required = {"master_count", "master_class_count", "structure_count", "inspection_file_count"}
+        if all(k in value for k in required):
+            if all(type(value[k]) is int and value[k] >= 0 for k in required):
+                schema_passed = True
+    elif key == "table_hashes":
+        required = {"master_hash", "master_class_hash", "structure_hash", "inspection_file_hash"}
+        if all(k in value for k in required):
+            if all(isinstance(value[k], str) and len(value[k]) == 64 and all(c in "0123456789abcdef" for c in value[k]) for k in required):
+                schema_passed = True
+    elif key == "inspection_file_distribution":
+        if all(k in value for k in ("total", "by_priority")):
+            total = value["total"]
+            if type(total) is int and total >= 0:
+                bp = value["by_priority"]
+                if isinstance(bp, dict):
+                    if (all(type(k) is int for k in bp) and
+                        all(type(v) is int and v >= 0 for v in bp.values()) and
+                        total == sum(bp.values())):
+                        schema_passed = True
+    elif key == "inspection_file_pathset_hash":
+        if isinstance(value.get("pathset_hash"), str) and len(value["pathset_hash"]) == 64 and all(c in "0123456789abcdef" for c in value["pathset_hash"]):
+            schema_passed = True
+    elif key == "system_metrics":
+        required = {"db_connections", "waiting_locks", "granted_locks", "cpu_percent", "memory_percent", "passed"}
+        if all(k in value for k in required):
+            if value.get("passed") is True:
+                dc = value["db_connections"]
+                wl = value["waiting_locks"]
+                gl = value["granted_locks"]
+                cp = value["cpu_percent"]
+                mp = value["memory_percent"]
+                if (type(dc) is int and dc >= 0 and
+                    type(wl) is int and wl >= 0 and
+                    type(gl) is int and gl >= 0 and
+                    isinstance(cp, (int, float)) and type(cp) is not bool and cp >= 0 and math.isfinite(cp) and
+                    isinstance(mp, (int, float)) and type(mp) is not bool and mp >= 0 and math.isfinite(mp)):
+                    schema_passed = True
+    # Known schema keys: return schema result directly, no fallback to generic positive
+    known_schema_keys = {"table_counts", "table_hashes", "inspection_file_distribution", "inspection_file_pathset_hash", "system_metrics"}
+    if key in known_schema_keys:
+        return schema_passed
+    # Fail-closed on empty dicts or missing positive indicator
+    if not value:
+        return False
+    has_positive = False
+    for v in value.values():
+        if v is True:
+            has_positive = True
+            break
+    if not has_positive and "status" not in value:
+        return False
+    return True
+
+
+def _all_postflight_pass(postflight):
+    """Fail-closed: return True only when all postflight checks have positive pass results."""
+    if not postflight:
+        return False
+    for key, value in postflight.items():
+        if not _postflight_key_passed(key, value):
+            return False
+    return True
+
+
+def _write_canonical_evidence(evidence, output_dir):
+    """Write canonical evidence to disk with SHA-256 checksum.
+
+    Fail-closed: raises RuntimeError on write failure.
+    Atomic write: temp file -> flush -> fsync -> atomic replace.
+    """
+    path = Path(output_dir)
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        evidence_path = path / "canonical_evidence.json"
+        manifest_path = path / "checksums.sha256"
+        # Atomic write: temp file -> flush -> fsync -> atomic replace
+        tmp_path = path / ".canonical_evidence.json.tmp"
+        try:
+            with tmp_path.open("wb") as f:
+                f.write(json.dumps(evidence, ensure_ascii=False, indent=2, default=str).encode("utf-8"))
+                f.flush()
+                import os
+                os.fsync(f.fileno())
+            os.replace(tmp_path, evidence_path)
+            # Verify JSON after replace: parse to ensure valid JSON
+            json.loads(evidence_path.read_text(encoding="utf-8"))
+            # Manifest
+            digest = hashlib.sha256(evidence_path.read_bytes()).hexdigest()
+            tmp_manifest = path / ".checksums.sha256.tmp"
+            try:
+                with tmp_manifest.open("wb") as f:
+                    f.write(f"{digest}  canonical_evidence.json\n".encode("utf-8"))
+                    f.flush()
+                    import os
+                    os.fsync(f.fileno())
+                os.replace(tmp_manifest, manifest_path)
+            except Exception:
+                if tmp_manifest.exists():
+                    tmp_manifest.unlink()
+                raise
+            # Verify manifest: re-read and validate
+            manifest_content = manifest_path.read_text(encoding="utf-8").strip()
+            manifest_lines = manifest_content.splitlines()
+            if len(manifest_lines) != 1:
+                raise RuntimeError(f"Manifest must have exactly 1 entry, got {len(manifest_lines)}")
+            parts = manifest_lines[0].split()
+            if len(parts) != 2:
+                raise RuntimeError(f"Manifest line must have 2 parts (digest filename), got {len(parts)}")
+            manifest_digest, manifest_filename = parts
+            if manifest_filename != "canonical_evidence.json":
+                raise RuntimeError(f"Manifest filename mismatch: expected 'canonical_evidence.json', got '{manifest_filename}'")
+            if len(manifest_digest) != 64 or not all(c in "0123456789abcdef" for c in manifest_digest):
+                raise RuntimeError(f"Manifest digest must be 64-char hex, got '{manifest_digest}'")
+            if manifest_digest != digest:
+                raise RuntimeError(f"Manifest digest does not match computed digest")
+            # Re-compute file hash and verify against manifest
+            recomputed = hashlib.sha256(evidence_path.read_bytes()).hexdigest()
+            if recomputed != manifest_digest:
+                raise RuntimeError(f"File hash mismatch: recomputed={recomputed}, manifest={manifest_digest}")
+        except Exception:
+            if tmp_path.exists():
+                tmp_path.unlink()
+            if evidence_path.exists():
+                evidence_path.unlink()
+            if manifest_path.exists():
+                manifest_path.unlink()
+            raise
+        return evidence_path
+    except Exception as e:
+        raise RuntimeError(f"Failed to write canonical evidence: {e}") from e

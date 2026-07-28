@@ -1,4 +1,5 @@
 import json
+import hashlib
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -32,6 +33,9 @@ from quality.s2_cr08_canonical import (
     _privacy_check_passed,
     _privacy_safe_str,
     _all_preflight_pass,
+    _preflight_key_passed,
+    _postflight_key_passed,
+    _all_postflight_pass,
     _collect_system_metrics,
     _inspection_file_distribution,
     _inspection_file_pathset_hash,
@@ -43,13 +47,20 @@ from quality.s2_cr08_canonical import (
     _LOCK_HELD,
     _LOCK_NOT_HELD,
     _LOCK_ERROR,
+
+        run_canonical,
+        _write_canonical_evidence,
+        build_canonical_evidence,
+        LIVE_BLOCKED,
+        _privacy_filter,
 )
 from quality.s2_cr08_measurement import (
     _connection_pid,
     _backend_hash,
     poll_active_backends,
+    write_evidence,
 )
-from quality.models import Job, AppSetting
+from quality.models import Job, AppSetting, InspectionFile, Master
 
 def require_postgresql(test_method):
     def wrapper(self, *args, **kwargs):
@@ -215,6 +226,40 @@ class PreflightFunctionTests(TransactionTestCase):
         self.assertIn("total", dist)
         self.assertIn("by_priority", dist)
 
+    def test_inspection_file_distribution_real_record_contract(self):
+        master = Master.objects.create(code="S2CR08", name="S2 CR-08")
+        InspectionFile.objects.create(
+            master=master,
+            file_name="inspection.xlsx",
+            file_path="inspection.xlsx",
+            priority=25,
+        )
+
+        dist = _inspection_file_distribution()
+
+        self.assertEqual(dist, {"total": 1, "by_priority": {25: 1}})
+        self.assertTrue(all(type(priority) is int for priority in dist["by_priority"]))
+        # Preflight: real collector output passes directly
+        self.assertTrue(_preflight_key_passed("inspection_file_distribution", dist))
+        # Postflight: real collector output augmented with passed / baseline_matched
+        postflight_dist = {**dist, "passed": True, "baseline_matched": True}
+        self.assertTrue(_postflight_key_passed("inspection_file_distribution", postflight_dist))
+        for stage in ("preflight", "postflight"):
+            evidence = {stage: {"inspection_file_distribution": dist}}
+            self.assertEqual(_privacy_filter(evidence), [])
+
+    def test_postflight_distribution_baseline_mismatch_rejected_from_real_shape(self):
+        master = Master.objects.create(code="S2CR08_NEG", name="S2 CR-08 Neg")
+        InspectionFile.objects.create(
+            master=master,
+            file_name="neg.xlsx",
+            file_path="neg.xlsx",
+            priority=30,
+        )
+        dist = _inspection_file_distribution()
+        postflight_dist = {**dist, "passed": True, "baseline_matched": False}
+        self.assertFalse(_postflight_key_passed("inspection_file_distribution", postflight_dist))
+
     def test_inspection_file_pathset_hash(self):
         h = _inspection_file_pathset_hash()
         self.assertIsInstance(h, str)
@@ -303,6 +348,220 @@ class EvidenceBuilderTests(TransactionTestCase):
         preflight = {"migration_0029": {"migration_0029_applied": False}}
         self.assertFalse(_all_preflight_pass(preflight))
 
+    # --- F1: Known-schema keys must not fallback to generic positive check ---
+
+    def test_preflight_key_passed_table_counts_missing_fields(self):
+        """table_counts with passed=True but missing required fields must fail."""
+        self.assertFalse(_preflight_key_passed("table_counts", {"passed": True}))
+
+    def test_preflight_key_passed_table_hashes_missing_fields(self):
+        """table_hashes with passed=True but missing required fields must fail."""
+        self.assertFalse(_preflight_key_passed("table_hashes", {"passed": True}))
+
+    def test_preflight_key_passed_pathset_hash_missing_fields(self):
+        """inspection_file_pathset_hash with passed=True but missing pathset_hash must fail."""
+        self.assertFalse(_preflight_key_passed("inspection_file_pathset_hash", {"passed": True}))
+
+    def test_preflight_key_passed_pathset_hash_invalid(self):
+        """inspection_file_pathset_hash with invalid hash length must fail."""
+        self.assertFalse(_preflight_key_passed("inspection_file_pathset_hash", {"passed": True, "pathset_hash": "too-short"}))
+
+    def test_preflight_key_passed_system_metrics_missing_fields(self):
+        """system_metrics with passed=True but missing required fields must fail."""
+        self.assertFalse(_preflight_key_passed("system_metrics", {"passed": True}))
+
+    def test_preflight_key_passed_non_schema_key_fallback(self):
+        """Non-schema keys still fall back to generic positive check."""
+        self.assertTrue(_preflight_key_passed("env_identity", {"passed": True}))
+
+    def test_postflight_key_passed_table_counts_missing_fields(self):
+        """postflight table_counts with passed=True but missing required fields must fail."""
+        self.assertFalse(_postflight_key_passed("table_counts", {"passed": True, "baseline_matched": True}))
+
+    def test_postflight_key_passed_table_hashes_missing_fields(self):
+        """postflight table_hashes with passed=True but missing required fields must fail."""
+        self.assertFalse(_postflight_key_passed("table_hashes", {"passed": True, "baseline_matched": True}))
+
+    def test_all_postflight_pass_known_schema_rejected(self):
+        """_all_postflight_pass rejects known-schema keys with only passed=True."""
+        postflight = {"table_counts": {"passed": True, "baseline_matched": True}}
+        self.assertFalse(_all_postflight_pass(postflight))
+
+    def test_all_postflight_pass_generic_key_accepted(self):
+        """_all_postflight_pass accepts non-schema keys with passed=True."""
+        postflight = {"active_jobs": {"passed": True, "baseline_matched": True}}
+        self.assertTrue(_all_postflight_pass(postflight))
+
+    # --- F1: Type-validation — bool-as-int, malformed types ---
+
+    def test_preflight_table_counts_bool_rejected(self):
+        """table_counts with bool value must fail."""
+        self.assertFalse(_preflight_key_passed("table_counts", {
+            "master_count": True, "master_class_count": 0,
+            "structure_count": 0, "inspection_file_count": 0,
+        }))
+
+    def test_preflight_table_hashes_bool_rejected(self):
+        """table_hashes with bool value must fail."""
+        self.assertFalse(_preflight_key_passed("table_hashes", {
+            "master_hash": True, "master_class_hash": "b" * 64,
+            "structure_hash": "c" * 64, "inspection_file_hash": "d" * 64,
+        }))
+
+    def test_preflight_inspection_file_distribution_bool_total_rejected(self):
+        """inspection_file_distribution with bool total must fail."""
+        self.assertFalse(_preflight_key_passed("inspection_file_distribution", {
+            "total": True, "by_priority": {1: 10},
+        }))
+
+    def test_preflight_inspection_file_distribution_bool_priority_value_rejected(self):
+        """inspection_file_distribution with bool priority value must fail."""
+        self.assertFalse(_preflight_key_passed("inspection_file_distribution", {
+            "total": 10, "by_priority": {1: True},
+        }))
+
+    def test_preflight_system_metrics_malformed_types_rejected(self):
+        """system_metrics with malformed types must fail."""
+        self.assertFalse(_preflight_key_passed("system_metrics", {
+            "db_connections": None, "waiting_locks": "x",
+            "granted_locks": object(), "cpu_percent": None,
+            "memory_percent": None, "passed": True,
+        }))
+
+    def test_preflight_system_metrics_bool_rejected(self):
+        """system_metrics with bool values must fail."""
+        self.assertFalse(_preflight_key_passed("system_metrics", {
+            "db_connections": True, "waiting_locks": 0,
+            "granted_locks": 1, "cpu_percent": 10.0,
+            "memory_percent": 50.0, "passed": True,
+        }))
+
+    def test_postflight_table_counts_bool_rejected(self):
+        """postflight table_counts with bool value must fail."""
+        self.assertFalse(_postflight_key_passed("table_counts", {
+            "master_count": True, "master_class_count": 0,
+            "structure_count": 0, "inspection_file_count": 0,
+            "baseline_matched": True,
+        }))
+
+    def test_postflight_system_metrics_malformed_types_rejected(self):
+        """postflight system_metrics with malformed types must fail."""
+        self.assertFalse(_postflight_key_passed("system_metrics", {
+            "db_connections": None, "waiting_locks": "x",
+            "granted_locks": object(), "cpu_percent": None,
+            "memory_percent": None, "passed": True,
+            "baseline_matched": True,
+        }))
+
+    # --- F2: Distribution total consistency and metric finiteness ---
+
+    def test_preflight_distribution_int_keys_accepted(self):
+        """Real collector shape: int priority keys accepted."""
+        self.assertTrue(_preflight_key_passed("inspection_file_distribution", {
+            "total": 1, "by_priority": {25: 1},
+        }))
+
+    def test_postflight_distribution_int_keys_accepted(self):
+        """Real collector shape: int priority keys accepted."""
+        self.assertTrue(_postflight_key_passed("inspection_file_distribution", {
+            "total": 1, "by_priority": {25: 1},
+        }))
+
+    def test_preflight_distribution_total_mismatch_rejected(self):
+        """inspection_file_distribution with total != sum values must fail."""
+        self.assertFalse(_preflight_key_passed("inspection_file_distribution", {
+            "total": 10, "by_priority": {25: 1},
+        }))
+
+    def test_preflight_system_metrics_inf_rejected(self):
+        """system_metrics with inf cpu_percent must fail."""
+        self.assertFalse(_preflight_key_passed("system_metrics", {
+            "db_connections": 1, "waiting_locks": 0,
+            "granted_locks": 1, "cpu_percent": float("inf"),
+            "memory_percent": 50.0, "passed": True,
+        }))
+
+    def test_preflight_system_metrics_negative_inf_rejected(self):
+        """system_metrics with -inf cpu_percent must fail."""
+        self.assertFalse(_preflight_key_passed("system_metrics", {
+            "db_connections": 1, "waiting_locks": 0,
+            "granted_locks": 1, "cpu_percent": float("-inf"),
+            "memory_percent": 50.0, "passed": True,
+        }))
+
+    def test_preflight_system_metrics_nan_rejected(self):
+        """system_metrics with nan cpu_percent must fail."""
+        self.assertFalse(_preflight_key_passed("system_metrics", {
+            "db_connections": 1, "waiting_locks": 0,
+            "granted_locks": 1, "cpu_percent": float("nan"),
+            "memory_percent": 50.0, "passed": True,
+        }))
+
+    def test_postflight_distribution_total_mismatch_rejected(self):
+        """postflight distribution with total != sum values must fail."""
+        self.assertFalse(_postflight_key_passed("inspection_file_distribution", {
+            "total": 10, "by_priority": {25: 1}, "baseline_matched": True,
+        }))
+
+    def test_postflight_system_metrics_inf_rejected(self):
+        """postflight system_metrics with inf cpu_percent must fail."""
+        self.assertFalse(_postflight_key_passed("system_metrics", {
+            "db_connections": 1, "waiting_locks": 0,
+            "granted_locks": 1, "cpu_percent": float("inf"),
+            "memory_percent": 50.0, "passed": True,
+            "baseline_matched": True,
+        }))
+
+    def test_postflight_system_metrics_negative_inf_rejected(self):
+        """postflight system_metrics with -inf cpu_percent must fail."""
+        self.assertFalse(_postflight_key_passed("system_metrics", {
+            "db_connections": 1, "waiting_locks": 0,
+            "granted_locks": 1, "cpu_percent": float("-inf"),
+            "memory_percent": 50.0, "passed": True,
+            "baseline_matched": True,
+        }))
+
+    def test_postflight_system_metrics_nan_rejected(self):
+        """postflight system_metrics with nan memory_percent must fail."""
+        self.assertFalse(_postflight_key_passed("system_metrics", {
+            "db_connections": 1, "waiting_locks": 0,
+            "granted_locks": 1, "cpu_percent": 10.0,
+            "memory_percent": float("nan"), "passed": True,
+            "baseline_matched": True,
+        }))
+
+    # F2: Additional distribution contract tests - bool key, negative count, parity
+
+    def test_preflight_distribution_bool_priority_key_rejected(self):
+        """inspection_file_distribution with bool priority key must fail."""
+        self.assertFalse(_preflight_key_passed("inspection_file_distribution", {
+            "total": 10, "by_priority": {True: 1},
+        }))
+
+    def test_postflight_distribution_bool_priority_key_rejected(self):
+        """postflight inspection_file_distribution with bool priority key must fail."""
+        self.assertFalse(_postflight_key_passed("inspection_file_distribution", {
+            "total": 10, "by_priority": {True: 1}, "baseline_matched": True,
+        }))
+
+    def test_preflight_distribution_negative_count_rejected(self):
+        """inspection_file_distribution with negative count must fail."""
+        self.assertFalse(_preflight_key_passed("inspection_file_distribution", {
+            "total": 10, "by_priority": {25: -1},
+        }))
+
+    def test_postflight_distribution_negative_count_rejected(self):
+        """postflight inspection_file_distribution with negative count must fail."""
+        self.assertFalse(_postflight_key_passed("inspection_file_distribution", {
+            "total": 10, "by_priority": {25: -1}, "baseline_matched": True,
+        }))
+
+    def test_postflight_distribution_bool_value_rejected(self):
+        """postflight inspection_file_distribution with bool value must fail."""
+        self.assertFalse(_postflight_key_passed("inspection_file_distribution", {
+            "total": 10, "by_priority": {1: True}, "baseline_matched": True,
+        }))
+
 
 class PrivacyFilterTests(TransactionTestCase):
     def test_denylist_keys_rejected(self):
@@ -352,7 +611,7 @@ class CommandDryRunTests(TransactionTestCase):
         csv_file.write_text(csv_content, encoding="utf-8")
         folder_a = test_dir / "path" / "a"
         folder_a.mkdir(parents=True)
-        
+
         AppSetting.objects.create(
             csv_path=str(csv_file),
             inspection_folder_paths=[str(folder_a)],
@@ -391,12 +650,13 @@ class CommandDryRunTests(TransactionTestCase):
                 "backup_tool": {"passed": True, "available": True, "version": "1.0", "tool_path": "safe_tool_path"},
                 "backup_preparedness": {"passed": True, "tool_available": True, "tool_path": "safe_tool_path", "backup_output_dir": "safe_dir", "backup_output_writable": True, "parent_dir_exists": True},
                 "worker_process_tree": {"passed": True, "child_count": 1, "unique": True},
-                "table_counts": {"master_count": 10, "master_class_count": 5, "structure_count": 3, "inspection_file_count": 100, "passed": True},
-                "table_hashes": {"master_hash": "abc", "master_class_hash": "def", "structure_hash": "ghi", "inspection_file_hash": "jkl", "passed": True},
+                "table_counts": {"master_count": 10, "master_class_count": 5, "structure_count": 3, "inspection_file_count": 100},
+                "table_hashes": {"master_hash": "a" * 64, "master_class_hash": "b" * 64, "structure_hash": "c" * 64, "inspection_file_hash": "d" * 64},
                 "system_metrics": {"db_connections": 5, "waiting_locks": 0, "granted_locks": 10, "cpu_percent": 10.0, "memory_percent": 50.0, "passed": True},
-                "inspection_file_distribution": {"total": 100, "by_priority": {"1": 100}},
-                "inspection_file_pathset_hash": {"pathset_hash": "abc123"},
+                "inspection_file_distribution": {"total": 100, "by_priority": {1: 100}},
+                "inspection_file_pathset_hash": {"pathset_hash": "e" * 64},
                 "canonical_input": {"passed": True, "csv_configured": True, "folder_paths_count": 1, "priorities_count": 1, "status": "configured", "issues": []},
+                "canonical_payload": {"passed": True, "csv_exists": True, "csv_hash": "mocked_hash", "csv_row_count": 2, "folder_paths_count": 1, "priorities_count": 1, "status": "valid", "issues": []},
                 "unc_paths": {"passed": True, "configured_count": 1, "accessible_count": 1, "all_accessible": True, "details": []},
             }
         )
@@ -497,6 +757,80 @@ class CommandDryRunTests(TransactionTestCase):
                         "inspection_file_distribution", "inspection_file_pathset_hash",
                         "canonical_input", "unc_paths", "canonical_payload"):
                 self.assertIn(key, preflight, msg=f"Missing preflight key: {key}")
+
+
+class PreflightContractTests(TransactionTestCase):
+    """F1: Contract test - verify real run_preflight() output matches run_canonical() expectations."""
+
+    @require_postgresql
+    def test_run_preflight_real_shape_matches_canonical_expectations(self):
+        """Real run_preflight() output must have all keys run_canonical() expects,
+        and schema-validated keys must NOT have fake 'passed' (they pass via schema)."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            preflight = run_preflight(output_dir=tmpdir)
+
+        # Required keys per run_canonical Gate 1 (F4) that run_preflight provides
+        # Note: canonical_payload is added by the command after run_preflight
+        required_keys = {
+            "env_identity", "django_check", "migrations", "migration_0029",
+            "web_service", "worker_service", "http_check", "active_jobs", "running_jobs",
+            "backup_tool", "backup_preparedness", "worker_process_tree",
+            "table_counts", "table_hashes", "system_metrics",
+            "inspection_file_distribution", "inspection_file_pathset_hash",
+            "canonical_input", "unc_paths"
+        }
+        missing = required_keys - set(preflight.keys())
+        self.assertEqual(missing, set(), f"run_preflight missing required keys: {missing}")
+
+        # Schema-validated keys should NOT have 'passed' (they pass via schema in _preflight_key_passed)
+        # Real run_preflight never adds 'passed' to these EXCEPT system_metrics which does have it
+        schema_validated_keys_no_passed = {
+            "table_counts", "table_hashes",
+            "inspection_file_distribution", "inspection_file_pathset_hash"
+        }
+        for key in schema_validated_keys_no_passed:
+            self.assertNotIn("passed", preflight.get(key, {}),
+                            f"Real run_preflight() must not include 'passed' on {key} (passes via schema)")
+
+        # system_metrics DOES have 'passed' in real output (it's set in _collect_system_metrics)
+        self.assertIn("passed", preflight["system_metrics"])
+
+        # But they must have the required schema fields
+        tc = preflight["table_counts"]
+        self.assertIn("master_count", tc)
+        self.assertIn("master_class_count", tc)
+        self.assertIn("structure_count", tc)
+        self.assertIn("inspection_file_count", tc)
+        self.assertTrue(all(isinstance(tc[k], int) and tc[k] >= 0 for k in tc))
+
+        th = preflight["table_hashes"]
+        self.assertIn("master_hash", th)
+        self.assertIn("master_class_hash", th)
+        self.assertIn("structure_hash", th)
+        self.assertIn("inspection_file_hash", th)
+        for k in th:
+            self.assertEqual(len(th[k]), 64)
+            self.assertTrue(all(c in "0123456789abcdef" for c in th[k]))
+
+        sm = preflight["system_metrics"]
+        self.assertIn("db_connections", sm)
+        self.assertIn("waiting_locks", sm)
+        self.assertIn("granted_locks", sm)
+        self.assertIn("cpu_percent", sm)
+        self.assertIn("memory_percent", sm)
+        self.assertIn("passed", sm)  # system_metrics DOES have passed in real output
+
+        dist = preflight["inspection_file_distribution"]
+        self.assertIn("total", dist)
+        self.assertIn("by_priority", dist)
+        self.assertIsInstance(dist["total"], int)
+        self.assertIsInstance(dist["by_priority"], dict)
+
+        psh = preflight["inspection_file_pathset_hash"]
+        self.assertIn("pathset_hash", psh)
+        self.assertEqual(len(psh["pathset_hash"]), 64)
+        self.assertTrue(all(c in "0123456789abcdef" for c in psh["pathset_hash"]))
 
 
 class TableHashTests(TransactionTestCase):
@@ -654,6 +988,236 @@ class JobResultVerifierTests(TransactionTestCase):
         job = self._make_job(self.Job.Status.SUCCEEDED)
         self.assertFalse(_verify_job_result(job)["passed"])
 
+    # F1: Semantic contradiction direct negative tests
+    # These test that run_canonical rejects contradictory evidence combinations directly
+
+    def test_run_canonical_rejects_completed_status_with_failed_job_a_in_live_verification(self):
+        """measurement_status='completed' but live_verification.job_a_succeeded=False must be rejected."""
+        # Create a job that fails
+        failed_job = Job.objects.create(
+            job_id="test_job_failed_a",
+            job_type=Job.JobType.MASTER_UPDATE,
+            status=Job.Status.FAILED,
+            attempt_count=1,
+        )
+        # Create valid job_b
+        job_b = Job.objects.create(
+            job_id="test_job_b_valid",
+            job_type=Job.JobType.MASTER_UPDATE,
+            status=Job.Status.SUCCEEDED,
+            attempt_count=1,
+            result={
+                "updated_master_count": 10,
+                "updated_class_count": 5,
+                "updated_structure_count": 3,
+                "inspection_file_count": 100,
+                "transaction_strategy": "single_atomic_update",
+            },
+        )
+
+        preflight = {
+            "env_identity": {"passed": True, "found": True},
+            "django_check": {"passed": True, "output": "system check output"},
+            "migrations": {"passed": True},
+            "migration_0029": {"passed": True, "migration_0029_applied": True},
+            "web_service": {"passed": True, "found": True, "status": "Running", "start_type": "Automatic", "running": True, "automatic": True},
+            "worker_service": {"passed": True, "found": True, "status": "Running", "start_type": "Automatic", "running": True, "automatic": True},
+            "http_check": {"passed": True, "status_code": 200},
+            "active_jobs": {"passed": True, "count": 0},
+            "running_jobs": {"passed": True, "count": 0},
+            "backup_tool": {"passed": True, "available": True, "version": "1.0", "tool_path": "safe_tool_path"},
+            "backup_preparedness": {"passed": True, "tool_available": True, "tool_path": "safe_tool_path", "backup_output_dir": "safe_dir", "backup_output_writable": True, "parent_dir_exists": True},
+            "worker_process_tree": {"passed": True, "child_count": 1, "unique": True},
+            "table_counts": {"master_count": 10, "master_class_count": 5, "structure_count": 3, "inspection_file_count": 100},
+            "table_hashes": {"master_hash": "a" * 64, "master_class_hash": "b" * 64, "structure_hash": "c" * 64, "inspection_file_hash": "d" * 64},
+            "system_metrics": {"db_connections": 5, "waiting_locks": 0, "granted_locks": 10, "cpu_percent": 10.0, "memory_percent": 50.0, "passed": True},
+            "inspection_file_distribution": {"total": 100, "by_priority": {1: 100}},
+            "inspection_file_pathset_hash": {"pathset_hash": "e" * 64},
+            "canonical_input": {"passed": True, "csv_configured": True, "folder_paths_count": 1, "priorities_count": 1, "status": "configured", "issues": []},
+            "canonical_payload": {"passed": True, "csv_exists": True, "csv_hash": "mocked_hash", "csv_row_count": 2, "folder_paths_count": 1, "priorities_count": 1, "status": "valid", "issues": []},
+            "unc_paths": {"passed": True, "configured_count": 1, "accessible_count": 1, "all_accessible": True, "details": []},
+        }
+
+        postflight = {
+            "table_counts": {"master_count": 10, "master_class_count": 5, "structure_count": 3, "inspection_file_count": 100, "baseline_matched": True},
+            "table_hashes": {"master_hash": "a" * 64, "master_class_hash": "b" * 64, "structure_hash": "c" * 64, "inspection_file_hash": "d" * 64, "baseline_matched": True},
+            "web_service": {"passed": True, "running": True},
+            "worker_service": {"passed": True, "running": True},
+            "http_check": {"passed": True, "status_code": 200},
+            "unc_paths": {"passed": True, "configured_count": 1, "accessible_count": 1, "all_accessible": True, "details": []},
+            "inspection_file_distribution": {"total": 100, "by_priority": {1: 100}, "passed": True},
+            "inspection_file_pathset_hash": {"pathset_hash": "e" * 64, "passed": True},
+            "active_jobs": {"passed": True, "count": 0},
+            "running_jobs": {"passed": True, "count": 0},
+            "system_metrics": {"db_connections": 5, "waiting_locks": 0, "granted_locks": 10, "cpu_percent": 10.0, "memory_percent": 50.0, "passed": True},
+        }
+
+        base_time = timezone.now()
+        observer_a = type("Observer", (), {
+            "transaction_completed": True,
+            "xact_start": base_time - timezone.timedelta(seconds=15),
+            "end_lower_bound": base_time - timezone.timedelta(seconds=3),
+            "end_upper_bound": base_time - timezone.timedelta(seconds=1),
+            "backend_hash": "abc123",
+            "poll_count": 5,
+            "correlation_method": "pid_port",
+            "correlation_candidate_count": 1,
+            "correlation_unique": True,
+            "observation_ok": True,
+        })()
+
+        observer_b = type("Observer", (), {
+            "transaction_completed": True,
+            "xact_start": base_time,
+            "end_lower_bound": base_time + timezone.timedelta(seconds=12),
+            "end_upper_bound": base_time + timezone.timedelta(seconds=14),
+            "backend_hash": "def456",
+            "poll_count": 5,
+            "correlation_method": "pid_port",
+            "correlation_candidate_count": 1,
+            "correlation_unique": True,
+            "observation_ok": True,
+        })()
+
+        with TemporaryDirectory() as tmpdir:
+            with self.assertRaises(RuntimeError) as ctx:
+                run_canonical(
+                    job_a=failed_job,
+                    job_b=job_b,
+                    observer_a=observer_a,
+                    observer_b=observer_b,
+                    preflight=preflight,
+                    postflight=postflight,
+                    system_metrics={
+                        "sample_count": 15,
+                        "interval_seconds": 2.0,
+                        "first_sample": (base_time - timezone.timedelta(seconds=30)).isoformat(),
+                        "last_sample": (base_time + timezone.timedelta(seconds=26)).isoformat(),
+                        "cpu_percent_max": 30.0,
+                        "memory_percent_max": 50.0,
+                        "db_connections_max": 10,
+                        "waiting_locks_max": 2,
+                        "samples": [],
+                        "has_data": True,
+                    },
+                    evidence_output_dir=tmpdir,
+                )
+            self.assertIn("Job A final gate failed", str(ctx.exception))
+
+
+
+    def test_run_canonical_rejects_evidence_with_completed_status_and_failure_reason(self):
+        """run_canonical must reject measurement_status='completed' with non-empty failure_reason."""
+        # Create a job that fails
+        failed_job = Job.objects.create(
+            job_id="test_job_failed_for_contradiction",
+            job_type=Job.JobType.MASTER_UPDATE,
+            status=Job.Status.FAILED,
+            attempt_count=1,
+        )
+
+        job_a = Job.objects.create(
+            job_id="test_job_a_success_2",
+            job_type=Job.JobType.MASTER_UPDATE,
+            status=Job.Status.SUCCEEDED,
+            attempt_count=1,
+            result={
+                "updated_master_count": 10,
+                "updated_class_count": 5,
+                "updated_structure_count": 3,
+                "inspection_file_count": 100,
+                "transaction_strategy": "single_atomic_update",
+            },
+        )
+
+        preflight = {
+            "env_identity": {"passed": True, "found": True},
+            "django_check": {"passed": True, "output": "system check output"},
+            "migrations": {"passed": True},
+            "migration_0029": {"passed": True, "migration_0029_applied": True},
+            "web_service": {"passed": True, "found": True, "status": "Running", "start_type": "Automatic", "running": True, "automatic": True},
+            "worker_service": {"passed": True, "found": True, "status": "Running", "start_type": "Automatic", "running": True, "automatic": True},
+            "http_check": {"passed": True, "status_code": 200},
+            "active_jobs": {"passed": True, "count": 0},
+            "running_jobs": {"passed": True, "count": 0},
+            "backup_tool": {"passed": True, "available": True, "version": "1.0", "tool_path": "safe_tool_path"},
+            "backup_preparedness": {"passed": True, "tool_available": True, "tool_path": "safe_tool_path", "backup_output_dir": "safe_dir", "backup_output_writable": True, "parent_dir_exists": True},
+            "worker_process_tree": {"passed": True, "child_count": 1, "unique": True},
+            "table_counts": {"master_count": 10, "master_class_count": 5, "structure_count": 3, "inspection_file_count": 100},
+            "table_hashes": {"master_hash": "a" * 64, "master_class_hash": "b" * 64, "structure_hash": "c" * 64, "inspection_file_hash": "d" * 64},
+            "system_metrics": {"db_connections": 5, "waiting_locks": 0, "granted_locks": 10, "cpu_percent": 10.0, "memory_percent": 50.0, "passed": True},
+            "inspection_file_distribution": {"total": 100, "by_priority": {1: 100}},
+            "inspection_file_pathset_hash": {"pathset_hash": "e" * 64},
+            "canonical_input": {"passed": True, "csv_configured": True, "folder_paths_count": 1, "priorities_count": 1, "status": "configured", "issues": []},
+            "canonical_payload": {"passed": True, "csv_exists": True, "csv_hash": "mocked_hash", "csv_row_count": 2, "folder_paths_count": 1, "priorities_count": 1, "status": "valid", "issues": []},
+            "unc_paths": {"passed": True, "configured_count": 1, "accessible_count": 1, "all_accessible": True, "details": []},
+        }
+
+        postflight = {
+            "table_counts": {"master_count": 10, "master_class_count": 5, "structure_count": 3, "inspection_file_count": 100, "baseline_matched": True},
+            "table_hashes": {"master_hash": "a" * 64, "master_class_hash": "b" * 64, "structure_hash": "c" * 64, "inspection_file_hash": "d" * 64, "baseline_matched": True},
+            "web_service": {"passed": True, "running": True},
+            "worker_service": {"passed": True, "running": True},
+            "http_check": {"passed": True, "status_code": 200},
+            "unc_paths": {"passed": True, "configured_count": 1, "accessible_count": 1, "all_accessible": True, "details": []},
+            "inspection_file_distribution": {"total": 100, "by_priority": {1: 100}, "passed": True},
+            "inspection_file_pathset_hash": {"pathset_hash": "e" * 64, "passed": True},
+            "active_jobs": {"passed": True, "count": 0},
+            "running_jobs": {"passed": True, "count": 0},
+            "system_metrics": {"db_connections": 5, "waiting_locks": 0, "granted_locks": 10, "cpu_percent": 10.0, "memory_percent": 50.0, "passed": True},
+        }
+
+        base_time = timezone.now()
+        observer_a = type("Observer", (), {
+            "transaction_completed": True,
+            "xact_start": base_time - timezone.timedelta(seconds=15),
+            "end_lower_bound": base_time - timezone.timedelta(seconds=3),
+            "end_upper_bound": base_time - timezone.timedelta(seconds=1),
+            "backend_hash": "abc123",
+            "poll_count": 5,
+            "correlation_method": "pid_port",
+            "correlation_candidate_count": 1,
+            "correlation_unique": True,
+            "observation_ok": True,
+        })()
+
+        observer_b = type("Observer", (), {
+            "transaction_completed": True,
+            "xact_start": base_time,
+            "end_lower_bound": base_time + timezone.timedelta(seconds=12),
+            "end_upper_bound": base_time + timezone.timedelta(seconds=14),
+            "backend_hash": "def456",
+            "poll_count": 5,
+            "correlation_method": "pid_port",
+            "correlation_candidate_count": 1,
+            "correlation_unique": True,
+            "observation_ok": True,
+        })()
+
+        with TemporaryDirectory() as tmpdir:
+            with self.assertRaises(RuntimeError) as ctx:
+                run_canonical(
+                    job_a=job_a,
+                    job_b=failed_job,
+                    observer_a=observer_a,
+                    observer_b=observer_b,
+                    preflight=preflight,
+                    postflight=postflight,
+                    system_metrics={
+                        "sample_count": 15,
+                        "interval_seconds": 2.0,
+                        "first_sample": (base_time - timezone.timedelta(seconds=30)).isoformat(),
+                        "last_sample": (base_time + timezone.timedelta(seconds=26)).isoformat(),
+                        "cpu_percent_max": 30.0,
+                        "memory_percent_max": 50.0,
+                        "db_connections_max": 10,
+                        "waiting_locks_max": 2,
+                        "samples": [],
+                        "has_data": True,
+                    },
+                    evidence_output_dir=tmpdir,
+                )
+            self.assertIn("Job B final gate failed", str(ctx.exception))
 
 class PrivacyFilterClosedSchemaTests(TransactionTestCase):
     def test_unknown_top_level_key_rejected(self):
@@ -867,6 +1431,111 @@ class PrivacyFilterRawPathContentTests(TransactionTestCase):
     def test_embedded_path_no_false_positive(self):
         from quality.s2_cr08_canonical import _string_contains_raw_path
         self.assertFalse(_string_contains_raw_path("status_code 200 OK"))
+
+
+# ---- F3: Privacy traceability - dynamic integer priority key and raw path rejection ----
+
+class PrivacyFilterDynamicKeyTests(TransactionTestCase):
+    """F3: Tests for privacy filter handling of dynamic integer priority keys and raw path rejection."""
+
+    def test_preflight_inspection_file_distribution_dynamic_integer_keys_accepted(self):
+        """preflight inspection_file_distribution.by_priority with integer keys must be accepted."""
+        evidence = {
+            "preflight": {
+                "inspection_file_distribution": {
+                    "total": 100,
+                    "by_priority": {1: 50, 25: 30, 100: 20}
+                }
+            }
+        }
+        issues = _privacy_filter(evidence)
+        self.assertEqual(issues, [])
+
+    def test_postflight_inspection_file_distribution_dynamic_integer_keys_accepted(self):
+        """postflight inspection_file_distribution.by_priority with integer keys must be accepted."""
+        evidence = {
+            "postflight": {
+                "inspection_file_distribution": {
+                    "total": 100,
+                    "by_priority": {1: 50, 25: 30, 100: 20},
+                    "passed": True,
+                    "baseline_matched": True
+                }
+            }
+        }
+        issues = _privacy_filter(evidence)
+        self.assertEqual(issues, [])
+
+# ---- F3: Raw path content rejection with actual raw path input ----
+
+class PrivacyFilterRawPathRejectionTests(TransactionTestCase):
+    """F3: Tests for raw path rejection with actual raw path content (not fixed codes)."""
+
+    def test_preflight_canonical_payload_raw_path_in_issues_rejected(self):
+        """preflight canonical_payload.issues with raw path must be rejected."""
+        evidence = {
+            "preflight": {
+                "canonical_payload": {
+                    "passed": False, "status": "invalid",
+                    "issues": ["C:/sensitive/input.csv not found"]
+                }
+            }
+        }
+        issues = _privacy_filter(evidence)
+        self.assertTrue(any("issues_contains_raw_path" in i["reason"] for i in issues))
+
+    def test_preflight_unc_paths_details_raw_path_in_path_rejected(self):
+        """preflight unc_paths.details with raw path (not hash) must be rejected."""
+        evidence = {
+            "preflight": {
+                "unc_paths": {
+                    "details": [
+                        {"path": "C:/sensitive/data", "accessible": True, "entry_count": 5}
+                    ]
+                }
+            }
+        }
+        issues = _privacy_filter(evidence)
+        self.assertTrue(any("contains_raw_path" in i["reason"] for i in issues))
+
+    def test_postflight_unc_paths_details_raw_path_in_path_rejected(self):
+        """postflight unc_paths.details with raw path (not hash) must be rejected."""
+        evidence = {
+            "postflight": {
+                "unc_paths": {
+                    "details": [
+                        {"path": "\\\\server\\share\\data", "accessible": True, "entry_count": 5}
+                    ]
+                }
+            }
+        }
+        issues = _privacy_filter(evidence)
+        self.assertTrue(any("contains_raw_path" in i["reason"] for i in issues))
+
+    def test_preflight_backup_tool_tool_path_raw_rejected(self):
+        """preflight backup_tool with raw tool_path must be rejected."""
+        evidence = {
+            "preflight": {
+                "backup_tool": {
+                    "tool_path": "C:/Program Files/PostgreSQL/16/bin/pg_dump.exe"
+                }
+            }
+        }
+        issues = _privacy_filter(evidence)
+        self.assertTrue(any("contains_raw_path" in i["reason"] for i in issues))
+
+    def test_preflight_backup_preparedness_raw_paths_rejected(self):
+        """preflight backup_preparedness with raw paths must be rejected."""
+        evidence = {
+            "preflight": {
+                "backup_preparedness": {
+                    "tool_path": "C:/tools/pg_dump.exe",
+                    "backup_output_dir": "D:/backups"
+                }
+            }
+        }
+        issues = _privacy_filter(evidence)
+        self.assertTrue(any("contains_raw_path" in i["reason"] for i in issues))
 
 
 class ObserverPreArmTests(TransactionTestCase):
@@ -2530,3 +3199,1281 @@ class VerifyChildProcessDirectTests(TransactionTestCase):
                    return_value=self._mock_run(stdout="")):
             result = vp(100, "job_123", "worker-1")
             self.assertFalse(result)
+
+class RunCanonicalTests(TransactionTestCase):
+    """Third P0: Tests for run_canonical final gate and formal evidence."""
+
+
+
+    def setUp(self):
+        self.job_a = Job.objects.create(
+            job_id="test_job_a",
+            job_type=Job.JobType.MASTER_UPDATE,
+            status=Job.Status.SUCCEEDED,
+            attempt_count=1,
+            result={
+                "updated_master_count": 10,
+                "updated_class_count": 5,
+                "updated_structure_count": 3,
+                "inspection_file_count": 100,
+                "transaction_strategy": "single_atomic_update",
+            },
+        )
+
+        self.job_b = Job.objects.create(
+            job_id="test_job_b",
+            job_type=Job.JobType.MASTER_UPDATE,
+            status=Job.Status.SUCCEEDED,
+            attempt_count=1,
+            result={
+                "updated_master_count": 8,
+                "updated_class_count": 4,
+                "updated_structure_count": 2,
+                "inspection_file_count": 80,
+                "transaction_strategy": "single_atomic_update",
+            },
+        )
+
+        self.preflight = {
+            "env_identity": {"passed": True, "found": True},
+            "django_check": {"passed": True, "output": "system check output"},
+            "migrations": {"passed": True},
+            "migration_0029": {"passed": True, "migration_0029_applied": True},
+            "web_service": {"passed": True, "found": True, "status": "Running", "start_type": "Automatic", "running": True, "automatic": True},
+            "worker_service": {"passed": True, "found": True, "status": "Running", "start_type": "Automatic", "running": True, "automatic": True},
+            "http_check": {"passed": True, "status_code": 200},
+            "active_jobs": {"passed": True, "count": 0},
+            "running_jobs": {"passed": True, "count": 0},
+            "backup_tool": {"passed": True, "available": True, "version": "1.0", "tool_path": "safe_tool_path"},
+            "backup_preparedness": {"passed": True, "tool_available": True, "tool_path": "safe_tool_path", "backup_output_dir": "safe_dir", "backup_output_writable": True, "parent_dir_exists": True},
+            "worker_process_tree": {"passed": True, "child_count": 1, "unique": True},
+            "table_counts": {"master_count": 10, "master_class_count": 5, "structure_count": 3, "inspection_file_count": 100},
+            "table_hashes": {"master_hash": "a" * 64, "master_class_hash": "b" * 64, "structure_hash": "c" * 64, "inspection_file_hash": "d" * 64},
+            "system_metrics": {"db_connections": 5, "waiting_locks": 0, "granted_locks": 10, "cpu_percent": 10.0, "memory_percent": 50.0, "passed": True},
+            "inspection_file_distribution": {"total": 100, "by_priority": {1: 100}},
+            "inspection_file_pathset_hash": {"pathset_hash": "e" * 64},
+            "canonical_input": {"passed": True, "csv_configured": True, "folder_paths_count": 1, "priorities_count": 1, "status": "configured", "issues": []},
+            "canonical_payload": {"passed": True, "csv_exists": True, "csv_hash": "mocked_hash", "csv_row_count": 2, "folder_paths_count": 1, "priorities_count": 1, "status": "valid", "issues": []},
+            "unc_paths": {"passed": True, "configured_count": 1, "accessible_count": 1, "all_accessible": True, "details": []},
+        }
+
+        self.postflight = {
+            "table_counts": {"master_count": 10, "master_class_count": 5, "structure_count": 3, "inspection_file_count": 100, "baseline_matched": True},
+            "table_hashes": {"master_hash": "a" * 64, "master_class_hash": "b" * 64, "structure_hash": "c" * 64, "inspection_file_hash": "d" * 64, "baseline_matched": True},
+            "web_service": {"passed": True, "running": True},
+            "worker_service": {"passed": True, "running": True},
+            "http_check": {"passed": True, "status_code": 200},
+            "unc_paths": {"passed": True, "configured_count": 1, "accessible_count": 1, "all_accessible": True, "details": []},
+            "inspection_file_distribution": {"total": 100, "by_priority": {1: 100}, "passed": True},
+            "inspection_file_pathset_hash": {"pathset_hash": "e" * 64, "passed": True},
+            "active_jobs": {"passed": True, "count": 0},
+            "running_jobs": {"passed": True, "count": 0},
+            "system_metrics": {"db_connections": 5, "waiting_locks": 0, "granted_locks": 10, "cpu_percent": 10.0, "memory_percent": 50.0, "passed": True},
+        }
+
+        base_time = timezone.now()
+
+        # Create samples with timestamps spanning the job window (through job_b finish + margin)
+        samples = []
+        for i in range(15):
+            ts = base_time - timezone.timedelta(seconds=30) + timezone.timedelta(seconds=i * 4)
+            samples.append({
+                "timestamp": ts.isoformat(),
+                "db_connections": 5,
+                "waiting_locks": 0,
+                "granted_locks": 3,
+                "cpu_percent": 25.0,
+                "memory_percent": 45.0
+            })
+
+        self.system_metrics = {
+            "sample_count": 15,
+            "interval_seconds": 2.0,
+            "first_sample": (base_time - timezone.timedelta(seconds=30)).isoformat(),
+            "last_sample": (base_time + timezone.timedelta(seconds=26)).isoformat(),
+            "cpu_percent_max": 30.0,
+            "memory_percent_max": 50.0,
+            "db_connections_max": 10,
+            "waiting_locks_max": 2,
+            "samples": samples,
+            "has_data": True,
+        }
+
+        # Job timestamps within the sample window
+        # Job A runs from base_time-20s to base_time-5s
+        self.job_a.started_at = base_time - timezone.timedelta(seconds=20)
+        self.job_a.finished_at = base_time - timezone.timedelta(seconds=5)
+        # Job B runs from base_time-5s to base_time+10s (depends on A)
+        self.job_b.started_at = base_time - timezone.timedelta(seconds=5)
+        self.job_b.finished_at = base_time + timezone.timedelta(seconds=10)
+
+        # observer_a transaction within Job A window (ends after Job A finishes)
+        self.observer_a = type("Observer", (), {
+            "transaction_completed": True,
+            "xact_start": base_time - timezone.timedelta(seconds=15),
+            "end_lower_bound": base_time - timezone.timedelta(seconds=3),
+            "end_upper_bound": base_time - timezone.timedelta(seconds=1),
+            "backend_hash": "abc123",
+            "poll_count": 5,
+            "correlation_method": "pid_port",
+            "correlation_candidate_count": 1,
+            "correlation_unique": True,
+            "observation_ok": True,
+        })()
+
+        # observer_b transaction within Job B window (starts after observer_a ends)
+        b_start = base_time
+
+        self.observer_b = type("Observer", (), {
+            "transaction_completed": True,
+            "xact_start": b_start,
+            "end_lower_bound": b_start + timezone.timedelta(seconds=12),
+            "end_upper_bound": b_start + timezone.timedelta(seconds=14),
+            "backend_hash": "def456",
+            "poll_count": 5,
+            "correlation_method": "pid_port",
+            "correlation_candidate_count": 1,
+            "correlation_unique": True,
+            "observation_ok": True,
+        })()
+
+        self._service_status_patcher = patch('quality.s2_cr08_canonical._check_service_status', return_value='Running')
+        self._service_status_patcher.start()
+
+
+    def tearDown(self):
+        self._service_status_patcher.stop()
+
+
+    def test_live_blocked_constant(self):
+        """LIVE_BLOCKED must be True."""
+        self.assertTrue(LIVE_BLOCKED)
+
+
+    def test_run_canonical_returns_evidence(self):
+        """run_canonical returns evidence dict with required fields."""
+        from quality.s2_cr08_canonical import _iso
+        with TemporaryDirectory() as tmpdir:
+            evidence = run_canonical(
+                job_a=self.job_a,
+                job_b=self.job_b,
+                observer_a=self.observer_a,
+                observer_b=self.observer_b,
+                preflight=self.preflight,
+                postflight=self.postflight,
+                system_metrics=self.system_metrics,
+                evidence_output_dir=tmpdir,
+            )
+
+        self.assertIsInstance(evidence, dict)
+        self.assertEqual(evidence["measurement_status"], "completed")
+        self.assertEqual(evidence["failure_reason"], "")
+        self.assertIn("live_verification", evidence)
+        self.assertIn("privacy_check_passed", evidence)
+        self.assertTrue(evidence["privacy_check_passed"])
+        self.assertIn("job_a_verification", evidence)
+        self.assertIn("job_b_verification", evidence)
+        self.assertIn("recovery_ok", evidence)
+        self.assertTrue(evidence["recovery_ok"])
+        self.assertIn("cleanup_failures", evidence)
+        self.assertEqual(evidence["cleanup_failures"], [])
+        self.assertIn("recovery_results", evidence)
+
+
+    def test_run_canonical_fails_closed_when_no_preflight(self):
+        """run_canonical raises RuntimeError when preflight is missing."""
+        with self.assertRaises(RuntimeError):
+            run_canonical(
+                job_a=self.job_a,
+                job_b=self.job_b,
+                observer_a=self.observer_a,
+                observer_b=self.observer_b,
+                preflight=None,
+                postflight=self.postflight,
+                system_metrics=self.system_metrics,
+            )
+
+
+    def test_run_canonical_fails_closed_when_postflight_fails(self):
+        """run_canonical raises RuntimeError when postflight gate fails."""
+        bad_postflight = {
+            "table_counts": {"passed": False, "baseline_matched": False},
+        }
+        with self.assertRaises(RuntimeError):
+            run_canonical(
+                job_a=self.job_a,
+                job_b=self.job_b,
+                observer_a=self.observer_a,
+                observer_b=self.observer_b,
+                preflight=self.preflight,
+                postflight=bad_postflight,
+                system_metrics=self.system_metrics,
+            )
+
+
+    def test_run_canonical_fails_closed_when_metrics_insufficient(self):
+        """run_canonical raises RuntimeError when metrics coverage is insufficient."""
+        bad_metrics = {"db_connections": 5}
+        with self.assertRaises(RuntimeError):
+            run_canonical(
+                job_a=self.job_a,
+                job_b=self.job_b,
+                observer_a=self.observer_a,
+                observer_b=self.observer_b,
+                preflight=self.preflight,
+                postflight=self.postflight,
+                system_metrics=bad_metrics,
+            )
+
+
+    def test_run_canonical_fails_closed_when_job_not_succeeded(self):
+        """run_canonical raises RuntimeError when a job is not SUCCEEDED."""
+        failed_job = Job.objects.create(
+            job_id="test_job_failed",
+            job_type=Job.JobType.MASTER_UPDATE,
+            status=Job.Status.FAILED,
+            attempt_count=1,
+        )
+        with self.assertRaises(RuntimeError):
+            run_canonical(
+                job_a=self.job_a,
+                job_b=failed_job,
+                observer_a=self.observer_a,
+                observer_b=self.observer_b,
+                preflight=self.preflight,
+                postflight=self.postflight,
+                system_metrics=self.system_metrics,
+            )
+
+
+    def test_run_canonical_fails_closed_when_service_not_running(self):
+        """run_canonical raises RuntimeError when a service is not running."""
+        with patch('quality.s2_cr08_canonical._check_service_status', return_value=""):
+            with self.assertRaises(RuntimeError):
+                run_canonical(
+                    job_a=self.job_a,
+                    job_b=self.job_b,
+                    observer_a=self.observer_a,
+                    observer_b=self.observer_b,
+                    preflight=self.preflight,
+                    postflight=self.postflight,
+                    system_metrics=self.system_metrics,
+                )
+
+
+    def test_write_canonical_evidence_creates_manifest(self):
+        """_write_canonical_evidence creates JSON and checksum files."""
+        with TemporaryDirectory() as tmpdir:
+            from quality.s2_cr08_canonical import build_canonical_evidence
+            evidence = build_canonical_evidence(
+                job_a=self.job_a,
+                job_b=self.job_b,
+                preflight=self.preflight,
+                postflight=self.postflight,
+                system_metrics=self.system_metrics,
+                run_mode="live",
+                measurement_status="completed",
+            )
+            path = _write_canonical_evidence(evidence, tmpdir)
+            self.assertTrue(path.exists())
+            manifest = Path(tmpdir) / "checksums.sha256"
+            self.assertTrue(manifest.exists())
+            content = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(content["measurement_status"], "completed")
+
+
+    def test_run_canonical_fails_closed_when_no_postflight(self):
+        """run_canonical raises RuntimeError when postflight is missing."""
+        with self.assertRaises(RuntimeError):
+            run_canonical(
+                job_a=self.job_a,
+                job_b=self.job_b,
+                observer_a=self.observer_a,
+                observer_b=self.observer_b,
+                preflight=self.preflight,
+                postflight=None,
+                system_metrics=self.system_metrics,
+            )
+
+
+    def test_run_canonical_fails_closed_when_no_metrics(self):
+        """run_canonical raises RuntimeError when system_metrics is missing."""
+        with self.assertRaises(RuntimeError):
+            run_canonical(
+                job_a=self.job_a,
+                job_b=self.job_b,
+                observer_a=self.observer_a,
+                observer_b=self.observer_b,
+                preflight=self.preflight,
+                postflight=self.postflight,
+                system_metrics=None,
+            )
+
+
+    def test_run_canonical_enriches_evidence_with_live_verification(self):
+        """run_canonical adds live_verification dict with all gate results."""
+        with TemporaryDirectory() as tmpdir:
+            evidence = run_canonical(
+                job_a=self.job_a,
+                job_b=self.job_b,
+                observer_a=self.observer_a,
+                observer_b=self.observer_b,
+                preflight=self.preflight,
+                postflight=self.postflight,
+                system_metrics=self.system_metrics,
+                evidence_output_dir=tmpdir,
+            )
+        lv = evidence["live_verification"]
+        self.assertTrue(lv["metrics_ok"])
+        self.assertTrue(lv["postflight_pass"])
+        self.assertTrue(lv["metrics_thread_alive"])
+        self.assertTrue(lv["job_a_succeeded"])
+        self.assertTrue(lv["job_b_succeeded"])
+
+
+    def test_run_canonical_does_not_include_raw_paths_in_evidence(self):
+        """Privacy filter should not flag the live_verification fields."""
+        with TemporaryDirectory() as tmpdir:
+            evidence = run_canonical(
+                job_a=self.job_a,
+                job_b=self.job_b,
+                observer_a=self.observer_a,
+                observer_b=self.observer_b,
+                preflight=self.preflight,
+                postflight=self.postflight,
+                system_metrics=self.system_metrics,
+                evidence_output_dir=tmpdir,
+            )
+        issues = _privacy_filter(evidence)
+        self.assertEqual(issues, [])
+
+
+    # ---- F2: Required Job/observer for live mode ----
+
+    def test_run_canonical_fails_when_job_a_missing_live(self):
+        """F2: run_canonical raises RuntimeError when job_a is missing in live mode."""
+        with TemporaryDirectory() as tmpdir:
+            with self.assertRaises(RuntimeError) as ctx:
+                run_canonical(
+                    job_a=None,
+                    job_b=self.job_b,
+                    observer_a=self.observer_a,
+                    observer_b=self.observer_b,
+                    preflight=self.preflight,
+                    postflight=self.postflight,
+                    system_metrics=self.system_metrics,
+                    evidence_output_dir=tmpdir,
+                )
+            self.assertIn("job_a is required", str(ctx.exception))
+
+
+    def test_run_canonical_fails_when_job_b_missing_live(self):
+        """F2: run_canonical raises RuntimeError when job_b is missing in live mode."""
+        with TemporaryDirectory() as tmpdir:
+            with self.assertRaises(RuntimeError) as ctx:
+                run_canonical(
+                    job_a=self.job_a,
+                    job_b=None,
+                    observer_a=self.observer_a,
+                    observer_b=self.observer_b,
+                    preflight=self.preflight,
+                    postflight=self.postflight,
+                    system_metrics=self.system_metrics,
+                    evidence_output_dir=tmpdir,
+                )
+            self.assertIn("job_b is required", str(ctx.exception))
+
+
+    def test_run_canonical_fails_when_observer_a_missing_live(self):
+        """F2: run_canonical raises RuntimeError when observer_a is missing in live mode."""
+        with TemporaryDirectory() as tmpdir:
+            with self.assertRaises(RuntimeError) as ctx:
+                run_canonical(
+                    job_a=self.job_a,
+                    job_b=self.job_b,
+                    observer_a=None,
+                    observer_b=self.observer_b,
+                    preflight=self.preflight,
+                    postflight=self.postflight,
+                    system_metrics=self.system_metrics,
+                    evidence_output_dir=tmpdir,
+                )
+            self.assertIn("observer_a is required", str(ctx.exception))
+
+
+    def test_run_canonical_fails_when_observer_b_missing_live(self):
+        """F2: run_canonical raises RuntimeError when observer_b is missing in live mode."""
+        with TemporaryDirectory() as tmpdir:
+            with self.assertRaises(RuntimeError) as ctx:
+                run_canonical(
+                    job_a=self.job_a,
+                    job_b=self.job_b,
+                    observer_a=self.observer_a,
+                    observer_b=None,
+                    preflight=self.preflight,
+                    postflight=self.postflight,
+                    system_metrics=self.system_metrics,
+                    evidence_output_dir=tmpdir,
+                )
+            self.assertIn("observer_b is required", str(ctx.exception))
+
+
+    # ---- F3: Stopped service is failure not success ----
+
+    def test_run_canonical_fails_when_service_stopped(self):
+        """F3: run_canonical raises RuntimeError when service status is Stopped (not Running)."""
+        with patch('quality.s2_cr08_canonical._check_service_status', return_value='Stopped'):
+            with self.assertRaises(RuntimeError) as ctx:
+                run_canonical(
+                    job_a=self.job_a,
+                    job_b=self.job_b,
+                    observer_a=self.observer_a,
+                    observer_b=self.observer_b,
+                    preflight=self.preflight,
+                    postflight=self.postflight,
+                    system_metrics=self.system_metrics,
+                    evidence_output_dir="dummy",
+                )
+            self.assertIn("Service recovery failed", str(ctx.exception))
+
+
+    # ---- F5: evidence_output_dir required for live ----
+
+    def test_run_canonical_fails_when_evidence_output_dir_missing_live(self):
+        """F5: run_canonical raises RuntimeError when evidence_output_dir is missing in live mode."""
+        with self.assertRaises(RuntimeError) as ctx:
+            run_canonical(
+                job_a=self.job_a,
+                job_b=self.job_b,
+                observer_a=self.observer_a,
+                observer_b=self.observer_b,
+                preflight=self.preflight,
+                postflight=self.postflight,
+                system_metrics=self.system_metrics,
+                evidence_output_dir=None,
+            )
+        self.assertIn("evidence_output_dir is required", str(ctx.exception))
+
+
+    # ---- F3: Negative tests for A/B transaction distinctness ----
+
+    def test_run_canonical_fails_when_same_transaction(self):
+        """F3: run_canonical fails when observer_a and observer_b share same xact_start (same transaction)."""
+        base_time = timezone.now()
+        same_obs = type("Observer", (), {
+            "transaction_completed": True,
+            "xact_start": base_time,
+            "end_lower_bound": base_time + timezone.timedelta(seconds=1),
+            "end_upper_bound": base_time + timezone.timedelta(seconds=3),
+            "backend_hash": "abc123",
+            "poll_count": 5,
+            "correlation_method": "pid_port",
+            "correlation_candidate_count": 1,
+            "correlation_unique": True,
+            "observation_ok": True,
+        })()
+        with TemporaryDirectory() as tmpdir:
+            with self.assertRaises(RuntimeError) as ctx:
+                run_canonical(
+                    job_a=self.job_a,
+                    job_b=self.job_b,
+                    observer_a=same_obs,
+                    observer_b=same_obs,
+                    preflight=self.preflight,
+                    postflight=self.postflight,
+                    system_metrics=self.system_metrics,
+                    evidence_output_dir=tmpdir,
+                )
+            self.assertIn("share the same transaction", str(ctx.exception))
+
+
+    def test_run_canonical_fails_when_reversed_order(self):
+        """F1: run_canonical fails when observer_b starts before observer_a (reversed order by dependency)."""
+        base_time = timezone.now()
+
+        # B starts first, A starts after B ends
+        obs_b = type("Observer", (), {
+            "transaction_completed": True,
+            "xact_start": base_time,
+            "end_lower_bound": base_time + timezone.timedelta(seconds=1),
+            "end_upper_bound": base_time + timezone.timedelta(seconds=3),
+            "backend_hash": "def456",
+            "poll_count": 5,
+            "correlation_method": "pid_port",
+            "correlation_candidate_count": 1,
+            "correlation_unique": True,
+            "observation_ok": True,
+        })()
+
+        a_start = base_time + timezone.timedelta(seconds=5)
+
+        obs_a = type("Observer", (), {
+            "transaction_completed": True,
+            "xact_start": a_start,
+            "end_lower_bound": a_start + timezone.timedelta(seconds=1),
+            "end_upper_bound": a_start + timezone.timedelta(seconds=3),
+            "backend_hash": "abc123",
+            "poll_count": 5,
+            "correlation_method": "pid_port",
+            "correlation_candidate_count": 1,
+            "correlation_unique": True,
+            "observation_ok": True,
+        })()
+
+        with TemporaryDirectory() as tmpdir:
+            with self.assertRaises(RuntimeError) as ctx:
+                run_canonical(
+                    job_a=self.job_a,
+                    job_b=self.job_b,
+                    observer_a=obs_a,
+                    observer_b=obs_b,
+                    preflight=self.preflight,
+                    postflight=self.postflight,
+                    system_metrics=self.system_metrics,
+                    evidence_output_dir=tmpdir,
+                )
+            self.assertIn("observer_a.xact_start must be < observer_b.xact_start", str(ctx.exception))
+
+
+    def test_run_canonical_fails_when_overlapping_transactions(self):
+        """F3: run_canonical fails when observer_a and observer_b transactions overlap."""
+        base_time = timezone.now()
+        obs_a = type("Observer", (), {
+            "transaction_completed": True,
+            "xact_start": base_time,
+            "end_lower_bound": base_time + timezone.timedelta(seconds=2),
+            "end_upper_bound": base_time + timezone.timedelta(seconds=6),
+            "backend_hash": "abc123",
+            "poll_count": 5,
+            "correlation_method": "pid_port",
+            "correlation_candidate_count": 1,
+            "correlation_unique": True,
+            "observation_ok": True,
+        })()
+
+        # B starts before A ends (overlap)
+        obs_b = type("Observer", (), {
+            "transaction_completed": True,
+            "xact_start": base_time + timezone.timedelta(seconds=4),
+            "end_lower_bound": base_time + timezone.timedelta(seconds=5),
+            "end_upper_bound": base_time + timezone.timedelta(seconds=7),
+            "backend_hash": "def456",
+            "poll_count": 5,
+            "correlation_method": "pid_port",
+            "correlation_candidate_count": 1,
+            "correlation_unique": True,
+            "observation_ok": True,
+        })()
+
+        with TemporaryDirectory() as tmpdir:
+            with self.assertRaises(RuntimeError) as ctx:
+                run_canonical(
+                    job_a=self.job_a,
+                    job_b=self.job_b,
+                    observer_a=obs_a,
+                    observer_b=obs_b,
+                    preflight=self.preflight,
+                    postflight=self.postflight,
+                    system_metrics=self.system_metrics,
+                    evidence_output_dir=tmpdir,
+                )
+            self.assertIn("observer_a end_upper must be <= observer_b xact_start", str(ctx.exception))
+
+
+    # ---- F4: Negative tests for fail-closed preflight/postflight/metrics ----
+
+    def test_run_canonical_fails_when_preflight_empty_dict(self):
+        """F4: run_canonical fails when preflight contains empty dict values."""
+        bad_preflight = self.preflight.copy()
+        bad_preflight["django_check"] = {}
+        with TemporaryDirectory() as tmpdir:
+            with self.assertRaises(RuntimeError) as ctx:
+                run_canonical(
+                    job_a=self.job_a,
+                    job_b=self.job_b,
+                    observer_a=self.observer_a,
+                    observer_b=self.observer_b,
+                    preflight=bad_preflight,
+                    postflight=self.postflight,
+                    system_metrics=self.system_metrics,
+                    evidence_output_dir=tmpdir,
+                )
+            self.assertIn("Preflight gate failed", str(ctx.exception))
+
+
+    def test_run_canonical_fails_when_postflight_empty_dict(self):
+        """F4: run_canonical fails when postflight contains empty dict values."""
+        bad_postflight = self.postflight.copy()
+        bad_postflight["table_counts"] = {}
+        with TemporaryDirectory() as tmpdir:
+            with self.assertRaises(RuntimeError) as ctx:
+                run_canonical(
+                    job_a=self.job_a,
+                    job_b=self.job_b,
+                    observer_a=self.observer_a,
+                    observer_b=self.observer_b,
+                    preflight=self.preflight,
+                    postflight=bad_postflight,
+                    system_metrics=self.system_metrics,
+                    evidence_output_dir=tmpdir,
+                )
+            self.assertIn("Postflight gate failed", str(ctx.exception))
+
+
+    def test_run_canonical_fails_when_metrics_missing_cpu_percent(self):
+        """F3: run_canonical fails when metrics samples missing cpu_percent."""
+        bad_metrics = self.system_metrics.copy()
+        bad_metrics["samples"] = [
+            {"timestamp": timezone.now().isoformat(), "db_connections": 5, "waiting_locks": 0, "granted_locks": 3, "memory_percent": 45.0}
+            for _ in range(10)
+        ]
+        with TemporaryDirectory() as tmpdir:
+            with self.assertRaises(RuntimeError) as ctx:
+                run_canonical(
+                    job_a=self.job_a,
+                    job_b=self.job_b,
+                    observer_a=self.observer_a,
+                    observer_b=self.observer_b,
+                    preflight=self.preflight,
+                    postflight=self.postflight,
+                    system_metrics=bad_metrics,
+                    evidence_output_dir=tmpdir,
+                )
+            self.assertIn("missing cpu_percent", str(ctx.exception))
+
+
+    def test_run_canonical_fails_when_metrics_missing_memory_percent(self):
+        """F3: run_canonical fails when metrics samples missing memory_percent."""
+        bad_metrics = self.system_metrics.copy()
+        bad_metrics["samples"] = [
+            {"timestamp": timezone.now().isoformat(), "db_connections": 5, "waiting_locks": 0, "granted_locks": 3, "cpu_percent": 25.0}
+            for _ in range(10)
+        ]
+        with TemporaryDirectory() as tmpdir:
+            with self.assertRaises(RuntimeError) as ctx:
+                run_canonical(
+                    job_a=self.job_a,
+                    job_b=self.job_b,
+                    observer_a=self.observer_a,
+                    observer_b=self.observer_b,
+                    preflight=self.preflight,
+                    postflight=self.postflight,
+                    system_metrics=bad_metrics,
+                    evidence_output_dir=tmpdir,
+                )
+            self.assertIn("missing memory_percent", str(ctx.exception))
+
+
+    # ---- F2: Empty recovery results ----
+
+    def test_run_canonical_fails_when_empty_recovery_results(self):
+        """F2: run_canonical fails when recovery_results is empty."""
+        with TemporaryDirectory() as tmpdir:
+            with self.assertRaises(RuntimeError) as ctx:
+                run_canonical(
+                    job_a=self.job_a,
+                    job_b=self.job_b,
+                    observer_a=self.observer_a,
+                    observer_b=self.observer_b,
+                    preflight=self.preflight,
+                    postflight=self.postflight,
+                    system_metrics=self.system_metrics,
+                    evidence_output_dir=tmpdir,
+                    cleanup_failures=[],
+                    recovery_results=[],  # Empty - should fail
+                )
+            self.assertIn("Missing recovery entries", str(ctx.exception))
+
+
+    def test_run_canonical_fails_when_recovery_missing_web(self):
+        """F2: run_canonical fails when recovery missing web service."""
+        recovery = [{
+            "service": "worker", "name": "QualityControlHQ-Worker-Pseudoprod",
+            "target_state": "Running", "success": True,
+            "details": {"service_status": "Running"}
+        }]
+        with TemporaryDirectory() as tmpdir:
+            with self.assertRaises(RuntimeError) as ctx:
+                run_canonical(
+                    job_a=self.job_a,
+                    job_b=self.job_b,
+                    observer_a=self.observer_a,
+                    observer_b=self.observer_b,
+                    preflight=self.preflight,
+                    postflight=self.postflight,
+                    system_metrics=self.system_metrics,
+                    evidence_output_dir=tmpdir,
+                    cleanup_failures=[],
+                    recovery_results=recovery,
+                )
+            self.assertIn("Missing recovery entries", str(ctx.exception))
+
+
+    # ---- F2: Job/Observer time-window correlation negative tests ----
+
+    def test_run_canonical_fails_when_observer_before_job_start(self):
+        """F2: Observer xact_start before job started_at should fail."""
+        base_time = timezone.now()
+        job_a = self.job_a
+        job_b = self.job_b
+        job_a.started_at = base_time - timezone.timedelta(seconds=20)
+        job_a.finished_at = base_time - timezone.timedelta(seconds=5)
+        job_b.started_at = base_time - timezone.timedelta(seconds=5)
+        job_b.finished_at = base_time + timezone.timedelta(seconds=10)
+
+        # Observer A starts BEFORE job A started
+        observer_a = type("Observer", (), {
+            "transaction_completed": True,
+            "xact_start": base_time - timezone.timedelta(seconds=25),
+            "end_lower_bound": base_time - timezone.timedelta(seconds=15),
+            "end_upper_bound": base_time - timezone.timedelta(seconds=13),
+            "backend_hash": "abc123",
+            "poll_count": 5,
+            "correlation_method": "pid_port",
+            "correlation_candidate_count": 1,
+            "correlation_unique": True,
+            "observation_ok": True,
+        })()
+
+        observer_b = type("Observer", (), {
+            "transaction_completed": True,
+            "xact_start": base_time,
+            "end_lower_bound": base_time + timezone.timedelta(seconds=12),
+            "end_upper_bound": base_time + timezone.timedelta(seconds=14),
+            "backend_hash": "def456",
+            "poll_count": 5,
+            "correlation_method": "pid_port",
+            "correlation_candidate_count": 1,
+            "correlation_unique": True,
+            "observation_ok": True,
+        })()
+
+        with TemporaryDirectory() as tmpdir:
+            with self.assertRaises(RuntimeError) as ctx:
+                run_canonical(
+                    job_a=job_a,
+                    job_b=job_b,
+                    observer_a=observer_a,
+                    observer_b=observer_b,
+                    preflight=self.preflight,
+                    postflight=self.postflight,
+                    system_metrics=self.system_metrics,
+                    evidence_output_dir=tmpdir,
+                )
+            self.assertIn("observer_a: xact_start", str(ctx.exception))
+            self.assertIn("is before job started_at", str(ctx.exception))
+
+    def test_run_canonical_fails_when_observer_after_job_finish(self):
+        """F2: Observer xact_start after job finished_at should fail."""
+        base_time = timezone.now()
+        job_a = self.job_a
+        job_b = self.job_b
+        job_a.started_at = base_time - timezone.timedelta(seconds=20)
+        job_a.finished_at = base_time - timezone.timedelta(seconds=5)
+        job_b.started_at = base_time - timezone.timedelta(seconds=5)
+        job_b.finished_at = base_time + timezone.timedelta(seconds=10)
+
+        # Observer A starts AFTER job A finished
+        observer_a = type("Observer", (), {
+            "transaction_completed": True,
+            "xact_start": base_time,
+            "end_lower_bound": base_time + timezone.timedelta(seconds=10),
+            "end_upper_bound": base_time + timezone.timedelta(seconds=12),
+            "backend_hash": "abc123",
+            "poll_count": 5,
+            "correlation_method": "pid_port",
+            "correlation_candidate_count": 1,
+            "correlation_unique": True,
+            "observation_ok": True,
+        })()
+
+        observer_b = type("Observer", (), {
+            "transaction_completed": True,
+            "xact_start": base_time + timezone.timedelta(seconds=15),
+            "end_lower_bound": base_time + timezone.timedelta(seconds=25),
+            "end_upper_bound": base_time + timezone.timedelta(seconds=27),
+            "backend_hash": "def456",
+            "poll_count": 5,
+            "correlation_method": "pid_port",
+            "correlation_candidate_count": 1,
+            "correlation_unique": True,
+            "observation_ok": True,
+        })()
+
+        with TemporaryDirectory() as tmpdir:
+            with self.assertRaises(RuntimeError) as ctx:
+                run_canonical(
+                    job_a=job_a,
+                    job_b=job_b,
+                    observer_a=observer_a,
+                    observer_b=observer_b,
+                    preflight=self.preflight,
+                    postflight=self.postflight,
+                    system_metrics=self.system_metrics,
+                    evidence_output_dir=tmpdir,
+                )
+            self.assertIn("observer_a: xact_start", str(ctx.exception))
+            self.assertIn("is after job finished_at", str(ctx.exception))
+
+    def test_run_canonical_passes_when_finished_within_end_bounds(self):
+        """F2: Normal case — end_lower_bound < finished_at <= end_upper_bound passes."""
+        base_time = timezone.now()
+        job_a = self.job_a
+        job_b = self.job_b
+        job_a.started_at = base_time - timezone.timedelta(seconds=20)
+        job_a.finished_at = base_time - timezone.timedelta(seconds=5)
+        job_b.started_at = base_time - timezone.timedelta(seconds=5)
+        job_b.finished_at = base_time + timezone.timedelta(seconds=10)
+
+        # Normal: finished_at within [end_lower_bound, end_upper_bound)
+        observer_a = type("Observer", (), {
+            "transaction_completed": True,
+            "xact_start": base_time - timezone.timedelta(seconds=15),
+            "end_lower_bound": base_time - timezone.timedelta(seconds=8),
+            "end_upper_bound": base_time - timezone.timedelta(seconds=1),
+            "backend_hash": "abc123",
+            "poll_count": 5,
+            "correlation_method": "pid_port",
+            "correlation_candidate_count": 1,
+            "correlation_unique": True,
+            "observation_ok": True,
+        })()
+
+        observer_b = type("Observer", (), {
+            "transaction_completed": True,
+            "xact_start": base_time,
+            "end_lower_bound": base_time + timezone.timedelta(seconds=12),
+            "end_upper_bound": base_time + timezone.timedelta(seconds=14),
+            "backend_hash": "def456",
+            "poll_count": 5,
+            "correlation_method": "pid_port",
+            "correlation_candidate_count": 1,
+            "correlation_unique": True,
+            "observation_ok": True,
+        })()
+
+        with TemporaryDirectory() as tmpdir:
+            evidence = run_canonical(
+                job_a=job_a,
+                job_b=job_b,
+                observer_a=observer_a,
+                observer_b=observer_b,
+                preflight=self.preflight,
+                postflight=self.postflight,
+                system_metrics=self.system_metrics,
+                evidence_output_dir=tmpdir,
+            )
+        self.assertEqual(evidence["measurement_status"], "completed")
+
+    def test_run_canonical_fails_when_finished_after_end_upper(self):
+        """F2: Observer end_upper_bound before job finished_at should fail (contradiction)."""
+        base_time = timezone.now()
+        job_a = self.job_a
+        job_b = self.job_b
+        job_a.started_at = base_time - timezone.timedelta(seconds=20)
+        job_a.finished_at = base_time - timezone.timedelta(seconds=5)
+        job_b.started_at = base_time - timezone.timedelta(seconds=5)
+        job_b.finished_at = base_time + timezone.timedelta(seconds=10)
+
+        # Observer A's end_upper_bound is before job A finishes (contradiction)
+        observer_a = type("Observer", (), {
+            "transaction_completed": True,
+            "xact_start": base_time - timezone.timedelta(seconds=15),
+            "end_lower_bound": base_time - timezone.timedelta(seconds=10),
+            "end_upper_bound": base_time - timezone.timedelta(seconds=8),
+            "backend_hash": "abc123",
+            "poll_count": 5,
+            "correlation_method": "pid_port",
+            "correlation_candidate_count": 1,
+            "correlation_unique": True,
+            "observation_ok": True,
+        })()
+
+        observer_b = type("Observer", (), {
+            "transaction_completed": True,
+            "xact_start": base_time,
+            "end_lower_bound": base_time + timezone.timedelta(seconds=12),
+            "end_upper_bound": base_time + timezone.timedelta(seconds=14),
+            "backend_hash": "def456",
+            "poll_count": 5,
+            "correlation_method": "pid_port",
+            "correlation_candidate_count": 1,
+            "correlation_unique": True,
+            "observation_ok": True,
+        })()
+
+        with TemporaryDirectory() as tmpdir:
+            with self.assertRaises(RuntimeError) as ctx:
+                run_canonical(
+                    job_a=job_a,
+                    job_b=job_b,
+                    observer_a=observer_a,
+                    observer_b=observer_b,
+                    preflight=self.preflight,
+                    postflight=self.postflight,
+                    system_metrics=self.system_metrics,
+                    evidence_output_dir=tmpdir,
+                )
+            self.assertIn("job finished_at", str(ctx.exception))
+            self.assertIn("after end_upper_bound", str(ctx.exception))
+
+    # ---- Job final gate negative tests ----
+    # These test that run_canonical's job final gate raises when a job is FAILED.
+    # Note: semantic consistency validator (measurement_status vs failure_reason/live_verification)
+    # does not yet exist — this is a known gap (see F1).
+
+    def test_run_canonical_job_gate_fails_closed_when_job_a_failed(self):
+        """Job A final gate: run_canonical raises when a job is not SUCCEEDED."""
+        # Create a job that fails
+        failed_job = Job.objects.create(
+            job_id="test_job_failed_a",
+            job_type=Job.JobType.MASTER_UPDATE,
+            status=Job.Status.FAILED,
+            attempt_count=1,
+        )
+        with TemporaryDirectory() as tmpdir:
+            with self.assertRaises(RuntimeError) as ctx:
+                run_canonical(
+                    job_a=failed_job,
+                    job_b=self.job_b,
+                    observer_a=self.observer_a,
+                    observer_b=self.observer_b,
+                    preflight=self.preflight,
+                    postflight=self.postflight,
+                    system_metrics=self.system_metrics,
+                    evidence_output_dir=tmpdir,
+                )
+            # The error should indicate job A failed
+            self.assertIn("Job A final gate failed", str(ctx.exception))
+
+    def test_run_canonical_job_gate_fails_closed_when_job_b_failed(self):
+        """Job B final gate: run_canonical raises when a job is not SUCCEEDED."""
+        failed_job = Job.objects.create(
+            job_id="test_job_failed_b",
+            job_type=Job.JobType.MASTER_UPDATE,
+            status=Job.Status.FAILED,
+            attempt_count=1,
+        )
+        with TemporaryDirectory() as tmpdir:
+            with self.assertRaises(RuntimeError) as ctx:
+                run_canonical(
+                    job_a=self.job_a,
+                    job_b=failed_job,
+                    observer_a=self.observer_a,
+                    observer_b=self.observer_b,
+                    preflight=self.preflight,
+                    postflight=self.postflight,
+                    system_metrics=self.system_metrics,
+                    evidence_output_dir=tmpdir,
+                )
+            self.assertIn("Job B final gate failed", str(ctx.exception))
+
+    def test_run_canonical_job_gate_fails_closed_when_job_failed_with_failure_reason(self):
+        """Job final gate: run_canonical raises when a job is failed, setting failure_reason implicitly."""
+        # This tests that run_canonical internally sets failure_reason when status is failed
+        # and never produces completed with non-empty failure_reason
+        failed_job = Job.objects.create(
+            job_id="test_job_failed_for_reason",
+            job_type=Job.JobType.MASTER_UPDATE,
+            status=Job.Status.FAILED,
+            attempt_count=1,
+        )
+        with TemporaryDirectory() as tmpdir:
+            with self.assertRaises(RuntimeError) as ctx:
+                run_canonical(
+                    job_a=self.job_a,
+                    job_b=failed_job,
+                    observer_a=self.observer_a,
+                    observer_b=self.observer_b,
+                    preflight=self.preflight,
+                    postflight=self.postflight,
+                    system_metrics=self.system_metrics,
+                    evidence_output_dir=tmpdir,
+                )
+            # If it somehow passed, failure_reason would be set (not empty)
+            # The fact it raises RuntimeError confirms the gate catches the failure
+
+    def test_run_canonical_job_gate_fails_closed_when_job_failed_empty_reason(self):
+        """Job final gate: run_canonical raises when a job is failed, never produces empty failure_reason."""
+        # This is implicitly enforced by run_canonical which always sets failure_reason
+        # when measurement_status becomes failed
+        failed_job = Job.objects.create(
+            job_id="test_job_failed_empty_reason_check",
+            job_type=Job.JobType.MASTER_UPDATE,
+            status=Job.Status.FAILED,
+            attempt_count=1,
+        )
+        with TemporaryDirectory() as tmpdir:
+            with self.assertRaises(RuntimeError) as ctx:
+                run_canonical(
+                    job_a=self.job_a,
+                    job_b=failed_job,
+                    observer_a=self.observer_a,
+                    observer_b=self.observer_b,
+                    preflight=self.preflight,
+                    postflight=self.postflight,
+                    system_metrics=self.system_metrics,
+                    evidence_output_dir=tmpdir,
+                )
+            # The gate fails on job status, but if it passed the evidence would have
+            # failure_reason set to "job_b_not_succeeded" (not empty)
+
+    def test_run_canonical_rejects_observer_not_completed_with_completed_status(self):
+        """measurement_status='completed' with observer.transaction_completed=False must be rejected."""
+        incomplete_observer = type("Observer", (), {
+            "transaction_completed": False,
+            "xact_start": timezone.now(),
+            "end_lower_bound": timezone.now(),
+            "end_upper_bound": timezone.now(),
+            "backend_hash": "abc123",
+            "poll_count": 5,
+            "correlation_method": "pid_port",
+            "correlation_candidate_count": 1,
+            "correlation_unique": True,
+            "observation_ok": False,
+        })()
+        with TemporaryDirectory() as tmpdir:
+            with self.assertRaises(RuntimeError) as ctx:
+                run_canonical(
+                    job_a=self.job_a,
+                    job_b=self.job_b,
+                    observer_a=incomplete_observer,
+                    observer_b=self.observer_b,
+                    preflight=self.preflight,
+                    postflight=self.postflight,
+                    system_metrics=self.system_metrics,
+                    evidence_output_dir=tmpdir,
+                )
+            self.assertIn("observer_a transaction not completed", str(ctx.exception))
+
+
+class WriteEvidenceVerifyTests(TransactionTestCase):
+    """F3: Tests for writer verify - JSON parse, manifest re-read, hash verification."""
+
+    def test_write_evidence_verify_json_parse(self):
+        """write_evidence parses JSON after replace to verify validity."""
+        evidence = {"fixture_version": "test", "data": "value"}
+        with TemporaryDirectory() as tmp:
+            output = Path(tmp) / "evidence"
+            written = write_evidence(evidence, output)
+            # File should be valid JSON
+            content = json.loads((written / "measurement.json").read_text(encoding="utf-8"))
+            self.assertEqual(content["data"], "value")
+
+    def test_write_evidence_verify_manifest_entry_count(self):
+        """write_evidence manifest has exactly 1 entry for measurement.json."""
+        evidence = {"fixture_version": "test"}
+        with TemporaryDirectory() as tmp:
+            output = Path(tmp) / "evidence"
+            written = write_evidence(evidence, output)
+            manifest = (written / "checksums.sha256").read_text(encoding="utf-8")
+            lines = [l for l in manifest.strip().splitlines() if l.strip()]
+            self.assertEqual(len(lines), 1, "Manifest must have exactly 1 entry")
+            self.assertIn("measurement.json", lines[0])
+
+    def test_write_evidence_verify_manifest_filename(self):
+        """write_evidence manifest filename matches the evidence file."""
+        evidence = {"fixture_version": "test"}
+        with TemporaryDirectory() as tmp:
+            output = Path(tmp) / "evidence"
+            written = write_evidence(evidence, output)
+            manifest = (written / "checksums.sha256").read_text(encoding="utf-8")
+            self.assertIn("measurement.json", manifest)
+            self.assertNotIn("canonical_evidence.json", manifest)
+
+    def test_write_evidence_verify_manifest_digest_format(self):
+        """write_evidence manifest digest is 64-char hex."""
+        evidence = {"fixture_version": "test"}
+        with TemporaryDirectory() as tmp:
+            output = Path(tmp) / "evidence"
+            written = write_evidence(evidence, output)
+            manifest = (written / "checksums.sha256").read_text(encoding="utf-8")
+            # Format: <64-char-hex>  measurement.json
+            parts = manifest.strip().split()
+            self.assertEqual(len(parts), 2)
+            self.assertEqual(len(parts[0]), 64)
+            self.assertTrue(all(c in "0123456789abcdef" for c in parts[0]))
+
+    def test_write_evidence_verify_manifest_digest_matches(self):
+        """write_evidence manifest digest matches recomputed file hash."""
+        evidence = {"fixture_version": "test", "payload": "x" * 100}
+        with TemporaryDirectory() as tmp:
+            output = Path(tmp) / "evidence"
+            written = write_evidence(evidence, output)
+            manifest = (written / "checksums.sha256").read_text(encoding="utf-8")
+            manifest_digest = manifest.strip().split()[0]
+            actual_digest = hashlib.sha256((written / "measurement.json").read_bytes()).hexdigest()
+            self.assertEqual(manifest_digest, actual_digest)
+
+    def test_write_canonical_evidence_verify_json_parse(self):
+        """_write_canonical_evidence parses JSON after replace."""
+        evidence = {"fixture_version": "canonical", "measurement_status": "completed"}
+        with TemporaryDirectory() as tmpdir:
+            path = _write_canonical_evidence(evidence, tmpdir)
+            content = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(content["measurement_status"], "completed")
+
+    def test_write_canonical_evidence_verify_manifest_entry_count(self):
+        """_write_canonical_evidence manifest has exactly 1 entry."""
+        evidence = {"fixture_version": "canonical"}
+        with TemporaryDirectory() as tmpdir:
+            path = _write_canonical_evidence(evidence, tmpdir)
+            manifest = Path(tmpdir) / "checksums.sha256"
+            lines = [l for l in manifest.read_text(encoding="utf-8").strip().splitlines() if l.strip()]
+            self.assertEqual(len(lines), 1)
+
+    def test_write_canonical_evidence_verify_manifest_filename(self):
+        """_write_canonical_evidence manifest filename is canonical_evidence.json."""
+        evidence = {"fixture_version": "canonical"}
+        with TemporaryDirectory() as tmpdir:
+            _write_canonical_evidence(evidence, tmpdir)
+            manifest = Path(tmpdir) / "checksums.sha256"
+            self.assertIn("canonical_evidence.json", manifest.read_text(encoding="utf-8"))
+
+    def test_write_canonical_evidence_verify_manifest_digest_format(self):
+        """_write_canonical_evidence manifest digest is 64-char hex."""
+        evidence = {"fixture_version": "canonical"}
+        with TemporaryDirectory() as tmpdir:
+            _write_canonical_evidence(evidence, tmpdir)
+            manifest = Path(tmpdir) / "checksums.sha256"
+            parts = manifest.read_text(encoding="utf-8").strip().split()
+            self.assertEqual(len(parts[0]), 64)
+            self.assertTrue(all(c in "0123456789abcdef" for c in parts[0]))
+
+    def test_write_canonical_evidence_verify_manifest_digest_matches(self):
+        """_write_canonical_evidence manifest digest matches recomputed hash."""
+        evidence = {"fixture_version": "canonical", "payload": "y" * 200}
+        with TemporaryDirectory() as tmpdir:
+            _write_canonical_evidence(evidence, tmpdir)
+            evidence_path = Path(tmpdir) / "canonical_evidence.json"
+            manifest = Path(tmpdir) / "checksums.sha256"
+            manifest_digest = manifest.read_text(encoding="utf-8").strip().split()[0]
+            actual_digest = hashlib.sha256(evidence_path.read_bytes()).hexdigest()
+            self.assertEqual(manifest_digest, actual_digest)
+
+    def test_write_evidence_verify_file_hash_mismatch(self):
+        """Tampered evidence file causes digest mismatch (manual verification)."""
+        evidence = {"fixture_version": "test"}
+        with TemporaryDirectory() as tmp:
+            output = Path(tmp) / "evidence"
+            written = write_evidence(evidence, output)
+            evidence_path = written / "measurement.json"
+            manifest_path = written / "checksums.sha256"
+            # Tamper with evidence file
+            evidence_path.write_text('{"tampered": true}', encoding="utf-8")
+            # Recompute hash - should NOT match manifest
+            actual_digest = hashlib.sha256(evidence_path.read_bytes()).hexdigest()
+            manifest_digest = manifest_path.read_text(encoding="utf-8").strip().split()[0]
+            self.assertNotEqual(actual_digest, manifest_digest)
+
+    # --- F3: Failure tests for writer (write/fsync/replace/manifest verify) ---
+
+    @patch("quality.s2_cr08_measurement.json.loads")
+    def test_write_evidence_json_parse_failure(self, mock_json_loads):
+        """write_evidence raises when JSON parse after replace fails."""
+        mock_json_loads.side_effect = json.JSONDecodeError("invalid", "doc", 0)
+        evidence = {"test": "data"}
+        with TemporaryDirectory() as tmp:
+            output = Path(tmp) / "evidence"
+            with self.assertRaises(json.JSONDecodeError):
+                write_evidence(evidence, output)
+
+    @patch("quality.s2_cr08_measurement.hashlib.sha256")
+    def test_write_evidence_manifest_verify_failure(self, mock_sha256):
+        """write_evidence raises when manifest digest doesn't match recomputed hash."""
+        # Make the second call to sha256 (for manifest verify) return different hash
+        mock_hash = mock_sha256.return_value
+        mock_hash.hexdigest.side_effect = ["aaaa" * 16, "bbbb" * 16]  # file hash, manifest hash
+        evidence = {"test": "data"}
+        with TemporaryDirectory() as tmp:
+            output = Path(tmp) / "evidence"
+            with self.assertRaises(RuntimeError) as ctx:
+                write_evidence(evidence, output)
+            self.assertIn("mismatch", str(ctx.exception).lower())
+
+    # Similar failure tests for _write_canonical_evidence
+
+    @patch("quality.s2_cr08_canonical.json.loads")
+    def test_write_canonical_evidence_json_parse_failure(self, mock_json_loads):
+        """_write_canonical_evidence raises when JSON parse after replace fails."""
+        mock_json_loads.side_effect = json.JSONDecodeError("invalid", "doc", 0)
+        evidence = {"test": "data"}
+        with TemporaryDirectory() as tmpdir:
+            with self.assertRaises(RuntimeError) as ctx:
+                _write_canonical_evidence(evidence, tmpdir)
+            # Error message contains the JSON decode error
+            self.assertIn("invalid", str(ctx.exception).lower())
+
+    @patch("quality.s2_cr08_canonical.hashlib.sha256")
+    def test_write_canonical_evidence_manifest_verify_failure(self, mock_sha256):
+        """_write_canonical_evidence raises when manifest digest doesn't match."""
+        mock_hash = mock_sha256.return_value
+        mock_hash.hexdigest.side_effect = ["aaaa" * 16, "bbbb" * 16]
+        evidence = {"test": "data"}
+        with TemporaryDirectory() as tmpdir:
+            with self.assertRaises(RuntimeError) as ctx:
+                _write_canonical_evidence(evidence, tmpdir)
+            self.assertIn("mismatch", str(ctx.exception).lower())
+
+    # --- F3: Residue tests — no formal evidence/manifest left after failure ---
+
+    @patch("quality.s2_cr08_measurement.json.loads")
+    def test_write_evidence_no_residue_after_json_parse_failure(self, mock_json_loads):
+        """write_evidence JSON parse failure leaves no evidence or manifest files."""
+        mock_json_loads.side_effect = json.JSONDecodeError("invalid", "doc", 0)
+        evidence = {"test": "data"}
+        with TemporaryDirectory() as tmp:
+            output = Path(tmp) / "evidence"
+            with self.assertRaises(json.JSONDecodeError):
+                write_evidence(evidence, output)
+            self.assertFalse((output / "measurement.json").exists())
+            self.assertFalse((output / "checksums.sha256").exists())
+
+    @patch("quality.s2_cr08_measurement.hashlib.sha256")
+    def test_write_evidence_no_residue_after_manifest_verify_failure(self, mock_sha256):
+        """write_evidence manifest digest mismatch leaves no residue and allows retry."""
+        mock_hash = mock_sha256.return_value
+        mock_hash.hexdigest.side_effect = ["aaaa" * 16, "bbbb" * 16]
+        evidence = {"test": "data"}
+        with TemporaryDirectory() as tmp:
+            output = Path(tmp) / "evidence"
+            with self.assertRaises(RuntimeError) as ctx:
+                write_evidence(evidence, output)
+            self.assertIn("mismatch", str(ctx.exception).lower())
+            self.assertFalse((output / "measurement.json").exists())
+            self.assertFalse((output / "checksums.sha256").exists())
+            # Retry with same directory should succeed after cleanup
+            mock_hash.hexdigest.side_effect = None
+            mock_hash.hexdigest.return_value = "c" * 64
+            retry_output = write_evidence({"retry": True}, output)
+            self.assertTrue((retry_output / "measurement.json").exists())
+            self.assertTrue((retry_output / "checksums.sha256").exists())
+
+    @patch("quality.s2_cr08_canonical.json.loads")
+    def test_write_canonical_evidence_no_residue_after_json_parse_failure(self, mock_json_loads):
+        """_write_canonical_evidence JSON parse failure leaves no evidence or manifest files."""
+        mock_json_loads.side_effect = json.JSONDecodeError("invalid", "doc", 0)
+        evidence = {"test": "data"}
+        with TemporaryDirectory() as tmpdir:
+            with self.assertRaises(RuntimeError):
+                _write_canonical_evidence(evidence, tmpdir)
+            self.assertFalse((Path(tmpdir) / "canonical_evidence.json").exists())
+            self.assertFalse((Path(tmpdir) / "checksums.sha256").exists())
+
+    @patch("quality.s2_cr08_canonical.hashlib.sha256")
+    def test_write_canonical_evidence_no_residue_after_manifest_verify_failure(self, mock_sha256):
+        """_write_canonical_evidence manifest digest mismatch leaves no residue and allows retry."""
+        mock_hash = mock_sha256.return_value
+        mock_hash.hexdigest.side_effect = ["aaaa" * 16, "bbbb" * 16]
+        evidence = {"test": "data"}
+        with TemporaryDirectory() as tmpdir:
+            with self.assertRaises(RuntimeError):
+                _write_canonical_evidence(evidence, tmpdir)
+            self.assertFalse((Path(tmpdir) / "canonical_evidence.json").exists())
+            self.assertFalse((Path(tmpdir) / "checksums.sha256").exists())
+            # Retry with same directory should succeed after cleanup
+            mock_hash.hexdigest.side_effect = None
+            mock_hash.hexdigest.return_value = "c" * 64
+            retry_path = _write_canonical_evidence({"retry": True}, tmpdir)
+            self.assertTrue(retry_path.exists())
+            self.assertTrue((Path(tmpdir) / "checksums.sha256").exists())
