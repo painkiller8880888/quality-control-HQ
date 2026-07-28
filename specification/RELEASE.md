@@ -231,6 +231,8 @@ P0/P1のreviewer PASS後の最初の疑似本番段階として、Job投入・se
 
 S2-CR-08は引き続き**部分実施**とする。過去記録の業務行113,876と今回fixtureのnewline count 113,877は定義が異なる可能性があるため、baseline row countとして自動採用しない。次の段階へ進む前に、canonical CSVの行数定義、CSV hash、UNC 7 root、業務表期待件数を業務責任者・運用責任者・アプリ責任者がapproval ID付きで承認する必要がある。承認後も、backup/restore検証をlive A/B測定より先に完了し、6指標のverdictは正式閾値承認まで`not_evaluable`を維持する。
 
+正式承認待ちパッケージは`runtime/pseudoprod/evidence/s2-cr08-approval-20260728/approval.pending.json`に保存した。statusは`pending_human_approval`であり、検証済み候補と未入力の承認済み欄を分離している。このパッケージ自体は承認記録ではなく、人間による正式承認とreviewer確認が完了するまでStage Bを開始しない。
+
 ### S2-CR-08 テスト方針の優先順位と暫定推奨閾値（未承認）
 
 S2-CR-08は、既存回帰試験の件数増加よりも、測定対象の同一性、欠測時の安全停止、正式証跡の合否判定可能性を優先する。次の優先順位を崩さず、各修正とそのdirect positive/negative testを同一iterationで完了させる。後続優先度への着手は、先行優先度のreviewer PASS後とする。
