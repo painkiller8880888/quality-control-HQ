@@ -211,6 +211,26 @@ P0「final gateとformal evidence」の実装および回帰試験をfresh test 
 
 fresh DBでは全対象suiteが合格した。一方、過去のstale `--keepdb`を再利用した実行ではdata migration由来の初期dataが先行`TransactionTestCase`後に残らず、queue + PhaseTwo合同で失敗が再現された。このため正式なrelease証跡はfresh test DBの結果を基準とし、stale keepdbの結果を製品回帰として扱わない。
 
+#### S2-CR-08 P2 canonical dry-run実施記録（2026-07-28）
+
+P0/P1のreviewer PASS後の最初の疑似本番段階として、Job投入・service停止・backup/restore・live測定を行わないcanonical `--dry-run`を実施した。初回はmigration 0029未適用、worker停止、worker process tree不在、`AppSetting.inspection_folder_priorities`未設定を検出し、証跡を書いたうえで安全停止した。
+
+技術的前提として、active/running Jobが0件であることとmigration planがnullableな`Job.created_at`列の追加1操作だけであることを確認し、疑似本番migration userで0029を適用した。その後、AutomaticのままStoppedだったworkerを起動し、Web/workerがともにRunning/Automatic、active/running Jobが0件であることを再確認した。フォルダ優先順位は、既存`AppSettingSerializer`の更新規則に従って設定済み7フォルダをすべて明示的な`0`へ正規化した。既存InspectionFile 3,304件も全件priority 0であり、この正規化によって現行の選択優先度は変更していない。
+
+前提修正後の最終dry-runはexit 0で完了し、20 preflight keyすべてがPASSした。migration 0029、Web/worker service、HTTP、active/running Job 0、backup tool/preparedness、worker process tree、業務表count/hash、system metrics、InspectionFile distribution/pathset hash、UNC 7/7、canonical input/payloadを確認した。evidenceは`measurement_status=not_executed`、空の`failure_reason`、`privacy_check_passed=true`で、raw UNC path、drive path、PID/port tupleを含まない。完了後も両serviceはRunning/Automatic、active/running Jobは0件だった。
+
+| 項目 | 結果 |
+|---|---|
+| 最終dry-run証跡 | `runtime/pseudoprod/evidence/s2-cr08-canonical-dryrun-20260728-cycle3/` |
+| evidence schema | `s2-cr-08-canonical-v1` |
+| preflight | PASS: 20/20 |
+| canonical payload | CSV newline count 113,877、SHA-256 `16043f4274cc865c8fc77fcbe61d717378462d00c90b4ec7c2533b89508f5125`、UNC folder 7、priority entry 7 |
+| 業務表count | Master 16,244、MasterClass 16,263、Structure 44,772、InspectionFile 3,304 |
+| evidence integrity | `measurement.json` SHA-256 `3ff607867d885ef101d837404358a5fc6900b5e9a2722f13697451e99af55417`、manifest一致 |
+| safety | Job投入なし、service停止なし、backup/restoreなし、liveなし、`LIVE_BLOCKED = True`維持 |
+
+S2-CR-08は引き続き**部分実施**とする。過去記録の業務行113,876と今回fixtureのnewline count 113,877は定義が異なる可能性があるため、baseline row countとして自動採用しない。次の段階へ進む前に、canonical CSVの行数定義、CSV hash、UNC 7 root、業務表期待件数を業務責任者・運用責任者・アプリ責任者がapproval ID付きで承認する必要がある。承認後も、backup/restore検証をlive A/B測定より先に完了し、6指標のverdictは正式閾値承認まで`not_evaluable`を維持する。
+
 ### S2-CR-08 テスト方針の優先順位と暫定推奨閾値（未承認）
 
 S2-CR-08は、既存回帰試験の件数増加よりも、測定対象の同一性、欠測時の安全停止、正式証跡の合否判定可能性を優先する。次の優先順位を崩さず、各修正とそのdirect positive/negative testを同一iterationで完了させる。後続優先度への着手は、先行優先度のreviewer PASS後とする。
