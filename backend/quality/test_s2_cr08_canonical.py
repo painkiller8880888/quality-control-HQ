@@ -4538,6 +4538,18 @@ class CanonicalEvidenceSemanticValidatorTests(TransactionTestCase):
         with self.assertRaises(ValueError):
             _validate_canonical_evidence_semantics(ev, require_final=True)
 
+    def test_final_missing_failure_reason(self):
+        ev = self._valid_final_evidence()
+        del ev["failure_reason"]
+        with self.assertRaises(ValueError):
+            _validate_canonical_evidence_semantics(ev, require_final=True)
+
+    def test_final_none_failure_reason(self):
+        ev = self._valid_final_evidence()
+        ev["failure_reason"] = None
+        with self.assertRaises(ValueError):
+            _validate_canonical_evidence_semantics(ev, require_final=True)
+
     def test_final_live_gate_missing_fields(self):
         for field in ("job_a_succeeded", "job_b_succeeded", "observer_a_completed",
                       "observer_b_completed", "postflight_pass", "metrics_ok",

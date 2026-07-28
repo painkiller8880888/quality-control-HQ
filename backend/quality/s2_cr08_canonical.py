@@ -1976,8 +1976,8 @@ def _validate_canonical_evidence_semantics(evidence, *, require_final=False):
     if require_final and run_mode == "live":
         if measurement_status != "completed":
             raise ValueError("final live evidence must have measurement_status='completed'")
-        if failure_reason:
-            raise ValueError("final live evidence must have empty failure_reason")
+        if "failure_reason" not in evidence or failure_reason != "":
+            raise ValueError("final live evidence must have failure_reason=''")
 
         live_verification = evidence.get("live_verification")
         if not isinstance(live_verification, dict):

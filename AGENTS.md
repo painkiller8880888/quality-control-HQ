@@ -23,15 +23,16 @@ Do not split otherwise batchable inspections across multiple outer tool calls. H
 
 このリポジトリでは、複数のAI agentが役割分離されたパイプラインとして協調する。
 
-現在の基本パイプライン:
+基本サイクル:
 
 1. planner(codex)
-2. implementer(opencode)
+2. implementer(codexまたは外部agent)
 3. reviewer(codex)
+4. user decision gate
 
 各agentは自分の責務のみ実行する。
-1->2, 2->3は異なるクライアント間のhandoffとなる。
 各エージェントは次のクライアントのためのhandoff生成をgoalとする。
+Codex内のサブエージェント構成は、このファイルとは別に定義された既存構成を流用する。
 
 ---
 
@@ -58,3 +59,87 @@ agent間通信は structured handoff のみで行う。
 - 次agentに必要な情報だけ渡す
 - 思考ログを丸ごと渡さない
 - 未検証情報を事実として渡さない
+
+handoffの標準配置:
+
+- plannerからimplementer: `.codex/agent/.planner/HANDOFF.md`
+- implementerからreviewer: `.codex/agent/.implementer/HANDOFF.md`
+- reviewerから次サイクルおよびuser: `.codex/agent/.reviewer/HANDOFF.md`
+
+handoffは補助資料であり、実装や検証結果そのものの証拠ではない。
+reviewerは外部agentのhandoffを無条件に信用せず、working tree、diff、対象コード、テスト結果を自ら確認する。
+
+---
+
+## Mandatory User Decision Gate
+
+reviewerは各サイクルのレビュー完了後、必ず`.codex/agent/.reviewer/HANDOFF.md`を生成または更新する。
+その時点でパイプラインを停止し、userの明示的な指示を待つ。
+
+reviewer handoffを生成した同一turn内では、次の行為を禁止する:
+
+- 次サイクルのplannerを開始する
+- Codex implementerを開始する
+- 外部implementer向けの実装を代行する
+- reviewer自身が指摘事項を修正する
+- userのクオータ状況を推測して経路を自動選択する
+
+停止時は、少なくとも次をuserへ提示する:
+
+- review verdict
+- blocking findingsまたは次の最小作業
+- Codexで継続可能か
+- 外部implementerへhandoff可能か
+- userの経路選択が必要であること
+
+Codexは週次クオータ残量を信頼できる方法で自動取得できると仮定しない。
+クオータ確認と次経路の決定はuserの責務とする。
+
+---
+
+## User-Selected Routes
+
+decision gate後は、userが明示した経路だけを実行する。
+指示がない、曖昧、または相互に矛盾する場合は作業を開始せず確認する。
+
+### Route A: Codex Implementation
+
+userがCodexでの継続を明示した場合:
+
+1. reviewer handoffのverdictに従い、必要ならplannerが次の最小scopeを定義する
+2. Codex implementerが承認されたscopeだけを実装・検証する
+3. Codex reviewerが独立してレビューする
+4. reviewerが`.codex/agent/.reviewer/HANDOFF.md`を更新する
+5. mandatory user decision gateで再び停止する
+
+Codex implementerのmodelやsubagent構成は、userの指示および別途定義された既存構成に従う。
+plannerまたはreviewerが実装を兼務してはならない。
+
+### Route B: External Implementation
+
+userがimplementationの外部委託を明示した場合:
+
+1. 必要ならplannerが外部implementer向けの`.codex/agent/.planner/HANDOFF.md`を生成する
+2. Codex側は実装せず停止する
+3. userが外部implementerの変更と`.codex/agent/.implementer/HANDOFF.md`をreviewerへ渡す
+4. reviewerが実変更と検証結果を独立して確認する
+5. reviewerが`.codex/agent/.reviewer/HANDOFF.md`を更新する
+6. mandatory user decision gateで再び停止する
+
+外部implementerの作業待ち中に、Codexが同じscopeを先行実装してはならない。
+
+---
+
+## Reviewer Handoff Minimum Contents
+
+`.codex/agent/.reviewer/HANDOFF.md`には少なくとも次を含める:
+
+- review scope
+- verdict: `PASS`、`FAIL`、または`BLOCKED`
+- verified factsと未検証事項
+- blocking findingsと優先度
+- 次サイクルの最小推奨scope
+- 変更禁止範囲および維持すべきsafety gate
+- Codex implementationとexternal implementationのどちらにも渡せる実行条件
+
+`PASS`であってもuser decision gateを省略しない。
