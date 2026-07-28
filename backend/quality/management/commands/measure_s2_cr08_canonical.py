@@ -35,6 +35,7 @@ from quality.s2_cr08_canonical import (
     _start_service_with_health_check,
     _sanitize_recovery_results,
     _build_minimum_evidence,
+    _validate_canonical_evidence_semantics,
     _sha256,
     CANONICAL_BASELINE_KNOWN_HASH,
     CANONICAL_BASELINE_EXPECTED_ROW_COUNT,
@@ -205,6 +206,7 @@ class Command(BaseCommand):
                 if preflight_pass:
                     self.stderr.write("Correct privacy issues and re-run.")
                 raise CommandError("Dry-run aborted: privacy check failed.")
+            _validate_canonical_evidence_semantics(evidence, require_final=False)
             write_evidence(evidence, output)
             self.stdout.write(f"Dry-run evidence written to: {output}")
             if not preflight_pass:
@@ -605,6 +607,7 @@ class Command(BaseCommand):
 
                 # Evidence write: fail-closed on write failure
                 try:
+                    _validate_canonical_evidence_semantics(evidence, require_final=True)
                     write_evidence(evidence, output)
                     self.stdout.write(f"Evidence written to: {output}")
                 except Exception as e:

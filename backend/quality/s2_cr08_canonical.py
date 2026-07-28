@@ -1932,6 +1932,92 @@ def _privacy_safe_str(text, replacement="[REDACTED]"):
     return result
 
 
+def _validate_canonical_evidence_semantics(evidence, *, require_final=False):
+    if not isinstance(evidence, dict):
+        raise ValueError("evidence must be a dict")
+
+    run_mode = evidence.get("run_mode")
+    if run_mode not in ("dry_run", "live"):
+        raise ValueError(
+            "run_mode must be 'dry_run' or 'live'; "
+            f"received type {type(run_mode).__name__}"
+        )
+
+    measurement_status = evidence.get("measurement_status")
+    allowed_statuses = {"not_executed"} if run_mode == "dry_run" else {"completed", "failed"}
+    if measurement_status not in allowed_statuses:
+        raise ValueError(
+            "measurement_status is not allowed for the declared run_mode; "
+            f"received type {type(measurement_status).__name__}"
+        )
+
+    failure_reason = evidence.get("failure_reason")
+    if failure_reason is not None and not isinstance(failure_reason, str):
+        raise ValueError("failure_reason must be a string when present")
+
+    if run_mode == "dry_run":
+        if measurement_status in ("completed", "failed"):
+            raise ValueError("dry_run must not have measurement_status=completed or failed")
+        if failure_reason not in ("", "preflight_failed"):
+            raise ValueError(
+                "dry_run failure_reason must be '' or 'preflight_failed'; "
+                f"received type {type(failure_reason).__name__}"
+            )
+        return True
+
+    if run_mode == "live":
+        if measurement_status == "completed":
+            if failure_reason:
+                raise ValueError("completed evidence must have empty failure_reason")
+        elif measurement_status == "failed":
+            if not failure_reason:
+                raise ValueError("failed evidence must have non-empty failure_reason")
+
+    if require_final and run_mode == "live":
+        if measurement_status != "completed":
+            raise ValueError("final live evidence must have measurement_status='completed'")
+        if failure_reason:
+            raise ValueError("final live evidence must have empty failure_reason")
+
+        live_verification = evidence.get("live_verification")
+        if not isinstance(live_verification, dict):
+            raise ValueError("final live evidence requires live_verification as dict")
+
+        required_bool_fields = [
+            "job_a_succeeded", "job_b_succeeded",
+            "observer_a_completed", "observer_b_completed",
+            "postflight_pass", "metrics_ok", "metrics_thread_alive",
+        ]
+        for field in required_bool_fields:
+            val = live_verification.get(field)
+            if type(val) is not bool:
+                raise ValueError(
+                    f"final live evidence: live_verification.{field} must be bool, "
+                    f"received type {type(val).__name__}"
+                )
+            if val is not True:
+                raise ValueError(
+                    f"final live evidence: live_verification.{field} must be True"
+                )
+
+        for field in ("metrics_coverage_ok", "recovery_ok", "transaction_completed", "observation_ok"):
+            val = evidence.get(field)
+            if type(val) is not bool or val is not True:
+                raise ValueError(
+                    f"final live evidence: {field} must be True; "
+                    f"received type {type(val).__name__}"
+                )
+
+        cleanup = evidence.get("cleanup_failures")
+        if not isinstance(cleanup, list) or cleanup:
+            raise ValueError(
+                f"final live evidence: cleanup_failures must be empty list, "
+                f"received type {type(cleanup).__name__}"
+            )
+
+    return True
+
+
 def _build_minimum_evidence(
     job_a=None, job_b=None,
     measurement_status=None,
@@ -1959,6 +2045,7 @@ def _build_minimum_evidence(
             "restore_entry_count": backup_evidence.get("restore_entry_count", 0),
             "passed": backup_evidence.get("passed", False),
         }
+    _validate_canonical_evidence_semantics(evidence, require_final=False)
     return evidence
 
 
@@ -1995,6 +2082,7 @@ def build_canonical_evidence(
         evidence["preflight"] = _sanitize_preflight_for_evidence(preflight) if preflight else {}
         evidence["measurement_status"] = "not_executed"
         evidence["failure_reason"] = "" if _all_preflight_pass(preflight) else "preflight_failed"
+        _validate_canonical_evidence_semantics(evidence, require_final=False)
         return evidence
 
     if job_a:
@@ -2036,6 +2124,7 @@ def build_canonical_evidence(
     evidence["measurement_status"] = measurement_status or "completed"
     if failure_reason:
         evidence["failure_reason"] = failure_reason
+    _validate_canonical_evidence_semantics(evidence, require_final=False)
     return evidence
 
 
@@ -2910,6 +2999,8 @@ def run_canonical(
     evidence["metrics_coverage_ok"] = metrics_ok and metrics_thread_alive
     evidence["measurement_status"] = measurement_status
     evidence["failure_reason"] = failure_reason
+
+    _validate_canonical_evidence_semantics(evidence, require_final=True)
 
     # ── Gate 8: Privacy check (fail-closed) ──
     privacy_ok, privacy_issues = _privacy_check_passed(evidence)

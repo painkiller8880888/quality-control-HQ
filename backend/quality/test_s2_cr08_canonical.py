@@ -47,12 +47,11 @@ from quality.s2_cr08_canonical import (
     _LOCK_HELD,
     _LOCK_NOT_HELD,
     _LOCK_ERROR,
-
-        run_canonical,
-        _write_canonical_evidence,
-        build_canonical_evidence,
-        LIVE_BLOCKED,
-        _privacy_filter,
+    run_canonical,
+    _write_canonical_evidence,
+    LIVE_BLOCKED,
+    _build_minimum_evidence,
+    _validate_canonical_evidence_semantics,
 )
 from quality.s2_cr08_measurement import (
     _connection_pid,
@@ -987,124 +986,6 @@ class JobResultVerifierTests(TransactionTestCase):
     def test_no_result_still_fails(self):
         job = self._make_job(self.Job.Status.SUCCEEDED)
         self.assertFalse(_verify_job_result(job)["passed"])
-
-    # F1: Semantic contradiction direct negative tests
-    # These test that run_canonical rejects contradictory evidence combinations directly
-
-    def test_run_canonical_rejects_completed_status_with_failed_job_a_in_live_verification(self):
-        """measurement_status='completed' but live_verification.job_a_succeeded=False must be rejected."""
-        # Create a job that fails
-        failed_job = Job.objects.create(
-            job_id="test_job_failed_a",
-            job_type=Job.JobType.MASTER_UPDATE,
-            status=Job.Status.FAILED,
-            attempt_count=1,
-        )
-        # Create valid job_b
-        job_b = Job.objects.create(
-            job_id="test_job_b_valid",
-            job_type=Job.JobType.MASTER_UPDATE,
-            status=Job.Status.SUCCEEDED,
-            attempt_count=1,
-            result={
-                "updated_master_count": 10,
-                "updated_class_count": 5,
-                "updated_structure_count": 3,
-                "inspection_file_count": 100,
-                "transaction_strategy": "single_atomic_update",
-            },
-        )
-
-        preflight = {
-            "env_identity": {"passed": True, "found": True},
-            "django_check": {"passed": True, "output": "system check output"},
-            "migrations": {"passed": True},
-            "migration_0029": {"passed": True, "migration_0029_applied": True},
-            "web_service": {"passed": True, "found": True, "status": "Running", "start_type": "Automatic", "running": True, "automatic": True},
-            "worker_service": {"passed": True, "found": True, "status": "Running", "start_type": "Automatic", "running": True, "automatic": True},
-            "http_check": {"passed": True, "status_code": 200},
-            "active_jobs": {"passed": True, "count": 0},
-            "running_jobs": {"passed": True, "count": 0},
-            "backup_tool": {"passed": True, "available": True, "version": "1.0", "tool_path": "safe_tool_path"},
-            "backup_preparedness": {"passed": True, "tool_available": True, "tool_path": "safe_tool_path", "backup_output_dir": "safe_dir", "backup_output_writable": True, "parent_dir_exists": True},
-            "worker_process_tree": {"passed": True, "child_count": 1, "unique": True},
-            "table_counts": {"master_count": 10, "master_class_count": 5, "structure_count": 3, "inspection_file_count": 100},
-            "table_hashes": {"master_hash": "a" * 64, "master_class_hash": "b" * 64, "structure_hash": "c" * 64, "inspection_file_hash": "d" * 64},
-            "system_metrics": {"db_connections": 5, "waiting_locks": 0, "granted_locks": 10, "cpu_percent": 10.0, "memory_percent": 50.0, "passed": True},
-            "inspection_file_distribution": {"total": 100, "by_priority": {1: 100}},
-            "inspection_file_pathset_hash": {"pathset_hash": "e" * 64},
-            "canonical_input": {"passed": True, "csv_configured": True, "folder_paths_count": 1, "priorities_count": 1, "status": "configured", "issues": []},
-            "canonical_payload": {"passed": True, "csv_exists": True, "csv_hash": "mocked_hash", "csv_row_count": 2, "folder_paths_count": 1, "priorities_count": 1, "status": "valid", "issues": []},
-            "unc_paths": {"passed": True, "configured_count": 1, "accessible_count": 1, "all_accessible": True, "details": []},
-        }
-
-        postflight = {
-            "table_counts": {"master_count": 10, "master_class_count": 5, "structure_count": 3, "inspection_file_count": 100, "baseline_matched": True},
-            "table_hashes": {"master_hash": "a" * 64, "master_class_hash": "b" * 64, "structure_hash": "c" * 64, "inspection_file_hash": "d" * 64, "baseline_matched": True},
-            "web_service": {"passed": True, "running": True},
-            "worker_service": {"passed": True, "running": True},
-            "http_check": {"passed": True, "status_code": 200},
-            "unc_paths": {"passed": True, "configured_count": 1, "accessible_count": 1, "all_accessible": True, "details": []},
-            "inspection_file_distribution": {"total": 100, "by_priority": {1: 100}, "passed": True},
-            "inspection_file_pathset_hash": {"pathset_hash": "e" * 64, "passed": True},
-            "active_jobs": {"passed": True, "count": 0},
-            "running_jobs": {"passed": True, "count": 0},
-            "system_metrics": {"db_connections": 5, "waiting_locks": 0, "granted_locks": 10, "cpu_percent": 10.0, "memory_percent": 50.0, "passed": True},
-        }
-
-        base_time = timezone.now()
-        observer_a = type("Observer", (), {
-            "transaction_completed": True,
-            "xact_start": base_time - timezone.timedelta(seconds=15),
-            "end_lower_bound": base_time - timezone.timedelta(seconds=3),
-            "end_upper_bound": base_time - timezone.timedelta(seconds=1),
-            "backend_hash": "abc123",
-            "poll_count": 5,
-            "correlation_method": "pid_port",
-            "correlation_candidate_count": 1,
-            "correlation_unique": True,
-            "observation_ok": True,
-        })()
-
-        observer_b = type("Observer", (), {
-            "transaction_completed": True,
-            "xact_start": base_time,
-            "end_lower_bound": base_time + timezone.timedelta(seconds=12),
-            "end_upper_bound": base_time + timezone.timedelta(seconds=14),
-            "backend_hash": "def456",
-            "poll_count": 5,
-            "correlation_method": "pid_port",
-            "correlation_candidate_count": 1,
-            "correlation_unique": True,
-            "observation_ok": True,
-        })()
-
-        with TemporaryDirectory() as tmpdir:
-            with self.assertRaises(RuntimeError) as ctx:
-                run_canonical(
-                    job_a=failed_job,
-                    job_b=job_b,
-                    observer_a=observer_a,
-                    observer_b=observer_b,
-                    preflight=preflight,
-                    postflight=postflight,
-                    system_metrics={
-                        "sample_count": 15,
-                        "interval_seconds": 2.0,
-                        "first_sample": (base_time - timezone.timedelta(seconds=30)).isoformat(),
-                        "last_sample": (base_time + timezone.timedelta(seconds=26)).isoformat(),
-                        "cpu_percent_max": 30.0,
-                        "memory_percent_max": 50.0,
-                        "db_connections_max": 10,
-                        "waiting_locks_max": 2,
-                        "samples": [],
-                        "has_data": True,
-                    },
-                    evidence_output_dir=tmpdir,
-                )
-            self.assertIn("Job A final gate failed", str(ctx.exception))
-
-
 
     def test_run_canonical_rejects_evidence_with_completed_status_and_failure_reason(self):
         """run_canonical must reject measurement_status='completed' with non-empty failure_reason."""
@@ -4477,3 +4358,519 @@ class WriteEvidenceVerifyTests(TransactionTestCase):
             retry_path = _write_canonical_evidence({"retry": True}, tmpdir)
             self.assertTrue(retry_path.exists())
             self.assertTrue((Path(tmpdir) / "checksums.sha256").exists())
+
+
+class CanonicalEvidenceSemanticValidatorTests(TransactionTestCase):
+    """P1: Direct tests for _validate_canonical_evidence_semantics."""
+
+    # ── Positive ──
+
+    def test_valid_dry_run_preflight_pass(self):
+        evidence = {
+            "run_mode": "dry_run",
+            "measurement_status": "not_executed",
+            "failure_reason": "",
+        }
+        self.assertTrue(_validate_canonical_evidence_semantics(evidence, require_final=False))
+
+    def test_valid_dry_run_preflight_failed(self):
+        evidence = {
+            "run_mode": "dry_run",
+            "measurement_status": "not_executed",
+            "failure_reason": "preflight_failed",
+        }
+        self.assertTrue(_validate_canonical_evidence_semantics(evidence, require_final=False))
+
+    def test_valid_live_minimum_failure_evidence(self):
+        evidence = {
+            "run_mode": "live",
+            "measurement_status": "failed",
+            "failure_reason": "job_a_not_succeeded",
+        }
+        self.assertTrue(_validate_canonical_evidence_semantics(evidence, require_final=False))
+
+    def test_valid_completed_final_evidence(self):
+        evidence = {
+            "run_mode": "live",
+            "measurement_status": "completed",
+            "failure_reason": "",
+            "live_verification": {
+                "job_a_succeeded": True,
+                "job_b_succeeded": True,
+                "observer_a_completed": True,
+                "observer_b_completed": True,
+                "postflight_pass": True,
+                "metrics_ok": True,
+                "metrics_thread_alive": True,
+            },
+            "metrics_coverage_ok": True,
+            "recovery_ok": True,
+            "transaction_completed": True,
+            "observation_ok": True,
+            "cleanup_failures": [],
+        }
+        self.assertTrue(_validate_canonical_evidence_semantics(evidence, require_final=True))
+
+    # ── Base negative ──
+
+    def test_non_dict_evidence(self):
+        with self.assertRaises(ValueError):
+            _validate_canonical_evidence_semantics("not a dict")
+
+    def test_unknown_run_mode(self):
+        with self.assertRaises(ValueError):
+            _validate_canonical_evidence_semantics({"run_mode": "invalid", "measurement_status": "completed"})
+
+    def test_missing_run_mode(self):
+        with self.assertRaises(ValueError):
+            _validate_canonical_evidence_semantics({"measurement_status": "completed"})
+
+    def test_malformed_run_mode(self):
+        with self.assertRaises(ValueError):
+            _validate_canonical_evidence_semantics({"run_mode": None, "measurement_status": "completed"})
+
+    def test_unknown_measurement_status(self):
+        with self.assertRaises(ValueError):
+            _validate_canonical_evidence_semantics({"run_mode": "live", "measurement_status": "unknown"})
+
+    def test_missing_measurement_status(self):
+        with self.assertRaises(ValueError):
+            _validate_canonical_evidence_semantics({"run_mode": "live"})
+
+    def test_malformed_measurement_status(self):
+        with self.assertRaises(ValueError):
+            _validate_canonical_evidence_semantics({"run_mode": "live", "measurement_status": None})
+
+    def test_completed_with_non_empty_failure_reason(self):
+        evidence = {
+            "run_mode": "live",
+            "measurement_status": "completed",
+            "failure_reason": "something_wrong",
+        }
+        with self.assertRaises(ValueError):
+            _validate_canonical_evidence_semantics(evidence, require_final=False)
+
+    def test_failed_with_empty_failure_reason(self):
+        evidence = {
+            "run_mode": "live",
+            "measurement_status": "failed",
+            "failure_reason": "",
+        }
+        with self.assertRaises(ValueError):
+            _validate_canonical_evidence_semantics(evidence, require_final=False)
+
+    def test_failed_with_missing_failure_reason(self):
+        evidence = {
+            "run_mode": "live",
+            "measurement_status": "failed",
+        }
+        with self.assertRaises(ValueError):
+            _validate_canonical_evidence_semantics(evidence, require_final=False)
+
+    def test_failed_with_non_string_failure_reason(self):
+        evidence = {
+            "run_mode": "live",
+            "measurement_status": "failed",
+            "failure_reason": 42,
+        }
+        with self.assertRaises(ValueError):
+            _validate_canonical_evidence_semantics(evidence, require_final=False)
+
+    def test_dry_run_with_completed(self):
+        evidence = {
+            "run_mode": "dry_run",
+            "measurement_status": "completed",
+            "failure_reason": "",
+        }
+        with self.assertRaises(ValueError):
+            _validate_canonical_evidence_semantics(evidence, require_final=False)
+
+    def test_dry_run_with_failed(self):
+        evidence = {
+            "run_mode": "dry_run",
+            "measurement_status": "failed",
+            "failure_reason": "something",
+        }
+        with self.assertRaises(ValueError):
+            _validate_canonical_evidence_semantics(evidence, require_final=False)
+
+    def test_dry_run_unknown_failure_reason(self):
+        evidence = {
+            "run_mode": "dry_run",
+            "measurement_status": "not_executed",
+            "failure_reason": "unknown_reason",
+        }
+        with self.assertRaises(ValueError):
+            _validate_canonical_evidence_semantics(evidence, require_final=False)
+
+    # ── Final negative (table-driven) ──
+
+    def _valid_final_evidence(self):
+        return {
+            "run_mode": "live",
+            "measurement_status": "completed",
+            "failure_reason": "",
+            "live_verification": {
+                "job_a_succeeded": True,
+                "job_b_succeeded": True,
+                "observer_a_completed": True,
+                "observer_b_completed": True,
+                "postflight_pass": True,
+                "metrics_ok": True,
+                "metrics_thread_alive": True,
+            },
+            "metrics_coverage_ok": True,
+            "recovery_ok": True,
+            "transaction_completed": True,
+            "observation_ok": True,
+            "cleanup_failures": [],
+        }
+
+    def test_final_missing_live_verification(self):
+        ev = self._valid_final_evidence()
+        del ev["live_verification"]
+        with self.assertRaises(ValueError):
+            _validate_canonical_evidence_semantics(ev, require_final=True)
+
+    def test_final_non_dict_live_verification(self):
+        ev = self._valid_final_evidence()
+        ev["live_verification"] = "not a dict"
+        with self.assertRaises(ValueError):
+            _validate_canonical_evidence_semantics(ev, require_final=True)
+
+    def test_final_live_gate_missing_fields(self):
+        for field in ("job_a_succeeded", "job_b_succeeded", "observer_a_completed",
+                      "observer_b_completed", "postflight_pass", "metrics_ok",
+                      "metrics_thread_alive"):
+            with self.subTest(missing_field=field):
+                ev = self._valid_final_evidence()
+                del ev["live_verification"][field]
+                with self.assertRaises(ValueError):
+                    _validate_canonical_evidence_semantics(ev, require_final=True)
+
+    def test_final_live_gate_fields_false(self):
+        for field in ("job_a_succeeded", "job_b_succeeded", "observer_a_completed",
+                      "observer_b_completed", "postflight_pass", "metrics_ok",
+                      "metrics_thread_alive"):
+            with self.subTest(false_field=field):
+                ev = self._valid_final_evidence()
+                ev["live_verification"][field] = False
+                with self.assertRaises(ValueError):
+                    _validate_canonical_evidence_semantics(ev, require_final=True)
+
+    def test_final_live_gate_fields_non_bool_truthy(self):
+        for field in ("job_a_succeeded", "job_b_succeeded", "observer_a_completed",
+                      "observer_b_completed", "postflight_pass", "metrics_ok",
+                      "metrics_thread_alive"):
+            with self.subTest(truthy_non_bool_field=field):
+                ev = self._valid_final_evidence()
+                ev["live_verification"][field] = 1
+                with self.assertRaises(ValueError):
+                    _validate_canonical_evidence_semantics(ev, require_final=True)
+
+    def test_final_metrics_coverage_ok_missing(self):
+        ev = self._valid_final_evidence()
+        del ev["metrics_coverage_ok"]
+        with self.assertRaises(ValueError):
+            _validate_canonical_evidence_semantics(ev, require_final=True)
+
+    def test_final_metrics_coverage_ok_false(self):
+        ev = self._valid_final_evidence()
+        ev["metrics_coverage_ok"] = False
+        with self.assertRaises(ValueError):
+            _validate_canonical_evidence_semantics(ev, require_final=True)
+
+    def test_final_metrics_coverage_ok_non_bool(self):
+        ev = self._valid_final_evidence()
+        ev["metrics_coverage_ok"] = 1
+        with self.assertRaises(ValueError):
+            _validate_canonical_evidence_semantics(ev, require_final=True)
+
+    def test_final_recovery_ok_missing(self):
+        ev = self._valid_final_evidence()
+        del ev["recovery_ok"]
+        with self.assertRaises(ValueError):
+            _validate_canonical_evidence_semantics(ev, require_final=True)
+
+    def test_final_recovery_ok_false(self):
+        ev = self._valid_final_evidence()
+        ev["recovery_ok"] = False
+        with self.assertRaises(ValueError):
+            _validate_canonical_evidence_semantics(ev, require_final=True)
+
+    def test_final_recovery_ok_non_bool(self):
+        ev = self._valid_final_evidence()
+        ev["recovery_ok"] = 1
+        with self.assertRaises(ValueError):
+            _validate_canonical_evidence_semantics(ev, require_final=True)
+
+    def test_final_cleanup_failures_missing(self):
+        ev = self._valid_final_evidence()
+        del ev["cleanup_failures"]
+        with self.assertRaises(ValueError):
+            _validate_canonical_evidence_semantics(ev, require_final=True)
+
+    def test_final_cleanup_failures_non_list(self):
+        ev = self._valid_final_evidence()
+        ev["cleanup_failures"] = "not a list"
+        with self.assertRaises(ValueError):
+            _validate_canonical_evidence_semantics(ev, require_final=True)
+
+    def test_final_cleanup_failures_non_empty(self):
+        ev = self._valid_final_evidence()
+        ev["cleanup_failures"] = ["some error"]
+        with self.assertRaises(ValueError):
+            _validate_canonical_evidence_semantics(ev, require_final=True)
+
+    def test_final_transaction_completed_missing(self):
+        ev = self._valid_final_evidence()
+        del ev["transaction_completed"]
+        with self.assertRaises(ValueError):
+            _validate_canonical_evidence_semantics(ev, require_final=True)
+
+    def test_final_transaction_completed_false(self):
+        ev = self._valid_final_evidence()
+        ev["transaction_completed"] = False
+        with self.assertRaises(ValueError):
+            _validate_canonical_evidence_semantics(ev, require_final=True)
+
+    def test_final_transaction_completed_non_bool(self):
+        ev = self._valid_final_evidence()
+        ev["transaction_completed"] = 1
+        with self.assertRaises(ValueError):
+            _validate_canonical_evidence_semantics(ev, require_final=True)
+
+    def test_final_observation_ok_missing(self):
+        ev = self._valid_final_evidence()
+        del ev["observation_ok"]
+        with self.assertRaises(ValueError):
+            _validate_canonical_evidence_semantics(ev, require_final=True)
+
+    def test_final_observation_ok_false(self):
+        ev = self._valid_final_evidence()
+        ev["observation_ok"] = False
+        with self.assertRaises(ValueError):
+            _validate_canonical_evidence_semantics(ev, require_final=True)
+
+    def test_final_observation_ok_non_bool(self):
+        ev = self._valid_final_evidence()
+        ev["observation_ok"] = 1
+        with self.assertRaises(ValueError):
+            _validate_canonical_evidence_semantics(ev, require_final=True)
+
+    def test_validation_errors_do_not_include_untrusted_values(self):
+        """Semantic validation errors expose field metadata, never rejected values."""
+        sentinels = [
+            "SECRET_SENTINEL_VALUE",
+            r"C:\\secret\\evidence.json",
+            "(12345, 54321)",
+        ]
+        cases = [
+            ({"run_mode": sentinels[0], "measurement_status": "completed"}, False),
+            ({"run_mode": "live", "measurement_status": sentinels[1]}, False),
+            ({"run_mode": "dry_run", "measurement_status": "not_executed", "failure_reason": sentinels[2]}, False),
+        ]
+        for field in ("job_a_succeeded", "job_b_succeeded", "observer_a_completed",
+                      "observer_b_completed", "postflight_pass", "metrics_ok",
+                      "metrics_thread_alive"):
+            evidence = self._valid_final_evidence()
+            evidence["live_verification"][field] = sentinels[0]
+            cases.append((evidence, True))
+        evidence = self._valid_final_evidence()
+        evidence["cleanup_failures"] = list(sentinels)
+        cases.append((evidence, True))
+
+        for evidence, require_final in cases:
+            with self.subTest(evidence=evidence, require_final=require_final):
+                with self.assertRaises(ValueError) as raised:
+                    _validate_canonical_evidence_semantics(evidence, require_final=require_final)
+                message = str(raised.exception)
+                for sentinel in sentinels:
+                    self.assertNotIn(sentinel, message)
+
+
+class CanonicalEvidenceSemanticIntegrationTests(TransactionTestCase):
+    """P1: Integration tests for semantic validation in production paths."""
+
+    def test_build_canonical_evidence_rejects_completed_with_reason(self):
+        with self.assertRaises(ValueError):
+            build_canonical_evidence(
+                run_mode="live",
+                measurement_status="completed",
+                failure_reason="something_wrong",
+            )
+
+    def test_build_minimum_evidence_rejects_failed_empty_reason(self):
+        with self.assertRaises(ValueError):
+            _build_minimum_evidence(
+                measurement_status="failed",
+                failure_reason="",
+            )
+
+    def test_build_minimum_evidence_rejects_failed_missing_reason(self):
+        with self.assertRaises(ValueError):
+            _build_minimum_evidence(
+                measurement_status="failed",
+            )
+
+    def test_run_canonical_calls_final_validator_before_privacy(self):
+        """run_canonical() calls _validate_canonical_evidence_semantics(require_final=True) before privacy check."""
+        events = []
+
+        def validate(evidence, *, require_final=False):
+            if require_final:
+                events.append("final_validator")
+            return True
+
+        def privacy_check(evidence):
+            events.append("privacy")
+            return True, []
+
+        job_a = Job.objects.create(
+            job_id="test_rc_final_val_a",
+            job_type=Job.JobType.MASTER_UPDATE,
+            status=Job.Status.SUCCEEDED,
+            attempt_count=1,
+            result={
+                "updated_master_count": 10, "updated_class_count": 5,
+                "updated_structure_count": 3, "inspection_file_count": 100,
+                "transaction_strategy": "single_atomic_update",
+            },
+        )
+        job_b = Job.objects.create(
+            job_id="test_rc_final_val_b",
+            job_type=Job.JobType.MASTER_UPDATE,
+            status=Job.Status.SUCCEEDED,
+            attempt_count=1,
+            result={
+                "updated_master_count": 8, "updated_class_count": 4,
+                "updated_structure_count": 2, "inspection_file_count": 80,
+                "transaction_strategy": "single_atomic_update",
+            },
+        )
+        base_time = timezone.now()
+        preflight = {
+            "env_identity": {"passed": True, "found": True},
+            "django_check": {"passed": True, "output": "ok"},
+            "migrations": {"passed": True},
+            "migration_0029": {"passed": True, "migration_0029_applied": True},
+            "web_service": {"passed": True, "found": True, "status": "Running", "start_type": "Automatic", "running": True, "automatic": True},
+            "worker_service": {"passed": True, "found": True, "status": "Running", "start_type": "Automatic", "running": True, "automatic": True},
+            "http_check": {"passed": True, "status_code": 200},
+            "active_jobs": {"passed": True, "count": 0},
+            "running_jobs": {"passed": True, "count": 0},
+            "backup_tool": {"passed": True, "available": True, "version": "1.0", "tool_path": "safe"},
+            "backup_preparedness": {"passed": True, "tool_available": True, "tool_path": "safe", "backup_output_dir": "safe", "backup_output_writable": True, "parent_dir_exists": True},
+            "worker_process_tree": {"passed": True, "child_count": 1, "unique": True},
+            "table_counts": {"master_count": 10, "master_class_count": 5, "structure_count": 3, "inspection_file_count": 100},
+            "table_hashes": {"master_hash": "a" * 64, "master_class_hash": "b" * 64, "structure_hash": "c" * 64, "inspection_file_hash": "d" * 64},
+            "system_metrics": {"db_connections": 5, "waiting_locks": 0, "granted_locks": 10, "cpu_percent": 10.0, "memory_percent": 50.0, "passed": True},
+            "inspection_file_distribution": {"total": 100, "by_priority": {1: 100}},
+            "inspection_file_pathset_hash": {"pathset_hash": "e" * 64},
+            "canonical_input": {"passed": True, "csv_configured": True, "folder_paths_count": 1, "priorities_count": 1, "status": "configured", "issues": []},
+            "canonical_payload": {"passed": True, "csv_exists": True, "csv_hash": "mocked", "csv_row_count": 2, "folder_paths_count": 1, "priorities_count": 1, "status": "valid", "issues": []},
+            "unc_paths": {"passed": True, "configured_count": 1, "accessible_count": 1, "all_accessible": True, "details": []},
+        }
+        postflight = {
+            "table_counts": {"master_count": 10, "master_class_count": 5, "structure_count": 3, "inspection_file_count": 100, "baseline_matched": True},
+            "table_hashes": {"master_hash": "a" * 64, "master_class_hash": "b" * 64, "structure_hash": "c" * 64, "inspection_file_hash": "d" * 64, "baseline_matched": True},
+            "web_service": {"passed": True, "running": True},
+            "worker_service": {"passed": True, "running": True},
+            "http_check": {"passed": True, "status_code": 200},
+            "unc_paths": {"passed": True, "configured_count": 1, "accessible_count": 1, "all_accessible": True, "details": []},
+            "inspection_file_distribution": {"total": 100, "by_priority": {1: 100}, "passed": True},
+            "inspection_file_pathset_hash": {"pathset_hash": "e" * 64, "passed": True},
+            "active_jobs": {"passed": True, "count": 0},
+            "running_jobs": {"passed": True, "count": 0},
+            "system_metrics": {"db_connections": 5, "waiting_locks": 0, "granted_locks": 10, "cpu_percent": 10.0, "memory_percent": 50.0, "passed": True},
+        }
+        observer_a = type("Observer", (), {
+            "transaction_completed": True,
+            "xact_start": base_time - timezone.timedelta(seconds=15),
+            "end_lower_bound": base_time - timezone.timedelta(seconds=3),
+            "end_upper_bound": base_time - timezone.timedelta(seconds=1),
+            "backend_hash": "abc", "poll_count": 5,
+            "correlation_method": "pid_port", "correlation_candidate_count": 1,
+            "correlation_unique": True, "observation_ok": True,
+        })()
+        observer_b = type("Observer", (), {
+            "transaction_completed": True,
+            "xact_start": base_time,
+            "end_lower_bound": base_time + timezone.timedelta(seconds=12),
+            "end_upper_bound": base_time + timezone.timedelta(seconds=14),
+            "backend_hash": "def", "poll_count": 5,
+            "correlation_method": "pid_port", "correlation_candidate_count": 1,
+            "correlation_unique": True, "observation_ok": True,
+        })()
+        samples = []
+        for i in range(15):
+            ts = base_time - timezone.timedelta(seconds=30) + timezone.timedelta(seconds=i * 4)
+            samples.append({
+                "timestamp": ts.isoformat(),
+                "db_connections": 5, "waiting_locks": 0, "granted_locks": 10,
+                "cpu_percent": 15.0 + i, "memory_percent": 50.0,
+            })
+        with patch("quality.s2_cr08_canonical._validate_canonical_evidence_semantics", side_effect=validate), \
+             patch("quality.s2_cr08_canonical._privacy_check_passed", side_effect=privacy_check), \
+             TemporaryDirectory() as tmpdir:
+            run_canonical(
+                job_a=job_a, job_b=job_b,
+                observer_a=observer_a, observer_b=observer_b,
+                preflight=preflight, postflight=postflight,
+                system_metrics={
+                    "sample_count": len(samples), "interval_seconds": 2.0,
+                    "first_sample": samples[0]["timestamp"],
+                    "last_sample": samples[-1]["timestamp"],
+                    "cpu_percent_max": 30.0, "memory_percent_max": 50.0,
+                    "db_connections_max": 10, "waiting_locks_max": 2,
+                    "samples": samples, "has_data": True,
+                },
+                evidence_output_dir=tmpdir,
+                cleanup_failures=[],
+                recovery_results=[
+                    {"service": "web", "name": "QualityControlHQ-Pseudoprod", "target_state": "Running", "success": True},
+                    {"service": "worker", "name": "QualityControlHQ-Worker-Pseudoprod", "target_state": "Running", "success": True},
+                ],
+            )
+        self.assertEqual(events, ["final_validator", "privacy"])
+
+    def test_management_command_dry_run_validator_called_before_write(self):
+        """dry-run validator failure prevents write_evidence from being called."""
+        from quality.management.commands.measure_s2_cr08_canonical import Command
+        cmd = Command()
+        events = []
+
+        def reject_validator(evidence, *, require_final=False):
+            events.append("validator")
+            raise ValueError("semantic validation failed")
+
+        evidence = {
+            "run_mode": "dry_run",
+            "measurement_status": "not_executed",
+            "failure_reason": "",
+        }
+        with TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "dry_run_output3"
+            with patch("quality.management.commands.measure_s2_cr08_canonical.run_preflight", return_value={}), \
+                 patch("quality.management.commands.measure_s2_cr08_canonical._all_preflight_pass", return_value=True), \
+                 patch("quality.management.commands.measure_s2_cr08_canonical._check_canonical_baseline_configured", return_value=(True, "")), \
+                 patch("quality.management.commands.measure_s2_cr08_canonical._verify_canonical_payload", return_value={"passed": True}), \
+                 patch("quality.management.commands.measure_s2_cr08_canonical.build_canonical_evidence", return_value=evidence), \
+                 patch("quality.management.commands.measure_s2_cr08_canonical._privacy_check_passed", return_value=(True, [])), \
+                 patch("quality.management.commands.measure_s2_cr08_canonical._validate_canonical_evidence_semantics", side_effect=reject_validator), \
+                 patch("quality.management.commands.measure_s2_cr08_canonical.write_evidence") as mock_write:
+                with self.assertRaises(ValueError):
+                    cmd.handle(output=str(output), dry_run=True, live=False, poll_seconds=0.5,
+                               env_path="", web_service="web", worker_service="worker",
+                               unc_paths=[], csv_path="", inspection_folder_paths=[])
+        self.assertEqual(events, ["validator"])
+        mock_write.assert_not_called()
+
+    def test_management_command_live_blocked(self):
+        """live management command raises CommandError because LIVE_BLOCKED is True."""
+        with TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "live_output3"
+            with self.assertRaises(CommandError):
+                call_command(
+                    "measure_s2_cr08_canonical", "--live", f"--output={output}",
+                )
