@@ -233,6 +233,55 @@ S2-CR-08は引き続き**部分実施**とする。S2-CR-08 P2 approval package�
 
 この承認はStage Bに限定し、live approvalではない。`LIVE_BLOCKED=True`を維持し、criterion 8のverdictは`not_evaluable`のままとする。backup/restore reviewをlive A/Bより先に完了する必要があり、live A/B測定はそのreviewを通過するまで禁止する。後続の暫定閾値節はproposal historyとして保持し、approved packageを上書きしない。
 
+#### Stage B backup/restore fake/static checkpoint and resume TODO（2026-07-29）
+
+独立reviewerによる再検証は、コード・fake/staticのPlanOnlyおよびservice stop ownership境界に限り**PASS**となった。確認済みの範囲は、`Pending`、`Snapshot`、`Catalog`、`Process`、`Service`、`Jobs`、`State`、`CreateRestore`、`DropRestore`のexact 9-member adapter contract、fakeまたは設定済みread-only providerによる機能するPending構成、null・malformed・負数・範囲外・nonzeroを拒否するstrict Jobs処理、strict pending-manifest検証、manifestとlowercase SHA-256 checksumのPlanOnly公開、post-write再計算、既存final拒否、privacy-safe error、および試験対象failure/residue cleanupである。
+
+service recoveryについては、stopがexact Boolean `$true`を返したserviceだけをinvocation-local ownershipとして記録し、`web`、`worker`の順に各最大1回だけ復旧すること、1件のstart failure後も後続のowned serviceへbest-effortで継続することを確認した。throw、malformed、Boolean false、integer `1`、string `"true"`、その他non-BooleanのService結果はownershipおよびsucceeded-stage記録前に拒否され、review対象経路で自動`DropRestore`は行われない。これは試験した値と経路の確認であり、全malformed値や外部concurrency条件を網羅したとの主張ではない。
+
+reviewerの最新検証は、PowerShellがexit 0、focused case 20/20の後に`Stage B pure validation tests passed`、Python snapshot regressionが6/6で`OK`、`git diff --check`がexit 0かつline-ending warningのみであった。
+
+このPASSは次を証明しない。
+
+- production Service providerまたは実Windows service-state readback。
+- 実PostgreSQL database/binary、network/UNC、Job、login、application-runtime provider。
+- 実PlanOnly prerequisite、Execute、Cleanup、backup/restore、live A/B。
+- typedかつfail-closedな`pg_dump`、`pg_restore --list`、restoreのProcess-result contract。
+- approved pending-manifest checksumへlinkしたatomic execution evidence、またはatomic Cleanup evidence。
+- retained dumpおよびpartial restoreの取扱い。
+- 外部の同時filesystem actorに対するrobustness。
+- criterion 8の評価可能性、runtime acceptance、live approval、formal release readiness。
+
+したがって、`criterion_8='not_evaluable'`、`LIVE_BLOCKED=True`、Stage B-only approval、no-live-approval、および既存のbackup/restore Critical未解消状態を変更しない。
+
+再開TODOは依存順を維持し、各項目を別々のuser-gated planner/implementer/reviewer cycleとして扱う。複数項目を1つの実装scopeへ併合しない。
+
+1. **TODO 1（次の推奨最小境界）**: exact `pg_dump` Process-result schemaとfail-closed validationのみ。
+2. **TODO 2**: exact `pg_restore --list` Process-result schemaとfail-closed validationのみ。
+3. **TODO 3**: exact restore Process-result schemaとfail-closed validationのみ。
+4. **TODO 4**: 残るread-only/runtime callback schemaとservice-state readbackを、production利用前にfake/static testで確定する。
+5. **TODO 5**: approved pending-manifest checksumへlinkした、atomicかつprivacy-scannedなexecution-evidence bundle。
+6. **TODO 6**: Cleanupのrestored-state linkage、retained-dump検証、owner/Jobs guard、exact one-drop、final absence proof、およびatomic Cleanup evidence。
+7. **TODO 7**: non-live controlled environmentでのproduction-provider integration。
+8. **TODO 8**: 上記すべてのreviewer gate通過後に限る、段階的runtime prerequisite checkと個別承認されたruntime exercise。
+
+次のfake/static cycleの開始条件は、userがCodexまたはexternal implementationを明示選択し、1つのdependency-complete boundaryだけを対象とする新planner handoffを作ることである。現在のreviewer PASSと無関係なworking-tree変更を保持し、実装前にexact expected result schemaとnegative caseを固定する。最初の検証はfake-onlyとし、実binary/serviceを使用しない。implementer handoffにはexact command、exit code、実際のworking-tree status、安全確認、未検証事項を記録し、独立reviewerが再現した後に新しいmandatory `user decision gate`で停止する。
+
+将来のruntime cycle前には、次を完了済みと仮定せず、前提・収集対象証跡として揃える。
+
+- 対象environmentとactionの明示承認。
+- 承認済みartifact、hash、baseline、threshold、approver、condition、expiry。
+- protected source/targetのendpoint、database、OID separation proof。
+- 承認済みrole/ownerとservice identity。
+- active/running Jobsが0件であるreadback。
+- PostgreSQL client/server versionとexecutable identity。
+- storage capacity、retention、dump destination、retained-dump policy。
+- serviceのpre/post stateとstopped-by-invocation ownership evidence。
+- privacy-safeかつatomicなevidence rootとchecksum/linkage plan。
+- rollback/recovery condition、およびlive approvalが別承認であることの確認。
+
+このcheckpointは現在のfake/static作業を閉じるだけで、追加testやruntime actionを一切承認しない。本節のTODOはself-executing approvalではなく、userが次のrouteと単一scopeを明示選択した場合だけ再開する。次のplannerは、userが別の単一dependency-complete boundaryを明示しない限りTODO 1から開始する。再開した各cycleは独立reviewer handoffと新たなuser decision gateで必ず停止する。
+
 ### S2-CR-08 テスト方針の優先順位と暫定推奨閾値（未承認）
 
 S2-CR-08は、既存回帰試験の件数増加よりも、測定対象の同一性、欠測時の安全停止、正式証跡の合否判定可能性を優先する。次の優先順位を崩さず、各修正とそのdirect positive/negative testを同一iterationで完了させる。後続優先度への着手は、先行優先度のreviewer PASS後とする。

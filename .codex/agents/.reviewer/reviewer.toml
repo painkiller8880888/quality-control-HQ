@@ -82,6 +82,7 @@ Validation assessment:
 
 When no actionable defect exists, return PASS and do not invent findings.
 Return nothing outside the review block.
+"""
 
 [permissions.reviewer-handoff-only]
 description = "Read the repository and write only the reviewer handoff."
@@ -95,5 +96,3 @@ description = "Read the repository and write only the reviewer handoff."
 
 [permissions.reviewer-handoff-only.network]
 enabled = false
-
-"""

@@ -73,6 +73,7 @@ Risks:
 
 Write the same plan content to `.codex/agents/.planner/HANDOFF.md`.
 Return nothing outside the plan block.
+"""
 
 [permissions.planner-handoff-only]
 description = "Read the repository and write only the planner handoff."
@@ -86,4 +87,3 @@ description = "Read the repository and write only the planner handoff."
 
 [permissions.planner-handoff-only.network]
 enabled = false
-"""
