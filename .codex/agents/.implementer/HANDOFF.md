@@ -1,43 +1,48 @@
-Cycle ID: `QC-CONTRACT-20260729-04`
-Plan SHA-256: `aa3e46c9ef3048fd3d1d85d3be3a31a3609426f0d3fe8b07c35b11fed7fe5084`
-Job ID: `QC-CONTRACT-20260729-04:aa3e46c9ef3048fd3d1d85d3be3a31a3609426f0d3fe8b07c35b11fed7fe5084`
+Cycle ID: `S2-CR08-TODO5-20260729-02`
+Plan SHA-256: `da39da32ef4d23deba6d486602b562f914ab808d3dc568fff691d9f2e5fa648f`
+Job ID: `S2-CR08-TODO5-20260729-02:da39da32ef4d23deba6d486602b562f914ab808d3dc568fff691d9f2e5fa648f`
 
-Status: COMPLETE
-Outcome: PASS
+Outcome: `PASS`
+Status: `COMPLETE`
 
 Product Changes:
-- Authorized existing non-empty product/config diff: `AGENTS.md`, `planner.toml`, `implementer.toml`, and `reviewer.toml`.
-- This evidence-only cycle made no additional product/config edits; the authorized files were retained unchanged.
-
-Handoff-Only Changes:
-- Replaced this file; no installed `.codex/agents/**/**.toml` file was edited.
+- Independently audited the preserved TODO 5 candidate in `deployment/windows/validate_stage_b_backup_restore.ps1` against every Planner Required Change and Acceptance Criterion. The candidate already supplies Execute destination preflight; exact sibling pending-checksum/recomputed-manifest/approval linkage before adapter construction; exact three-property allowlisted evidence; canonical UTF-8/LF serialization; exact two-file staged and published verification; atomic sibling-directory rename; collision refusal; privacy-safe publication errors; and invocation-local temporary cleanup.
+- Independently audited the preserved direct tests in `deployment/windows/test_validate_stage_b_backup_restore.ps1`: success/failure evidence, exact callback order and no DropRestore, returned/file equality, exact inventory and checksum, final-root staging absence, malformed evidence, checksum/approval failures, privacy sentinels, destination failures, staged tamper/unexpected files, hook/write and move/race failures, no partial publication, and temporary-residue cleanup.
+- No product correction was necessary in this restart cycle. Preserved the candidate code unchanged and made no change to accepted TODO 1-4 behavior.
 
 Validation Performed:
-1. `python -c "import pathlib,tomllib; [tomllib.loads(pathlib.Path(p).read_text(encoding='utf-8')) for p in ('planner.toml','implementer.toml','reviewer.toml')]"` — exit 0; TOMLs parsed.
-2. `Get-Content -LiteralPath 'AGENTS.md','planner.toml','implementer.toml','reviewer.toml' -Encoding UTF8 | Out-Null` — exit 0; UTF-8 reads succeeded.
-3. `$p=Get-Content -LiteralPath '.codex/agents/.planner/HANDOFF.md' -Raw -Encoding UTF8; $n=$p.Replace("`r`n","`n").Replace("`r","`n"); $a="<!-- PLAN-BODY-START -->`n"; $b="`n<!-- PLAN-BODY-END -->"; $i=$n.IndexOf($a); $j=$n.IndexOf($b,$i+$a.Length); if($i -lt 0 -or $j -lt 0){exit 1}; $x=$n.Substring($i+$a.Length,$j-($i+$a.Length)); $s=[Security.Cryptography.SHA256]::Create(); $h=([BitConverter]::ToString($s.ComputeHash([Text.Encoding]::UTF8.GetBytes($x)))).Replace('-','').ToLowerInvariant(); $d=[regex]::Match($p,'Plan SHA-256: `([0-9a-f]{64})`').Groups[1].Value; $q=[regex]::Match($p,'Job ID: `QC-CONTRACT-20260729-04:([0-9a-f]{64})`').Groups[1].Value; if($h -cne $d -or $h -cne $q){exit 1}` — exit 0; plan identity matched.
-4. `rg -n "Cycle ID|Plan SHA-256|Job ID|120 lines|12 KiB|200 lines|16 KiB|40 lines|4 KiB" AGENTS.md` — exit 0; identity and limits found.
-5. `rg -n "Every new feature or fix starts with Planner|VALIDATION_FAILED|required result|finish/accept|BLOCKED" AGENTS.md` — exit 0; routing and state terms found.
-6. `rg -n "^(role|model|reasoning_effort|objective|authority|write_boundary|behavior|output_wrapper) =" planner.toml implementer.toml reviewer.toml` — exit 0; role fields found.
-7. `git diff --check -- AGENTS.md planner.toml implementer.toml reviewer.toml` — exit 0; diff whitespace valid.
-8. `git diff --exit-code -- .codex/agents/.planner/planner.toml .codex/agents/.implementer/implementer.toml .codex/agents/.reviewer/reviewer.toml` — exit 0; installed TOMLs unchanged.
-9. `git status --short` — exit 0; only authorized/untracked handoffs and root scope shown.
-10. `git diff -- AGENTS.md` — exit 0; authorized contract diff shown.
-11. `$p='.codex/agents/.implementer/HANDOFF.md'; $r=Get-Content -LiteralPath $p -Raw -Encoding UTF8; $q=Get-Content -LiteralPath '.codex/agents/.planner/HANDOFF.md' -Raw -Encoding UTF8; $h=[regex]::Match($q,'Plan SHA-256: `([0-9a-f]{64})`').Groups[1].Value; $l=(Get-Content -LiteralPath $p -Encoding UTF8).Count; $b=[Text.Encoding]::UTF8.GetByteCount($r); if($l -gt 120 -or $b -gt 12288 -or $r -notmatch 'QC-CONTRACT-20260729-04' -or $r -notmatch [regex]::Escape($h)){exit 1}; Write-Output "LINES=$l BYTES=$b"` — exit 0; LINES=43 BYTES=3934; final unchanged-file rerun passed.
+1. Planner canonical hash recomputation before implementation — exit 0; computed `da39da32ef4d23deba6d486602b562f914ab808d3dc568fff691d9f2e5fa648f`; Cycle ID, Plan SHA-256, Job ID, and one start/end marker matched.
+2. `Get-Content -LiteralPath 'AGENTS.md' -Encoding UTF8`; `Get-Content -LiteralPath '.codex\agents\.planner\HANDOFF.md' -Encoding UTF8`; `git status --short`; product and AGENTS diff inspections — exit 0; readiness scope matched the Planner.
+3. `powershell.exe -NoProfile -ExecutionPolicy Bypass -File deployment/windows/test_validate_stage_b_backup_restore.ps1` — exit 0.
+4. `python deployment/postgresql/test_stage_b_snapshot.py` — exit 0.
+5. `git diff --check -- deployment/windows/validate_stage_b_backup_restore.ps1 deployment/windows/test_validate_stage_b_backup_restore.ps1` — exit 0; line-ending conversion warnings only.
+6. `git diff -- deployment/windows/validate_stage_b_backup_restore.ps1 deployment/windows/test_validate_stage_b_backup_restore.ps1` — exit 0; candidate diff audited, with output suppressed in the final exact-command pass to stay within the output limit.
+7. `git diff -- AGENTS.md` — exit 0; exactly the accepted 19-added-line safe-batching section and no other AGENTS change.
+8. `git status --short` — exit 0; only the accepted `AGENTS.md`, two product files, and three role handoffs.
+9. Planner canonical hash recomputation after validation — exit 0; all three identity fields still matched.
 
 Validation Results:
-- Commands 1–11 passed in this cycle; command 11's final unchanged-file rerun matched the recorded size.
+- PowerShell reported `Service ownership + invalid truthy tests: 22 passed, 0 failed` and `Stage B pure validation tests passed`.
+- Python snapshot regression reported 6 tests passed; product diff whitespace check passed.
+- Positive Execute coverage proves exact valid order `stop-worker,stop-web,pg_dump,pg_restore_list,create,pg_restore,start-web,start-worker`, staging-time final-root absence, exact returned/file equality, exact two-file inventory/checksum linkage, and no automatic `DropRestore`.
+- Negative Execute coverage passes for missing/empty/malformed/extra/wrong-name/uppercase/mismatched pending checksum, approval mismatch, malformed evidence, existing file/directory destination, empty destination, missing parent, unexpected staged file, staged content/checksum tamper, hook/write failure, and move/race collision, with required zero-mutation/no-partial/residue behavior.
+- Privacy failure evidence contains only `status`, `dump_hash`, and `manifest_sha256`; raw credential/host/path sentinels do not appear.
 
 Unverified Items:
-- Activation or trial execution of the root TOMLs is deferred by the approved plan.
+- Independent Reviewer correctness verdict is pending.
+- TODO 6 Cleanup linkage, TODO 7 production-provider integration, TODO 8 runtime exercise, and real PostgreSQL/Windows service/database/network/UNC/Job/login/backup/restore behavior remain deferred.
+- External concurrent filesystem-actor hardening beyond deterministic safe-boundary checks remains deferred by the Planner.
 
 Blocking Cause/Route:
-- None.
+- None. Route to independent Reviewer for the mandatory verdict and user decision gate.
 
 Safety Confirmation:
-- Only approved product files and this handoff changed. No services, runtime code, dependencies, commits, or installations were touched.
-- Original installed Planner, Implementer, and Reviewer TOMLs remain unchanged.
+- Preserved the user-owned accepted `AGENTS.md` safe-batching preamble unchanged.
+- Did not edit `specification/RELEASE.md`, Cleanup/DropRestore semantics, production providers, accepted TODO 1-4 behavior, or any file outside the two approved product files and this role handoff.
+- Did not install dependencies, stage, commit, push, invoke a service, contact a database/network/UNC resource, or run `-Execute`/`-Cleanup` against live resources.
+- Preserved `LIVE_BLOCKED=True`, criterion 8 `not_evaluable`, invocation-owned recovery, pending publication semantics, dump-hash retention, and no automatic `DropRestore`.
 
 Working-Tree Scope:
-- Authorized product/config scope retained unchanged: `AGENTS.md`, `planner.toml`, `implementer.toml`, `reviewer.toml`.
-- Handoff-only: `.codex/agents/.implementer/HANDOFF.md`.
+- Accepted user-owned baseline: `AGENTS.md` (safe-batching section only; unchanged by this Implementer).
+- Approved cumulative product files: `deployment/windows/validate_stage_b_backup_restore.ps1`, `deployment/windows/test_validate_stage_b_backup_restore.ps1`.
+- Role handoffs: `.codex/agents/.planner/HANDOFF.md`, `.codex/agents/.implementer/HANDOFF.md`, `.codex/agents/.reviewer/HANDOFF.md`.

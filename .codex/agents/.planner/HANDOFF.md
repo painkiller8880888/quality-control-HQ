@@ -1,69 +1,67 @@
-<plan>
-Cycle Metadata:
-- Cycle ID: `QC-CONTRACT-20260729-04`
-- Plan SHA-256: `aa3e46c9ef3048fd3d1d85d3be3a31a3609426f0d3fe8b07c35b11fed7fe5084`
-- Job ID: `QC-CONTRACT-20260729-04:aa3e46c9ef3048fd3d1d85d3be3a31a3609426f0d3fe8b07c35b11fed7fe5084`
-- Hash rule: normalize the entire handoff from CRLF/CR to LF, then hash the UTF-8 bytes after the exact token `<!-- PLAN-BODY-START -->\n` through the byte before the exact token `\n<!-- PLAN-BODY-END -->`; exclude both markers and both boundary newlines.
-
+Cycle ID: `S2-CR08-TODO5-20260729-02`
+Plan SHA-256: `da39da32ef4d23deba6d486602b562f914ab808d3dc568fff691d9f2e5fa648f`
+Job ID: `S2-CR08-TODO5-20260729-02:da39da32ef4d23deba6d486602b562f914ab808d3dc568fff691d9f2e5fa648f`
 <!-- PLAN-BODY-START -->
 Outcome: `PASS`
 
 Goal:
-Produce complete, exact, current-cycle validation evidence for the already-compliant repository-local agent workflow contract.
+- Complete only `specification/RELEASE.md` Stage B resume TODO 5: independently audit, minimally correct if necessary, and freshly validate the preserved candidate implementation of an atomic, privacy-scanned execution-evidence bundle linked to the exact approved pending-manifest checksum.
 
 In Scope:
-- One independently reviewable behavior boundary: evidence compliance for the authorized non-empty product/config diff in `AGENTS.md`, `planner.toml`, `implementer.toml`, and `reviewer.toml`.
-- Retain that existing product/config diff unchanged and independently rerun the exact validations below.
-- Replace `.codex/agents/.implementer/HANDOFF.md` with current-cycle evidence; its prior content must not be preserved or cited.
+- Treat the user-approved `AGENTS.md` safe-batching preamble as an accepted, user-owned working-tree baseline; preserve it unchanged.
+- Treat the two product-file TODO 5 changes from the blocked prior cycle as unreviewed candidate work, not accepted completion.
+- Validate the pending bundle checksum, approval, manifest, and evidence destination before any Execute callback can mutate state.
+- Convert the Execute result to a strict privacy-safe evidence record, then publish and verify the complete bundle atomically without overwrite.
+- Add direct fake/static tests for checksum linkage, exact evidence schema, privacy, atomic visibility, tamper/write failures, and residue cleanup.
 
-Out of Scope / Deferred Scope:
-- Product/config edits are prohibited. If independent inspection finds a defect that makes continuation impossible, make no product/config change and return `BLOCKED` to Planner with the exact failing behavior.
-- Do not modify installed `.codex/agents/.planner/planner.toml`, `.codex/agents/.implementer/implementer.toml`, or `.codex/agents/.reviewer/reviewer.toml`.
-- No other files, runtime tests, activation, installation, services, dependencies, staging, commits, or pushes.
-
-Constraints:
-- Preserve the authorized product/config bytes and all unrelated working-tree content.
-- Evidence must remain exact while fitting the Implementer handoff limits.
+Deferred Scope:
+- TODO 6 Cleanup/restored-state linkage, retained-dump validation, owner/Jobs guards, exact one-drop, final absence proof, and Cleanup evidence.
+- TODO 7 production-provider integration, TODO 8 runtime exercise, real PostgreSQL/Windows services/database/network/UNC/Job/login/backup/restore, live A/B, and application behavior.
+- Do not change Process/callback contracts, service ownership/recovery, pending publication semantics, Cleanup/DropRestore behavior, `specification/RELEASE.md`, `AGENTS.md`, or accepted TODO 1-4 behavior.
 
 Affected Files:
-- Authorized existing product scope, read/validate only: `AGENTS.md`, `planner.toml`, `implementer.toml`, `reviewer.toml`.
-- Required role output: `.codex/agents/.implementer/HANDOFF.md` (replace).
+- `deployment/windows/validate_stage_b_backup_restore.ps1`
+- `deployment/windows/test_validate_stage_b_backup_restore.ps1`
+- `.codex/agents/.implementer/HANDOFF.md` (role output only; replace)
 
 Required Changes:
-1. Verify this plan's Cycle ID, canonical Plan SHA-256, and Job ID before relying on it.
-2. Run every command in Validation exactly as printed, in repository root, without abbreviating it. Record the full command text, exit code, and concise current-cycle result in the Implementer handoff.
-3. Do not use ellipses, placeholders, omitted script bodies, heredocs, or here-strings in command evidence. Do not claim an earlier cycle's result.
-4. Product Changes must identify the authorized existing non-empty four-file diff and state that this evidence-only cycle made no additional product/config edits.
-5. Replace the Implementer handoff using the canonical schema and matching cycle metadata. Use `Outcome: PASS` and `Status: COMPLETE` only if every command succeeds and the final handoff passes its post-write checks.
+1. Before product work, recompute this Planner body hash and verify Cycle ID, Plan SHA-256, and Job ID. Verify the current tree contains the accepted `AGENTS.md` preamble, accepted cumulative TODO 1-4 changes, preserved candidate TODO 5 changes in only the two product files, and role handoffs. Any other scope is `BLOCKED`.
+2. Audit the preserved TODO 5 product and test diff against every requirement below. Keep correct candidate code intact and make only the smallest necessary corrections or direct-test additions; do not broaden or refactor.
+3. For `-Execute`, require `EvidenceRoot` to name a not-yet-existing bundle directory whose parent already exists. Reject a missing/empty root, existing file/directory, missing parent, or path collision before `Invoke-StageBSequence` and before any adapter mutation. Do not create or overwrite the final root during preflight.
+4. Before Execute mutation, validate the pending manifest's sibling `checksums.sha256` as exactly one UTF-8 line `<lowercase-64-hex><two spaces><pending-manifest leaf><LF>`, with no extra line/file-name substitution. Recompute the manifest SHA-256 and constant-time compare it with both the checksum entry and the exact execute approval already required by `Test-StageBApproval`; parse and validate the manifest only after linkage succeeds.
+5. Freeze the execution evidence as the exact three-property record `status`, `dump_hash`, `manifest_sha256`. `status` is exact `System.String` `success` or `failed`; `manifest_sha256` is a lowercase 64-hex string equal to the validated pending checksum; success requires a lowercase 64-hex `dump_hash`, while failure permits only null or a lowercase 64-hex dump hash. Reject null, scalar, missing/extra properties, wrong types/case, truthy stand-ins, invalid status/hash, and inconsistent success/null combinations.
+6. Construct evidence by explicit allowlist projection from `Invoke-StageBSequence`; never serialize its raw error, exception, callback value, path, host, database, account, environment, approval, or manifest. Validate the projected object before serialization and validate the parsed serialized bytes again. Errors exposed by the publication path remain the fixed privacy-safe Stage B failure message.
+7. Publish an exact bundle containing only `execution.json` and `checksums.sha256`. `execution.json` is canonical compact UTF-8 without BOM plus one LF. Its checksum file is exactly one lowercase SHA-256 entry for `execution.json`, plus one LF. No absolute or temporary path may appear in either file.
+8. Build and fully verify both files in a unique sibling temporary directory while the final root remains absent; run the existing mode-local post-write test hook there; reject hook tampering or unexpected files; then move the complete directory to the final `EvidenceRoot` in one rename. Re-read the published files and recompute their linkage before returning the exact evidence record.
+9. Refuse overwrite/races at every safe boundary. On any pre-publication validation, write, hook, checksum, privacy, or move failure, remove only this invocation's temporary directory, leave an existing destination untouched, and leave no `*.tmp`/temporary bundle residue. External concurrent filesystem-actor hardening beyond these deterministic checks remains deferred.
+10. Add positive Execute-main tests proving approval/checksum/manifest linkage, exact fake callback order, exact returned/file evidence equality, exact two-file inventory, checksum recomputation, final-root absence during staging verification, and no automatic `DropRestore`.
+11. Add negative/table-driven tests proving missing/malformed/extra/wrong-name/uppercase/mismatched pending checksum, approval mismatch, malformed evidence records, existing destination, missing parent, unexpected staged file, staged-content/checksum tamper, and write/move failure all fail closed with the required zero-mutation or no-partial-publication behavior.
+12. Add a privacy sentinel Execute failure whose callback throws raw credential/host/path-like text. Prove the published failed evidence and surfaced error contain none of the sentinels, the failed record has only the exact allowed fields, and recovery behavior remains invocation-owned and unchanged.
+13. Preserve exact valid fake order `stop-worker,stop-web,pg_dump,pg_restore_list,create,pg_restore,start-web,start-worker`, strict TODO 1-4 validators/tests, dump-hash retention, pending bundle behavior, no automatic `DropRestore`, `LIVE_BLOCKED=True`, and criterion 8 `not_evaluable`.
+14. Replace the Implementer handoff with matching identity and canonical schema, exact commands/exits/results, unverified items, safety confirmation, and actual final tree scope including the accepted user-owned `AGENTS.md` baseline.
 
 Validation:
-1. `python -c "import pathlib,tomllib; [tomllib.loads(pathlib.Path(p).read_text(encoding='utf-8')) for p in ('planner.toml','implementer.toml','reviewer.toml')]"`
-2. `Get-Content -LiteralPath 'AGENTS.md','planner.toml','implementer.toml','reviewer.toml' -Encoding UTF8 | Out-Null`
-3. `$p=Get-Content -LiteralPath '.codex/agents/.planner/HANDOFF.md' -Raw -Encoding UTF8; $n=$p.Replace("`r`n","`n").Replace("`r","`n"); $a="<!-- PLAN-BODY-START -->`n"; $b="`n<!-- PLAN-BODY-END -->"; $i=$n.IndexOf($a); $j=$n.IndexOf($b,$i+$a.Length); if($i -lt 0 -or $j -lt 0){exit 1}; $x=$n.Substring($i+$a.Length,$j-($i+$a.Length)); $s=[Security.Cryptography.SHA256]::Create(); $h=([BitConverter]::ToString($s.ComputeHash([Text.Encoding]::UTF8.GetBytes($x)))).Replace('-','').ToLowerInvariant(); $d=[regex]::Match($p,'Plan SHA-256: `([0-9a-f]{64})`').Groups[1].Value; $q=[regex]::Match($p,'Job ID: `QC-CONTRACT-20260729-04:([0-9a-f]{64})`').Groups[1].Value; if($h -cne $d -or $h -cne $q){exit 1}`
-4. `rg -n "Cycle ID|Plan SHA-256|Job ID|120 lines|12 KiB|200 lines|16 KiB|40 lines|4 KiB" AGENTS.md`
-5. `rg -n "Every new feature or fix starts with Planner|VALIDATION_FAILED|required result|finish/accept|BLOCKED" AGENTS.md`
-6. `rg -n "^(role|model|reasoning_effort|objective|authority|write_boundary|behavior|output_wrapper) =" planner.toml implementer.toml reviewer.toml`
-7. `git diff --check -- AGENTS.md planner.toml implementer.toml reviewer.toml`
-8. `git diff --exit-code -- .codex/agents/.planner/planner.toml .codex/agents/.implementer/implementer.toml .codex/agents/.reviewer/reviewer.toml`
-9. `git status --short`
-10. `git diff -- AGENTS.md`
-11. After the Implementer handoff contains the full evidence above, run and record: `$p='.codex/agents/.implementer/HANDOFF.md'; $r=Get-Content -LiteralPath $p -Raw -Encoding UTF8; $q=Get-Content -LiteralPath '.codex/agents/.planner/HANDOFF.md' -Raw -Encoding UTF8; $h=[regex]::Match($q,'Plan SHA-256: `([0-9a-f]{64})`').Groups[1].Value; $l=(Get-Content -LiteralPath $p -Encoding UTF8).Count; $b=[Text.Encoding]::UTF8.GetByteCount($r); if($l -gt 120 -or $b -gt 12288 -or $r -notmatch 'QC-CONTRACT-20260729-04' -or $r -notmatch [regex]::Escape($h)){exit 1}; Write-Output "LINES=$l BYTES=$b"`
+1. `powershell.exe -NoProfile -ExecutionPolicy Bypass -File deployment/windows/test_validate_stage_b_backup_restore.ps1`
+2. `python deployment/postgresql/test_stage_b_snapshot.py`
+3. `git diff --check -- deployment/windows/validate_stage_b_backup_restore.ps1 deployment/windows/test_validate_stage_b_backup_restore.ps1`
+4. `git diff -- deployment/windows/validate_stage_b_backup_restore.ps1 deployment/windows/test_validate_stage_b_backup_restore.ps1`
+5. `git diff -- AGENTS.md`
+6. `git status --short`
+7. Recompute the Planner canonical body hash and verify all three identity fields.
+8. Reread `.codex/agents/.implementer/HANDOFF.md`; verify matching metadata, required schema, current-cycle-only evidence, at most 120 lines, and at most 12 KiB.
 
 Acceptance Criteria:
-- Commands 1–11 appear verbatim and unabridged in the Implementer handoff with exit codes and current-cycle results; command evidence contains no ellipsis, substitution token, or omitted body.
-- The authorized four-file product/config diff remains non-empty and unchanged by this cycle, all validations pass, and installed TOMLs remain untouched.
-- The final Implementer handoff uses cycle `QC-CONTRACT-20260729-04`, the canonical plan hash/job identity, current-cycle-only evidence, and no stale content.
-- Final Implementer handoff is at most 120 lines and 12 KiB; its recorded size result is followed by an unchanged-file rerun confirming the same values.
+- Execute cannot begin until the pending checksum, recomputed manifest hash, exact execute approval, manifest, and new evidence destination agree.
+- Success and failure publish only the exact privacy-safe execution record, atomically as an exact two-file bundle linked to the approved manifest checksum.
+- Every named malformed, privacy, tamper, collision, and write failure is directly rejected with no partial final bundle; preflight failures cause zero adapter mutation.
+- Validation commands 1-3 exit 0; commands 4-6 show only the two approved cumulative product files, role handoffs, and the accepted unchanged `AGENTS.md` baseline.
+- No runtime resource is contacted or mutated; Cleanup remains unchanged, `LIVE_BLOCKED=True` remains true, and criterion 8 remains `not_evaluable`.
 
 Safety Gates:
-- Cycle Sizing Gate: PASS. This is one evidence-only correction boundary with fixed commands and no product/config implementation.
-- If any command exposes a product/config defect, unexpected scope change, or failed validation, do not repair it in this cycle; return the cause-specific `BLOCKED` or `VALIDATION_FAILED` result required by `AGENTS.md`.
-
-Risks:
-- The only known failure mode is evidence abbreviation or self-inconsistent post-write size reporting; verbatim commands and an unchanged-file final rerun are mandatory.
+- Identity mismatch, loss/change of the accepted `AGENTS.md` preamble, or any new working-tree scope is `BLOCKED`: make no product change and route to Planner.
+- If TODO 5 requires a Cleanup change, production provider, runtime resource, approval relaxation, or non-allowlisted evidence, stop without broadening scope and route to Planner.
+- A failed named validation after implementation is `Outcome: FAIL`, `Status: VALIDATION_FAILED`, and proceeds to Reviewer.
 
 Next Minimum Scope:
-- Current cycle: exact evidence regeneration only.
-- After Reviewer `PASS`, the user may finish/accept; any product correction or activation starts with a new Planner cycle.
+- After independent Reviewer verdict and explicit user direction, TODO 6 only: Cleanup restored-state linkage, retained-dump validation, owner/Jobs guards, exact one-drop, final absence proof, and atomic Cleanup evidence.
 <!-- PLAN-BODY-END -->
-</plan>
