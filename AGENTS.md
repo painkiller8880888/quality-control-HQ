@@ -1,192 +1,52 @@
-# agents.md
+# Agent Workflow Contract
 
-## About reading files
+## Reading and batching
 
-- When reading files in PowerShell, be sure to include `-Encoding UTF8`.
+- Read text files in PowerShell with `Get-Content -Encoding UTF8`.
+- Batch only independent, read-only inspections whose results are already known to be needed. Use `Promise.allSettled` when partial results are useful.
+- Keep dependent work, approvals, writes, builds, deployments, and operations sharing files or processes sequential.
+- Keep each command request to at most 200 lines or 16 KiB of output. Keep each handoff evidence excerpt to at most 40 lines or 4 KiB; summarize and mark truncation without hiding failures.
 
-## Safe batching of independent tool calls
+## Shared principles and ownership
 
-When working in Code Mode, batch tool calls only when all calls for the current stage are already known, mutually independent, and safe to run without ordering, approval, or shared-state conflicts.
+This repository is in MVP phase: make the minimum change, preserve existing style and public behavior, avoid unnecessary abstraction or refactoring, and do not change scope by assumption. Do not stage, commit, push, install, activate, invoke services, or edit files outside the approved scope.
 
-For a small, bounded group of independent read-only inspections available through `functions.exec`, run them concurrently in one `functions.exec` call. Prefer `await Promise.allSettled(...)` when partial results remain useful. Inspect every settled result and explicitly handle failures and truncated output. Use `await Promise.all(...)` only when any failure should abort the entire batch.
+Roles are separate. Planner creates an implementation-ready plan; Implementer delivers its approved change and validation; Reviewer independently determines correctness and opens the user decision gate. Handoff generation is not the completion goal. Every new feature or fix starts with Planner.
 
-Keep the following sequential:
+`AGENTS.md` is the shared source for prohibitions, identity, schemas, limits, and routes. Role TOMLs reference this contract instead of duplicating it.
 
-- dependent or adaptive operations where one result can change the next step;
-- operations requiring approval, confirmation, waiting, or resumption;
-- writes, edits, builds, deployments, or other state-changing operations unless parallel safety is explicitly guaranteed;
-- operations that could modify or contend for the same files, processes, services, repositories, or external resources.
+## Handoff identity and limits
 
-Treat the outer `functions.exec` output limit as a shared budget for the combined results. Keep each batch small and its expected total output bounded. Request only necessary fields, files, line ranges, or summary data. Apply narrow tool-specific output limits where supported, and choose the outer `max_output_tokens` deliberately rather than using a large default.
+Every handoff contains exactly one shared metadata block:
 
-If any result is incomplete or truncated, do not silently continue or repeat the entire batch. Identify the missing evidence and retrieve only that evidence with a narrow, preferably sequential follow-up call.
+- `Cycle ID`
+- `Plan SHA-256`: a lowercase 64-hex value
+- `Job ID`: exactly `<cycle-id>:<plan-sha256>`
 
-Do not split otherwise batchable inspections across multiple outer tool calls. However, do not broaden the investigation, launch speculative work, or increase the number of inspections merely because concurrency is available. Prefer correct and complete evidence over maximum parallelism.
+The canonical plan hash is non-circular: normalize the entire current Planner handoff from CRLF/CR to LF; hash the UTF-8 bytes after `<!-- PLAN-BODY-START -->\n` through the byte before `\n<!-- PLAN-BODY-END -->`. Exclude both markers and both boundary newlines.
 
-## Purpose
+Before implementation or review, Implementer and Reviewer recompute that hash from the current Planner handoff and verify all three identity fields. They also verify Planner/Implementer metadata agreement and current working-tree scope. Missing, malformed, mismatched, or cross-cycle identity is `BLOCKED`; stale handoffs and validation are not evidence.
 
-このリポジトリでは、複数のAI agentsが役割分離されたパイプラインとして協調する。
+Replace, never append, each role handoff. It must contain current-cycle-only content, be reread after writing, and be measured opportunistically for UTF-8 bytes and lines. The maximum is 120 lines and 12 KiB. If it cannot be written and confirmed within both limits, report `BLOCKED` rather than role completion. Record exact commands, exit codes, and current-cycle results.
 
-基本サイクル:
+## Outcomes and canonical handoff schemas
 
-1. planner(codex)
-2. implementer(codexまたは外部agents)
-3. reviewer(codex)
-4. user decision gate
+`Outcome` is only `PASS`, `FAIL`, or `BLOCKED`.
 
-各agentsは自分の責務のみ実行する。
-各エージェントは次のクライアントのためのhandoff生成をgoalとする。
-Codex内のサブエージェント構成は、このファイルとは別に定義された既存構成を流用する。
+Planner handoff schema: metadata, `Outcome`, Goal, In Scope, Deferred Scope, Affected Files, Required Changes, Validation, Acceptance Criteria, Safety Gates, Next Minimum Scope.
 
----
+Implementer handoff schema: metadata, `Outcome`, `Status`, Product Changes, Validation Performed, Validation Results, Unverified Items, Blocking Cause/Route, Safety Confirmation, Working-Tree Scope. `Status` is only `COMPLETE`, `VALIDATION_FAILED`, or `BLOCKED`, mapping respectively to `PASS`, `FAIL`, and `BLOCKED`. `VALIDATION_FAILED` requires an attempted implementation and failed named validation; inability to begin or continue safely is `BLOCKED`.
 
-## Shared Principles
+Reviewer handoff schema: metadata, `Verdict` (the common outcome), Review Scope, Verified Facts, Unverified Items, Findings and Priority, Required Result, Next Minimum Scope, Safety Gates, Route Conditions, User Decision Gate. Every finding states failing behavior, evidence/impact, priority, and required result. Reviewer does not prescribe a correction or implementation design.
 
-- 現在はMVPフェーズ
-- 最小変更を優先する
-- 不要な抽象化を禁止する
-- 不要リファクタを禁止する
-- 既存コードスタイルを尊重する
-- scope外変更を禁止する
-- 推測で仕様変更しない
-- 不明点は明示する
-- 検証不能な完了宣言を禁止する
+## Planning, implementation, and review rules
 
----
+Planner alone owns cycle sizing, the earliest dependency-complete split, `Next Minimum Scope`, and required results. A Planner `BLOCKED` routes to the user for the missing decision or authority.
 
-## Handoff Rules
+Implementer may not propose a split. On readiness, authority, identity, or feasibility blockage, it reports the exact cause, makes no product changes, and routes to Planner. `VALIDATION_FAILED` proceeds to Reviewer as a failed attempted implementation.
 
-agents間通信は structured handoff のみで行う。
-plannerはhandoff生成前に、次の条件をすべて満たすことを確認する:
+Reviewer independently inspects the working tree, diff, relevant code, and validation results rather than trusting a handoff. Its verdict uses the common Outcome. A Reviewer `FAIL` reaches the user gate and any fix restarts at Planner. A Reviewer `BLOCKED` routes contract/cycle/scope defects to Planner and unavailable authority/environment/evidence to the user. A Reviewer `PASS` reaches the user gate with explicit finish/accept and new-Planner-cycle choices.
 
-1. サイクルに主要な成果が1つだけある。
-2. 実装対象が1つの独立してreview可能なbehavior boundaryに収まる。
-3. implementerが1turn内で実装と指定validationを完了できる。
-4. acceptance criteriaが現在の権限内で検証可能である。
-5. 独立したruntime phase、cleanup phase、evidence phase、test expansionを同一サイクルへ不用意に束ねていない。
+## Mandatory user decision gate
 
-いずれかを満たさない場合:
-
-- plannerは最初のdependency-completeな最小scopeだけを次サイクルへ渡す。
-- 残りは`Deferred Scope`へ簡潔に記録する。
-- Deferred Scopeは現在サイクルのacceptance criteriaへ含めない。
-- reviewer findingsが複数ある場合も、相互に不可分でないfindingを一括実装させない。
-
-handoffの標準配置:
-
-- plannerからimplementer: `.codex/agents/.planner/HANDOFF.md`
-- implementerからreviewer: `.codex/agents/.implementer/HANDOFF.md`
-- reviewerから次サイクルおよびuser: `.codex/agents/.reviewer/HANDOFF.md`
-
-handoffは補助資料であり、実装や検証結果そのものの証拠ではない。
-reviewerは外部agentsのhandoffを無条件に信用せず、working tree、diff、対象コード、テスト結果を自ら確認する。
-
-### Required Current-Cycle Sections
-
-planner handoff:
-
-- Goal
-- In Scope
-- Out of Scope / Deferred Scope
-- Affected Files
-- Required Changes
-- Validation
-- Acceptance Criteria
-- Safety Gates
-
-implementer handoff:
-
-- Status
-- Product Changes
-- Validation Performed
-- Validation Results
-- Unverified Items
-- Safety Confirmation
-- Working-Tree Scope
-
-reviewer handoff:
-
-- Review Scope
-- Verdict: `PASS`、`FAIL`、または`BLOCKED`
-- Verified Facts
-- Unverified Items
-- Findings and Priority
-- Next Minimum Scope
-- Safety Gates
-- Route Conditions
-- User Decision Gate
-
----
-
-## Mandatory User Decision Gate
-
-reviewerは各サイクルのレビュー完了後、必ず`.codex/agents/.reviewer/HANDOFF.md`を生成または更新する。
-その時点でパイプラインを停止し、userの明示的な指示を待つ。
-
-reviewer handoffを生成した同一turn内では、次の行為を禁止する:
-
-- 次サイクルのplannerを開始する
-- Codex implementerを開始する
-- 外部implementer向けの実装を代行する
-- reviewer自身が指摘事項を修正する
-- userのクオータ状況を推測して経路を自動選択する
-
-停止時は、少なくとも次をuserへ提示する:
-
-- review verdict
-- blocking findingsまたは次の最小作業
-- Codexで継続可能か
-- 外部implementerへhandoff可能か
-- userの経路選択が必要であること
-
-Codexは週次クオータ残量を信頼できる方法で自動取得できると仮定しない。
-クオータ確認と次経路の決定はuserの責務とする。
-
----
-
-## User-Selected Routes
-
-decision gate後は、userが明示した経路だけを実行する。
-指示がない、曖昧、または相互に矛盾する場合は作業を開始せず確認する。
-
-### Route A: Codex Implementation
-
-userがCodexでの継続を明示した場合:
-
-1. reviewer handoffのverdictに従い、必要ならplannerが次の最小scopeを定義する
-2. Codex implementerが承認されたscopeだけを実装・検証する
-3. Codex reviewerが独立してレビューする
-4. reviewerが`.codex/agents/.reviewer/HANDOFF.md`を更新する
-5. mandatory user decision gateで再び停止する
-
-Codex implementerのmodelやsubagents構成は、userの指示および別途定義された既存構成に従う。
-plannerまたはreviewerが実装を兼務してはならない。
-
-### Route B: External Implementation
-
-userがimplementationの外部委託を明示した場合:
-
-1. 必要ならplannerが外部implementer向けの`.codex/agents/.planner/HANDOFF.md`を生成する
-2. Codex側は実装せず停止する
-3. userが外部implementerの変更と`.codex/agents/.implementer/HANDOFF.md`をreviewerへ渡す
-4. reviewerが実変更と検証結果を独立して確認する
-5. reviewerが`.codex/agents/.reviewer/HANDOFF.md`を更新する
-6. mandatory user decision gateで再び停止する
-
-外部implementerの作業待ち中に、Codexが同じscopeを先行実装してはならない。
-
----
-
-## Reviewer Handoff Minimum Contents
-
-`.codex/agents/.reviewer/HANDOFF.md`には少なくとも次を含める:
-
-- review scope
-- verdict: `PASS`、`FAIL`、または`BLOCKED`
-- verified factsと未検証事項
-- blocking findingsと優先度
-- 次サイクルの最小推奨scope
-- 変更禁止範囲および維持すべきsafety gate
-- Codex implementationとexternal implementationのどちらにも渡せる実行条件
-
-`PASS`であってもuser decision gateを省略しない。
+Reviewer always replaces `.codex/agents/.reviewer/HANDOFF.md` when review ends and then stops for explicit user direction. In that turn it must not begin a new Planner cycle, begin implementation, implement externally, fix findings itself, or infer quota or route selection. It tells the user the verdict, blocking findings or next minimum work, whether Codex and external implementation are available, and that the user must choose the route.
