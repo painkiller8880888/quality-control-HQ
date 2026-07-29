@@ -36,6 +36,9 @@ function Test-StageBManifest($Manifest) {
   Assert-StageBPropertySet $Manifest.services @('worker_hash','web_hash','stop_order','recovery_order'); if(-not(Test-StageBHash $Manifest.services.worker_hash) -or -not(Test-StageBHash $Manifest.services.web_hash) -or ((@($Manifest.services.stop_order)-join ',') -cne 'worker,web') -or ((@($Manifest.services.recovery_order)-join ',') -cne 'web,worker')){throw 'invalid service order'}
 }
 function Assert-StageBAdapter($Adapter) { foreach($name in 'Snapshot','Catalog','Process','Service','Jobs','State','CreateRestore','DropRestore'){if(-not $Adapter.ContainsKey($name) -or $Adapter[$name] -isnot [scriptblock]){throw 'invalid adapter contract'}} }
+function Assert-StageBResult($Value,[string[]]$Fields) { Assert-StageBPropertySet $Value $Fields; if($Value.success -ne $true){throw 'callback failed'} }
+function Assert-StageBSnapshot($Value) { Assert-StageBPropertySet $Value @('identity','baseline_hash','semantic_hash'); Assert-StageBHashFields $Value.identity @('oid_hash'); if(-not(Test-StageBHash $Value.baseline_hash) -or -not(Test-StageBHash $Value.semantic_hash)){throw 'invalid snapshot result'} }
+function Assert-StageBCatalog($Value) { Assert-StageBPropertySet $Value @('state','oid_hash','owner_hash','connections'); if($Value.state -notin @('absent','existing_empty','eligible') -or ($Value.state -ne 'absent' -and (-not(Test-StageBHash $Value.oid_hash) -or -not(Test-StageBHash $Value.owner_hash))) -or [int]$Value.connections -lt 0){throw 'invalid catalog result'} }
 function Get-StageBCurrentState($Manifest,$Adapter) { & $Adapter.State $Manifest }
 function Assert-StageBCurrentState($Manifest,$State) {
   Assert-StageBPropertySet $State @('jobs','source_baseline_hash','source','restore','clients','storage','owners','services')
@@ -53,15 +56,15 @@ function Invoke-StageBSequence($Manifest,$Adapter) {
   $stages=[Collections.Generic.List[object]]::new(); $dump=$null; $result=$null
   try {
     Test-StageBManifest $Manifest; Assert-StageBAdapter $Adapter; Assert-StageBCurrentState $Manifest (Get-StageBCurrentState $Manifest $Adapter)
-    foreach($service in @($Manifest.services.stop_order)){& $Adapter.Service 'stop' $service|Out-Null; $null=$stages.Add(@{stage="stop_$service";state='succeeded'})}
-    $source=& $Adapter.Snapshot $Manifest.source 'source' $null; if($source.identity.oid_hash -cne $Manifest.source.oid_hash -or $source.baseline_hash -cne $Manifest.source_baseline_hash){throw 'source drift'}
+    foreach($service in @($Manifest.services.stop_order)){$serviceResult=& $Adapter.Service 'stop' $service; Assert-StageBResult $serviceResult @('success'); $null=$stages.Add(@{stage="stop_$service";state='succeeded'})}
+    $source=& $Adapter.Snapshot $Manifest.source 'source' $null; Assert-StageBSnapshot $source; if($source.identity.oid_hash -cne $Manifest.source.oid_hash -or $source.baseline_hash -cne $Manifest.source_baseline_hash){throw 'source drift'}
     $dump=& $Adapter.Process 'pg_dump' @('--format=custom','--no-owner','--no-acl') @{}; if(-not $dump.success -or [int64]$dump.size -le 0 -or -not(Test-StageBHash $dump.hash)){throw 'dump failed'}
     $list=& $Adapter.Process 'pg_restore_list' @('--list') @{}; if(-not $list.success -or [int64]$list.size -le 0){throw 'dump list failed'}
-    $catalog=& $Adapter.Catalog $Manifest.restore; if($catalog.state -eq 'absent'){& $Adapter.CreateRestore $Manifest.restore $Manifest.owners.restore_owner_hash|Out-Null} elseif($catalog.state -ne 'existing_empty' -or $catalog.oid_hash -cne $Manifest.restore.oid_hash){throw 'restore drift'}
+    $catalog=& $Adapter.Catalog $Manifest.restore; Assert-StageBCatalog $catalog; if($catalog.state -eq 'absent'){$created=& $Adapter.CreateRestore $Manifest.restore $Manifest.owners.restore_owner_hash; Assert-StageBResult $created @('success'); $catalog=& $Adapter.Catalog $Manifest.restore; Assert-StageBCatalog $catalog} if($catalog.state -ne 'existing_empty' -or $catalog.oid_hash -cne $Manifest.restore.oid_hash -or $catalog.owner_hash -cne $Manifest.owners.restore_owner_hash){throw 'restore drift'}
     $restoreProcess=& $Adapter.Process 'pg_restore' @('--exit-on-error','--single-transaction','--no-owner','--no-acl') @{}; if(-not $restoreProcess.success){throw 'restore failed'}
-    $restore=& $Adapter.Snapshot $Manifest.restore 'restore' $Manifest.source.oid_hash; if($restore.identity.oid_hash -ceq $Manifest.source.oid_hash -or $restore.semantic_hash -cne $source.semantic_hash){throw 'restore validation failed'}
-    $after=& $Adapter.Snapshot $Manifest.source 'source' $null; if($after.baseline_hash -cne $Manifest.source_baseline_hash){throw 'source changed'}
-    foreach($service in @($Manifest.services.recovery_order)){& $Adapter.Service 'start' $service|Out-Null; $null=$stages.Add(@{stage="start_$service";state='succeeded'})}
+    $restore=& $Adapter.Snapshot $Manifest.restore 'restore' $Manifest.source.oid_hash; Assert-StageBSnapshot $restore; if($restore.identity.oid_hash -ceq $Manifest.source.oid_hash -or $restore.semantic_hash -cne $source.semantic_hash){throw 'restore validation failed'}
+    $after=& $Adapter.Snapshot $Manifest.source 'source' $null; Assert-StageBSnapshot $after; if($after.identity.oid_hash -cne $Manifest.source.oid_hash -or $after.baseline_hash -cne $Manifest.source_baseline_hash -or $after.semantic_hash -cne $source.semantic_hash){throw 'source changed'}
+    foreach($service in @($Manifest.services.recovery_order)){$serviceResult=& $Adapter.Service 'start' $service; Assert-StageBResult $serviceResult @('success'); $null=$stages.Add(@{stage="start_$service";state='succeeded'})}
     $result=@{status='success';live_blocked=$true;criterion_8='not_evaluable';stages=$stages;dump_hash=$dump.hash}
   } catch {$result=@{status='failed';live_blocked=$true;criterion_8='not_evaluable';error_code=(Get-StageBRedactedError $_);stages=$stages;dump_hash=if($dump){$dump.hash}else{$null}}; foreach($service in @($Manifest.services.recovery_order)){try {& $Adapter.Service 'start' $service|Out-Null} catch {$result.status='failed'}}}
   $result

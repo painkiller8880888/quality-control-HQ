@@ -2,6 +2,13 @@
 
 > This retry supersedes the earlier contents below where they conflict.
 
+## Current retry addendum
+
+- Added explicit PostgreSQL-to-Django field mappings for `MasterClass.master_id -> master`, `MasterClass.class_master_id -> class_master`, and `InspectionFile.master_id -> master`; dictionary hashes retain Django field names.
+- Execute now requires exact typed snapshot/catalog/service callback results, re-reads and validates target OID/owner/empty state after create, and requires source identity/semantic invariants plus successful service recovery.
+- Python fake tests now include an independent nullable-FK/Unicode golden (`3eb56d95102832d24c444e3cd93842bd6a7018479292c5409c4f1752b196b77e`). PowerShell fake adapter returns typed callback objects and proves the stricter sequence without constructing a production adapter.
+- Current validation: Python tests passed (6); PowerShell fake test passed; PowerShell parser passed. No runtime operation was performed.
+
 ## Retry result
 
 - Public `-PlanOnly`, `-Execute`, and `-Cleanup` now dispatch through a code-wired production-adapter boundary. Deployment-specific callbacks fail closed until configured; no test constructs this adapter.

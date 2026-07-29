@@ -1,6 +1,82 @@
 # Reviewer Handoff: Stage B Retry
 
-## Current Review Scope
+## Latest Review Scope
+
+- Same five Stage B implementation/test/documentation files
+- Current planner and implementer handoffs
+- Approved artifacts, canonical safety gates, and scoped diff
+
+## Latest Verdict
+
+**FAIL**
+
+The Django ForeignKey canonical mapping is materially improved, but functional production/public evidence paths, typed recovery, cleanup linkage, and the required mutation/privacy/residue test matrix remain incomplete.
+
+## Latest Blocking Findings
+
+### P1: Production callbacks, public modes, and atomic evidence are incomplete
+
+Core production callbacks still contain fixed throws and do not match the planned exact adapter contract. PlanOnly does not publish its checksum; Execute/Cleanup do not publish privacy-scanned, atomically reread execution/cleanup bundles and checksums.
+
+Required correction: implement every planned production callback without placeholders and make all three public modes enforce existing-final refusal, privacy scanning, atomic publication, checksums, and reread validation.
+
+### P1: Execute typed results and recovery are incomplete
+
+Dump/List/Restore/Mutation/Service callback results lack exact typed schema enforcement. Service state readback is absent. Failure handling does not track only the services stopped by this invocation and can ignore recovery callbacks that return unsuccessful results.
+
+Required correction: strictly validate all callback results; require stop/start state readbacks; track stopped services; recover only those services in the correct order; validate recovery callback results and final states.
+
+### P1: Cleanup linkage and one-drop contract are incomplete
+
+Cleanup reuses the pending absent/empty state instead of a restored-state contract, binds approval to the pending manifest rather than execution bytes, and does not validate execution checksum, actual dump bytes, cleanup owner, Jobs, privacy, drop result, absence readback, or publish cleanup evidence.
+
+Required correction: add a cleanup-specific restored state and bind the exact execution evidence/checksum/dump/identity/owner/zero-Jobs/connections conditions before the sole drop. Require success plus absence and atomically publish cleanup evidence.
+
+### P1: Table-driven mutation/privacy/residue coverage is still absent
+
+The PowerShell suite still has only a small set of manifest/preflight/cleanup cases and lacks public dispatch, adapter schemas, all state/callback/recovery failures, existing-empty success, cleanup one-drop success, evidence linkage, dump reread, privacy sentinels, existing-final refusal, and orphan-temp checks.
+
+Required correction: add the planned per-callback counters and full table. Prove preflight/cleanup failure mutation=0, runtime failure drop/delete=0, cleanup success drop=1, artifact privacy, existing-final refusal, and no temporary residue.
+
+### P2: README contradicts canonical/evidence behavior
+
+The Stage B section still describes compact JSON and distinct paths although the contract uses non-compact JSON and duplicate-preserving sorted paths, and overstates evidence readiness.
+
+Required correction: update only the Stage B section to the actual contract and explicitly unverified runtime state.
+
+## Latest Verified Facts
+
+- Django ForeignKey mapping now uses Django keys for `master` and `class_master`.
+- Fixed fields, `id` ordering, `updated_at` exclusion, non-compact JSON, and a nullable-FK/Unicode golden are present.
+- Python 6 tests, PowerShell fake tests, Python compile, PowerShell parser, and scoped diff check pass.
+- Snapshot/Catalog/create/source-invariant skeletons improved.
+- Approved artifacts and both `LIVE_BLOCKED=True` gates are unchanged.
+- Criterion 8 remains `not_evaluable`; Stage B-only state is preserved.
+- No prohibited runtime operation occurred.
+
+## Latest Unverified Items
+
+- Functional production callbacks and public modes.
+- Atomic execution/cleanup evidence and checksums.
+- Service-state recovery and cleanup one-drop linkage.
+- Full privacy/residue and mutation-count proof.
+- All real runtime prerequisites and execution.
+
+## Latest Minimum Scope
+
+Keep the same five files. Correct only production/public evidence, Execute recovery/result strictness, Cleanup restored-state/linkage, table-driven privacy/residue tests, and README consistency. Do not perform runtime execution.
+
+## Latest Safety Gates and Routes
+
+Preserve approved artifacts, both live blocks, criterion 8, Stage-B-only status, and failure retention. Do not use real DB/services/PostgreSQL/network/UNC/Jobs/login/live A/B. After explicit user selection, either Codex or an external implementer may receive this scope; a separate Codex reviewer must review it.
+
+## Latest User Decision Gate
+
+The user must explicitly select the next route before work continues.
+
+---
+
+## Superseded Current Review Scope
 
 - Stage B PowerShell/Python implementation
 - Stage B PowerShell/Python tests

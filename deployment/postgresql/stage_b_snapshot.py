@@ -13,6 +13,16 @@ import psycopg
 
 IDENTIFIER = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 
+# Django's values() uses field names, while PostgreSQL exposes FK columns with
+# `_id`.  Keep this mapping explicit so backup hashes match S2-CR-08 exactly.
+TABLE_FIELDS = {
+    "quality_master": ("id", "code", "name", "node_type", "node_type_1", "node_type_2", "department", "category", "product_category"),
+    "quality_masterclass": (("id", "id"), ("master", "master_id"), ("class_master", "class_master_id"), ("inspection_sheet_path", "inspection_sheet_path")),
+    "quality_structure": ("id", "root_code", "parent_code", "child_code", "level", "quantity"),
+    "quality_inspectionfile": (("id", "id"), ("master", "master_id"), ("file_name", "file_name"), ("file_path", "file_path"), ("priority", "priority"), ("file_created", "file_created"), ("discovered_at", "discovered_at")),
+    "quality_appsetting": ("id", "csv_path", "inspection_folder_paths", "inspection_folder_priorities", "erp_path", "history_file_path"),
+}
+
 
 def _scalar(value):
     if value is None or isinstance(value, (bool, int, str)):
@@ -102,6 +112,13 @@ def scalar_hash(connection, query):
     return rows_hash(cursor.fetchall(), [item.name for item in cursor.description])
 
 
+def table_hash(connection, table):
+    fields = TABLE_FIELDS[table]
+    pairs = [(item, item) if isinstance(item, str) else item for item in fields]
+    select = ",".join(f'{column} AS "{name}"' for name, column in pairs)
+    return scalar_hash(connection, f"SELECT {select} FROM {table} ORDER BY id")
+
+
 def snapshot(connection, host, port):
     database, oid, role = connection.execute("SELECT current_database(), oid, pg_get_userbyid(datdba) FROM pg_database WHERE datname=current_database()").fetchone()
     version = connection.execute("SHOW server_version_num").fetchone()[0]
@@ -112,7 +129,7 @@ def snapshot(connection, host, port):
     result = {"identity": identity(host, port, database, oid, role, version), "empty_proof": {"object_counts": dict(objects), "django_migrations_present": bool(migrations), "is_empty": not objects and not migrations}, "schema_inventory": rows_hash(inventory, [item.name for item in inventory_cursor.description]), "migrations": scalar_hash(connection, "SELECT app,name FROM django_migrations ORDER BY app,name") if migrations else {"count": 0, "stable_hash": digest([])}}
     for table in ("quality_master", "quality_masterclass", "quality_structure", "quality_inspectionfile", "quality_appsetting"):
         exists = connection.execute("SELECT to_regclass(%s)", ("public." + table,)).fetchone()[0]
-        result[table] = scalar_hash(connection, "SELECT * FROM " + table + " ORDER BY id") if exists else {"count": 0, "stable_hash": digest([]), "fields": []}
+        result[table] = table_hash(connection, table) if exists else {"count": 0, "stable_hash": digest([]), "fields": [item if isinstance(item, str) else item[0] for item in TABLE_FIELDS[table]]}
     paths = connection.execute("SELECT file_path FROM quality_inspectionfile WHERE file_path IS NOT NULL ORDER BY file_path").fetchall() if result["quality_inspectionfile"]["count"] else []
     result["inspection_file_path_set_hash"] = digest(sorted(row[0] for row in paths))
     return result

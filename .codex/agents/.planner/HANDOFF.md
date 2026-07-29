@@ -1,6 +1,40 @@
 # Planner Handoff: Stage B Retry
 
-## Current Goal
+## Current Cycle Goal
+
+Correct only four remaining P1 findings:
+
+1. Functional production callbacks, public dispatch, and atomic evidence bundles.
+2. Complete Execute/Cleanup guards and success conditions.
+3. Django-compatible ForeignKey canonical hashing.
+4. Table-driven zero-mutation, privacy, and residue tests.
+
+This cycle is fake/static validation only. Modify only the same five Stage B files and handoffs. Preserve approved artifacts, `LIVE_BLOCKED=True`, criterion 8=`not_evaluable`, failure retention, and Web→worker recovery. Do not operate real DB/services, invoke PostgreSQL binaries, use network/UNC, run real PlanOnly, submit Jobs, log in, or run live A/B.
+
+## Current Cycle Requirements
+
+- Public modes must be functional: PlanOnly writes atomic pending manifest/checksum; Execute validates approval/current state, runs the complete sequence, and writes atomic execution evidence/checksum; Cleanup binds approval to execution bytes, performs exactly one validated drop, and writes atomic cleanup evidence/checksum.
+- `New-StageBProductionAdapter` must provide non-placeholder callbacks for PendingInputs, Snapshot, Catalog, Jobs, Clients, Storage, Owners, ServiceState, Stop/StartService, Dump, ListDump, CreateRestore, Restore, and DropRestore using local resolved paths, `ArgumentList`, and child-only credentials. Remove fixed throws from valid paths.
+- Strictly validate exact adapter keys and typed Snapshot, Catalog, Service, Dump, List, and Mutation result schemas.
+- Complete every Execute guard before mutation. Require callback success/readback at every service/dump/list/create/restore/snapshot/recovery stage. Revalidate create-time target/OID/owner/empty proof; require restore/source semantic and identity invariants. Success is formed only after verified Web→worker recovery and atomic evidence reread/checksum.
+- Failure recovers only services stopped by this invocation, remains failed if recovery fails, publishes redacted evidence, and never drops the restore or deletes the dump.
+- Cleanup uses its own `restored` state contract. Before the sole drop, verify pending and execution bytes/checksum/linkage/privacy, cleanup approval bound to execution bytes, actual dump size/hash, zero Jobs/connections, exact target/OID/owner, cleanup owner, and source/protected distinctness. Require drop success and verified absence. Never delete the dump or retry drop.
+- Evidence schemas must be exact, privacy-safe, atomic, deterministic, and refuse existing final bundles. Temporary bundle cleanup is limited to the invocation's validated temp path.
+- Python must map Django field names to DB columns exactly: MasterClass `master→master_id`, `class_master→class_master_id`; InspectionFile `master→master_id`; dictionary keys remain Django field names. Preserve `id` order, `updated_at` exclusion, non-compact existing JSON bytes, and duplicate sorted paths.
+- Python tests add independent hard-coded golden values for ForeignKeys, Unicode, Decimal/datetime, nullable FK, duplicate paths, identity, and OID binding.
+- PowerShell tests are table-driven with per-callback counters covering all schema/time/hash/collision/drift/result/runtime/recovery/cleanup/public-dispatch failures. Every preflight and cleanup guard failure has zero mutations; runtime failures have zero drop/delete; cleanup success has exactly one drop and verified absence.
+- Privacy scans cover all pending/execution/cleanup/checksum/error/output artifacts with raw sentinels. Atomic tests cover deterministic hashes, existing-final refusal, pre-publication cleanup, and no orphan temporary bundles.
+- Update only the Stage B README section and accurately state that runtime remains unverified.
+
+## Current Cycle Acceptance
+
+Run only the Python tests, PowerShell fake tests, Python compile, PowerShell parser API, scoped diff, and `git diff --check`. Accept only with functional public dispatch, no placeholder callbacks, strict typed schemas, all guards before mutation, complete success/recovery conditions, atomic linked evidence, one-drop cleanup, ForeignKey golden compatibility, full mutation/privacy/residue proof, unchanged safety gates, and no prohibited runtime operation.
+
+The implementer handoff must include exact files/results, test table counts, mutation-counter proof, golden hashes, privacy/residue results, confirmation production adapters were not constructed/invoked in tests, prohibited-operation confirmation, and unresolved runtime prerequisites.
+
+---
+
+## Superseded Prior Cycle Goal
 
 Correct only the latest four P1 findings: complete all public code paths, enforce strict nested schemas and a full current-state gate before mutation, match existing canonical snapshot hashes, and prove all blocking/failure conditions with zero-mutation tests. This cycle is code plus fake-adapter validation only.
 

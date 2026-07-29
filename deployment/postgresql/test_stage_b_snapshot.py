@@ -34,6 +34,12 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(snapshot.rows_hash([(1, "x", "volatile")], ["id", "name", "updated_at"]), {"count": 1, "stable_hash": "a61793f8ec74bdeada7a7f9a4f8b1de35719aaf2bc867a9c75ec9f2a10420dde", "fields": ["id", "name"]})
         self.assertEqual(snapshot.digest(sorted(["z", "a", "a"])), "1083f9182b5913e7df6d35f8b8382e55e0d70a2523460db161f9e915bdb8c7ef")
 
+    def test_django_foreign_key_dictionary_names_have_golden_hash(self):
+        # DB columns are master_id/class_master_id; canonical dictionaries use Django names.
+        row = snapshot.rows_hash([(1, 7, None, "日本語")], ["id", "master", "class_master", "inspection_sheet_path"])
+        self.assertEqual(row, {"count": 1, "stable_hash": "3eb56d95102832d24c444e3cd93842bd6a7018479292c5409c4f1752b196b77e", "fields": ["id", "master", "class_master", "inspection_sheet_path"]})
+        self.assertEqual(snapshot.TABLE_FIELDS["quality_inspectionfile"][1], ("master", "master_id"))
+
     def test_identity_is_direct_normalized_text_hash(self):
         result = snapshot.identity(" DB.EXAMPLE. ", "05432", "restore_db", 22, "owner", "160002")
         self.assertEqual(result["endpoint_hash"], "ef6cea1eb186f0c9dd952eba0f2d66c425294d06dc4ea1b3050d4a88d7235908")
