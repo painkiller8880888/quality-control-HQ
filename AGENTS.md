@@ -1,4 +1,4 @@
-# AGENTS.md
+# agentsS.md
 
 ## Safe batching of independent tool calls
 
@@ -21,16 +21,16 @@ Do not split otherwise batchable inspections across multiple outer tool calls. H
 
 ## Purpose
 
-このリポジトリでは、複数のAI agentが役割分離されたパイプラインとして協調する。
+このリポジトリでは、複数のAI agentsが役割分離されたパイプラインとして協調する。
 
 基本サイクル:
 
 1. planner(codex)
-2. implementer(codexまたは外部agent)
+2. implementer(codexまたは外部agents)
 3. reviewer(codex)
 4. user decision gate
 
-各agentは自分の責務のみ実行する。
+各agentsは自分の責務のみ実行する。
 各エージェントは次のクライアントのためのhandoff生成をgoalとする。
 Codex内のサブエージェント構成は、このファイルとは別に定義された既存構成を流用する。
 
@@ -52,28 +52,28 @@ Codex内のサブエージェント構成は、このファイルとは別に定
 
 ## Handoff Rules
 
-agent間通信は structured handoff のみで行う。
+agents間通信は structured handoff のみで行う。
 
-各agentは:
+各agentsは:
 - 自分の責務だけ実行する
-- 次agentに必要な情報だけ渡す
+- 次agentsに必要な情報だけ渡す
 - 思考ログを丸ごと渡さない
 - 未検証情報を事実として渡さない
 
 handoffの標準配置:
 
-- plannerからimplementer: `.codex/agent/.planner/HANDOFF.md`
-- implementerからreviewer: `.codex/agent/.implementer/HANDOFF.md`
-- reviewerから次サイクルおよびuser: `.codex/agent/.reviewer/HANDOFF.md`
+- plannerからimplementer: `.codex/agents/.planner/HANDOFF.md`
+- implementerからreviewer: `.codex/agents/.implementer/HANDOFF.md`
+- reviewerから次サイクルおよびuser: `.codex/agents/.reviewer/HANDOFF.md`
 
 handoffは補助資料であり、実装や検証結果そのものの証拠ではない。
-reviewerは外部agentのhandoffを無条件に信用せず、working tree、diff、対象コード、テスト結果を自ら確認する。
+reviewerは外部agentsのhandoffを無条件に信用せず、working tree、diff、対象コード、テスト結果を自ら確認する。
 
 ---
 
 ## Mandatory User Decision Gate
 
-reviewerは各サイクルのレビュー完了後、必ず`.codex/agent/.reviewer/HANDOFF.md`を生成または更新する。
+reviewerは各サイクルのレビュー完了後、必ず`.codex/agents/.reviewer/HANDOFF.md`を生成または更新する。
 その時点でパイプラインを停止し、userの明示的な指示を待つ。
 
 reviewer handoffを生成した同一turn内では、次の行為を禁止する:
@@ -109,21 +109,21 @@ userがCodexでの継続を明示した場合:
 1. reviewer handoffのverdictに従い、必要ならplannerが次の最小scopeを定義する
 2. Codex implementerが承認されたscopeだけを実装・検証する
 3. Codex reviewerが独立してレビューする
-4. reviewerが`.codex/agent/.reviewer/HANDOFF.md`を更新する
+4. reviewerが`.codex/agents/.reviewer/HANDOFF.md`を更新する
 5. mandatory user decision gateで再び停止する
 
-Codex implementerのmodelやsubagent構成は、userの指示および別途定義された既存構成に従う。
+Codex implementerのmodelやsubagents構成は、userの指示および別途定義された既存構成に従う。
 plannerまたはreviewerが実装を兼務してはならない。
 
 ### Route B: External Implementation
 
 userがimplementationの外部委託を明示した場合:
 
-1. 必要ならplannerが外部implementer向けの`.codex/agent/.planner/HANDOFF.md`を生成する
+1. 必要ならplannerが外部implementer向けの`.codex/agents/.planner/HANDOFF.md`を生成する
 2. Codex側は実装せず停止する
-3. userが外部implementerの変更と`.codex/agent/.implementer/HANDOFF.md`をreviewerへ渡す
+3. userが外部implementerの変更と`.codex/agents/.implementer/HANDOFF.md`をreviewerへ渡す
 4. reviewerが実変更と検証結果を独立して確認する
-5. reviewerが`.codex/agent/.reviewer/HANDOFF.md`を更新する
+5. reviewerが`.codex/agents/.reviewer/HANDOFF.md`を更新する
 6. mandatory user decision gateで再び停止する
 
 外部implementerの作業待ち中に、Codexが同じscopeを先行実装してはならない。
@@ -132,7 +132,7 @@ userがimplementationの外部委託を明示した場合:
 
 ## Reviewer Handoff Minimum Contents
 
-`.codex/agent/.reviewer/HANDOFF.md`には少なくとも次を含める:
+`.codex/agents/.reviewer/HANDOFF.md`には少なくとも次を含める:
 
 - review scope
 - verdict: `PASS`、`FAIL`、または`BLOCKED`

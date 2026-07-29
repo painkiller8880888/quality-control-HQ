@@ -1,170 +1,91 @@
-# Handoff: reviewer → planner / implementer
+# Reviewer Handoff: Stage B Four-Finding Correction
 
 ## Review Scope
 
-- `.planner/HANDOFF.md`
-- latest `.implementer/HANDOFF.md`
-- previous findings F1–F5
-- semantic consistency gap
-- retained/removed test bodies
-- distribution/privacy direct tests
-- test definitions / uniqueness
-- `LIVE_BLOCKED = True`
-- `git diff --check`
+- `.codex/agents/.planner/HANDOFF.md`
+- `.codex/agents/.implementer/HANDOFF.md`
+- `deployment/windows/validate_stage_b_backup_restore.ps1`
+- `deployment/postgresql/stage_b_snapshot.py`
+- `deployment/windows/test_validate_stage_b_backup_restore.ps1`
+- `deployment/postgresql/test_stage_b_snapshot.py`
+- `deployment/README.md`
+- approved artifacts, canonical safety gates, criterion 8, and scoped working-tree integrity
 
 ## Verdict
 
-**FAIL — Safety Stop / planner decision required**
+**FAIL**
 
-implementerは、`measurement_status`、`failure_reason`、`live_verification`のsemantic consistency validatorがproductionに存在しないことを正しくgapとして報告した。
+All four prior blocking findings remain unresolved. Some validators, a runtime skeleton, and mutation-free tests were added, but the approved runtime, strict manifest, canonical compatibility, cleanup, and safety-test contract are incomplete. Pipeline stops at the mandatory user decision gate.
 
-これはP1 acceptance criterion 4の必須fail-closed条件そのものであるため、reviewerはgapを受容してPASSへ変更できない。production/schema互換性へ影響する可能性がある変更は現planner scopeで禁止されており、implementerのSafety Stopは妥当である。
+## Blocking Findings
 
-P2へ進まない。`LIVE_BLOCKED = True`を維持する。
+### P1: Public runtime paths are not implemented
 
-## Resolved Findings
+`-PlanOnly`, `-Cleanup`, and `-Execute` all terminate unconditionally. `Invoke-StageBSequence` is unreachable from the public entry point, production adapters are not connected, and cleanup is absent. The approved dump/restore/verification/evidence sequence therefore cannot run after approval.
 
-次は解消済み:
+Required correction: implement each public mode with production adapters while preserving the exact-manifest gate and prohibition on real execution before later explicit approval.
 
-- distribution bool priority key rejection: preflight/postflight
-- distribution negative count rejection: preflight/postflight
-- total mismatch testのtraceability
-- privacy dynamic integer priority key: preflight/postflight
-- raw path実入力のprivacy rejection
-- canonical test method重複
-- test count / uniqueness
-- repository rootでの`git diff --check`
-- semantic contradictionを受理する`test_build_evidence_semantic_contradiction_completed_with_failure_reason`の削除
-- 不存在F4 testを追加済みとする記載の撤回
+### P1: Manifest and current-state revalidation are incomplete
 
-reviewer静的実測:
+Validation checks top-level property names but not the nested source/restore/protected, clients, storage, owners, or services schemas. Hash formats, expiry, capacity, retention, versions, owners, and service order are not adequately enforced. Tests currently accept empty client/storage/service objects and one-character identity hashes.
 
-| Target | Definitions | Unique | Duplicates |
-|---|---:|---:|---:|
-| canonical | 267 | 267 | 0 |
-| measurement | 34 | 34 | 0 |
+The sequence stops services before source revalidation, does not validate dump-list or `pg_restore` success, lacks source-unchanged and canonical semantic comparisons, and can retain a success result when service recovery throws.
 
-次も確認済み:
+Required correction: strictly validate all nested fields and current state before the first mutation callback; make every process result, source invariant, semantic comparison, and service recovery mandatory for success.
 
-- module/command双方で`LIVE_BLOCKED = True`
-- reviewer `git diff --check`: exit 0、CRLF warningのみ
-- implementer申告fresh DB: canonical 267/267、measurement 34/34、queue + PhaseTwo 49/49 PASS
+### P1: Snapshot hashes remain incompatible with the canonical implementation
 
-## Blocking Finding
+The snapshot helper hashes `SELECT *` tuple arrays using compact JSON. The existing canonical implementation excludes `updated_at`, hashes dictionary rows, and uses its established JSON encoding. PowerShell raw-string hashing and Python JSON-scalar hashing also differ. Restore distinct-OID input is not bound to a validated source identity.
 
-### B1 — High: formal evidence semantic consistencyは未実装
+Required correction: share or exactly reproduce existing canonical field selection, row shape, ordering, encoding, identity hashing, and source-OID binding across both languages.
 
-implementer gap analysis:
+### P1: Safety tests do not cover the blocking conditions
 
-> `measurement_status`、`failure_reason`、`live_verification`の自己矛盾を拒否するsemantic consistency validatorは現状存在しない。
+Tests are predominantly happy-path stubs. They do not establish strict nested schemas, expiry, capacity/retention, version drift, all-guards-before-mutation, restore/recovery failure handling, cleanup approval/revalidation, privacy scanning, or cross-language canonical compatibility.
 
-reviewerのコード確認とも一致する。`build_canonical_evidence()`は次のような矛盾を構築可能である:
+Required correction: add negative tests and zero-mutation assertions for every guard, cleanup tests, canonical golden values, and privacy-leak scanning.
 
-- `measurement_status="completed"` + non-empty `failure_reason`
-- `measurement_status="completed"` + failed `live_verification` gate
-- `measurement_status="failed"` + empty `failure_reason`
+## Verified Facts
 
-`run_canonical()`がfailed Jobを早期拒否することは重要だが、完成したformal evidenceのsemantic validationとは別契約である。builder、writer、またはfinal evidence gateの別経路から矛盾が入った場合をfail-closedで拒否する保証がない。
+- Python unittest: 5 tests pass.
+- PowerShell mutation-free test passes.
+- Python `py_compile` passes.
+- Both PowerShell files parse with zero syntax errors.
+- Scoped `git diff --check` passes.
+- No real database, service, PostgreSQL binary, network, UNC, Job, login, or live A/B operation was performed.
+- Approved S2-CR-08 approval JSON remains SHA-256 `9351e79f5f7c418c4c99c0b820621cf5c85d9a32ce93c08663a4ff8eb7892439`, with matching manifest.
+- Canonical module and command retain `LIVE_BLOCKED=True`.
+- RELEASE retains criterion 8=`not_evaluable` and Stage B-only/no-live-approval state.
 
-必要なplanner判断:
+## Unverified Items
 
-1. production semantic validatorの追加を新しい明示scopeとして許可する
-2. validatorの適用地点を決める
-   - evidence build直後
-   - privacy check前
-   - evidence write直前
-   - writer再読込後
-3. schema互換性への影響を評価する
-4. direct positive/negative testと既存suite回帰を必須にする
+- Actual PlanOnly manifest generation against runtime prerequisites.
+- Production adapters and all runtime sequence steps.
+- Runtime identity, OID, empty/distinct, version, capacity, and retention checks.
+- Dump/list/restore results, source invariance, semantic comparisons, cleanup, service recovery, privacy scan, and final evidence checksums.
 
-この判断なしにimplementerがproduction変更へ進んではならない。
+## Next Minimum Recommended Scope
 
-## Remaining Documentation/Test Cleanup
+Correct only the four P1 findings above. Use the existing five-file scope and agent handoffs. Do not perform runtime execution. The next implementation must make the public paths complete in code, validate every nested/current-state condition before mutation, match canonical golden values exactly, and demonstrate all failure paths with mutation-free tests.
 
-### F1 — Medium: misleading semantic testが1件残っている
+## Safety Gates and Forbidden Changes
 
-次が`JobResultVerifierTests`内に残る:
+- Preserve approved artifacts, baselines, thresholds, approvers, conditions, and manifest.
+- Preserve both `LIVE_BLOCKED=True` gates and criterion 8=`not_evaluable`.
+- Do not operate services/databases, invoke PostgreSQL binaries, submit Jobs, access UNC, run PlanOnly with real prerequisites, or run live A/B.
+- Do not stage, commit, push, or refactor outside the minimum correction scope.
+- Do not treat passing static tests as runtime acceptance.
 
-```text
-test_run_canonical_rejects_completed_status_with_failed_job_a_in_live_verification
-```
+## Route Conditions
 
-周辺commentは「Semantic contradiction direct negative tests」、docstringはcompleted statusとfailed live verificationの矛盾拒否を主張するが、実際にはfailed Jobを渡して既存Job final gateのraiseを確認する長大testである。
+### Codex Implementation
 
-同じJob A failure契約は`RunCanonicalTests.test_run_canonical_job_gate_fails_closed_when_job_a_failed`と重複する。
+After explicit user selection, a new planner may narrow the four P1 corrections, a separate Codex implementer may implement them without runtime operations, and another independent reviewer must update this handoff and stop again.
 
-必要対応:
+### External Implementation
 
-- この残存testを削除する
-- semantic direct testとしてmatrix/reportへ含めない
-- pure Job final gate testの重複を増やさない
+After explicit user selection, the same four P1 corrections may be handed to an external implementer. Codex must not duplicate that implementation and must independently review returned changes and evidence.
 
-### F2 — Medium: “matrix 267 FQN”はtraceability matrixの集合ではない
+## User Decision Gate
 
-handoffは「matrix references 267 / unique 267」とするが、267はcanonical file全test definitionsの件数である。表示されたtraceability matrixは代表testだけを記載し、多くは`Class.test_method`形式で、plannerが要求した完全修飾名ではない。
-
-full canonical suiteが267件PASSすることと、traceability matrixの各参照を完全修飾名で機械検証することは別である。
-
-必要対応:
-
-- matrixの参照だけを抽出してreferences / unique / missingを報告する
-- canonical参照も`quality.test_s2_cr08_canonical.Class.test_method`形式にする
-- measurement参照と同じ完全修飾形式へ統一する
-- full suite 267件の件数は別表として扱う
-
-### F3 — Medium: partial coverageとmissing ENDを同一扱いしている
-
-handoff:
-
-> partial coverageは既存の`test_wait_for_completion_missing_end_raises`でカバーされる
-
-missing ENDはpartial coverageの一例だが、observer fieldの部分欠測、metrics coverage不足、time windowの一部未観測すべてを代表するわけではない。
-
-既存の次を要件別に再評価する:
-
-- `TransactionCollectorCorrelationTests.test_wait_for_completion_missing_end_raises`
-- `S2Cr08MeasurementTests.test_build_evidence_partial_transaction_observer`
-- `RunCanonicalTests.test_run_canonical_fails_closed_when_metrics_insufficient`
-- observer field欠測を拒否する既存RunCanonical test
-
-単に「partial coverage」と総称せず、各testが拒否する具体的なmissing field/conditionを記載すること。
-
-## Required Next Step
-
-### Planner
-
-semantic consistency validatorをproductionへ追加する新scopeを作成するか判断する。
-
-新scopeを作る場合の最低要件:
-
-1. semantic validatorはpure functionとして最小実装
-2. completed/failed状態、failure reason、全live verification gateの整合を検証
-3. unknown/missing/malformed typeをfail-closed
-4. final evidence write前に必ず呼ばれる
-5. contradictionごとのdirect negative test
-6. valid completed/failed evidenceのpositive test
-7. privacy・manifest・fresh DB全回帰
-8. `LIVE_BLOCKED = True`維持
-
-### Implementer
-
-plannerがscopeを更新するまではproduction変更を行わない。
-
-許可されるcleanupは:
-
-- 残存するmisleading/duplicate semantic testの削除
-- handoffのmatrix count/FQN表記/coverage説明の訂正
-
-cleanup後もsemantic validator未実装のため、P1 verdictはFAILのままとする。
-
-## Non-Goals
-
-- P2
-- canonical `--dry-run` / `--live`
-- 疑似本番または実Job投入
-- service操作
-- backup/restore
-- threshold承認・変更
-- `specification/RELEASE.md`の状態変更
-- model/migration変更
-- stage/commit
+The user must explicitly select Codex implementation or external implementation before the next correction cycle begins.

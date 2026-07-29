@@ -1,5 +1,21 @@
 # 疑似本番基盤
 
+## Stage B backup/restore validation
+
+`windows/validate_stage_b_backup_restore.ps1` is the sole Stage B orchestrator. Pending and final evidence use a versioned, strict allowlist schema: all protected identities are normalized and SHA-256 hashed, while raw database, host, role, service, storage, command, credential, and error values are excluded. The Python snapshot helper is the authority for canonical semantic hashes: compact sorted-key UTF-8 JSON, deterministic ordered rows, and a sorted distinct `InspectionFile` path set.
+
+`-PlanOnly` is read-only: it requires a source baseline, protected-target denylist, distinct restore endpoint/OID proof, PostgreSQL client/version records, storage capacity and retention, owner roles, and service identities before atomically writing a pending manifest. `-Execute` requires a strict, time-bounded approval for that exact manifest and revalidates every protected identity, baseline, empty/absent restore state, capacity, retention, and client/server version before any mutation. The approved sequence is worker stop, web stop, dump, restore-target create/verify, restore, source/restore comparison, web start, worker start. Runtime adapters are deliberately not enabled by this implementation cycle, so all public modes remain fail-closed until an approved production adapter is supplied.
+
+`-Cleanup` is separately approved and may only drop the approved restore database after owner, endpoint/database/OID, dump-hash, protected-target, and active-connection rechecks. Dumps and partial restore databases are retained on every failure; neither is automatically deleted. Evidence checksums use lowercase SHA-256 and ordinal, `/`-normalized relative paths, excluding the checksum file itself and temporary files.
+
+The focused, mutation-free checks are:
+
+`python deployment/postgresql/test_stage_b_snapshot.py`
+
+`powershell.exe -NoProfile -ExecutionPolicy Bypass -File deployment/windows/test_validate_stage_b_backup_restore.ps1`
+
+Before approval, the backup owner supplies distinct lowercase source/restore identities, development and production denylist entries, storage/retention details, service order, and named operator, cleanup, and rollback roles. The restore name is never derived from the source. Retain the dump and any partial restore database on failure; never delete either automatically. Cleanup later requires a recheck of the approved identity and dump hash by the cleanup owner. Preserve Web-first/worker-second recovery, zero active Jobs, `LIVE_BLOCKED=True`, and criterion 8 `not_evaluable`; no login, Job submission, UNC access, live A/B, or active-database restore is permitted.
+
 現在のWindows PC上で、開発環境と分離した疑似本番を構築するための設定である。
 
 ## 初回準備
