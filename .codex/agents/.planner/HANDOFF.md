@@ -1,4 +1,41 @@
-# Planner Handoff: Stage B Four-Finding Correction
+# Planner Handoff: Stage B Retry
+
+## Current Goal
+
+Correct only the latest four P1 findings: complete all public code paths, enforce strict nested schemas and a full current-state gate before mutation, match existing canonical snapshot hashes, and prove all blocking/failure conditions with zero-mutation tests. This cycle is code plus fake-adapter validation only.
+
+## Current Scope and Prohibitions
+
+Modify only the Stage B PowerShell/Python implementation, their two tests, the Stage B README section, and agent handoffs. Preserve approved artifacts, both `LIVE_BLOCKED=True` gates, criterion 8=`not_evaluable`, and Stage-B-only status.
+
+Do not operate real databases/services, invoke PostgreSQL binaries, use network/UNC, run PlanOnly with real prerequisites, submit Jobs, log in, or run live A/B. Tests use injected fakes and local temporary files. Production adapters are code-wired but never constructed or invoked by tests.
+
+## Required Implementation
+
+1. Match existing canonical semantics exactly: non-compact `json.dumps(..., ensure_ascii=False, sort_keys=True, default=str)` bytes; fixed dictionary fields; `id` order; exclude `updated_at`; preserve duplicate sorted InspectionFile paths. Use direct normalized-text SHA-256 for identity in both languages with shared golden literals.
+2. Require `--expected-source-oid-hash` in restore mode; reject malformed/missing/equal values and source-mode misuse before output.
+3. Implement strict schema/hash/privacy/atomic/checksum helpers and `New-StageBProductionAdapter`, `Get/Assert-StageBCurrentState`, pending manifest construction, Execute, Cleanup, Recovery, Entry, and Main dispatch. Remove unconditional valid-mode throws.
+4. Strictly validate all top-level and nested manifest fields: schema/run/scope/live block/criterion/times; source/restore/protected identity and OID state; source baseline; clients/majors; local capacity/retention; distinct owners; service identities and worker→Web/Web→worker order. Reject missing/extra/type/hash/time/collision/drift errors.
+5. Require exact execute/cleanup approvals with constant-time byte-hash binding and bounded approval time.
+6. Code-wire local production adapters with `ProcessStartInfo.ArgumentList`, child-only credentials, typed privacy-safe results, complete read-only callbacks, and stop/start/dump/list/create/restore/drop callbacks. Tests never construct them.
+7. PlanOnly uses only read callbacks, runs all guards, privacy-scans, and atomically writes manifest/checksum.
+8. Execute must finish all current-state guards before the first mutation: approval, adapter contract, zero Jobs, source baseline, restore empty/absent/distinct, protected set, versions, capacity/retention, owners, and service state/order. A validated token is required to mutate.
+9. Execute order: stop worker→Web; recheck source; dump and verify exit/size/hash; verify nonempty dump-list; recheck/create approved restore and distinct OID; transactional restore and result check; bound semantic comparison; source unchanged proof; recover Web→worker and verify. Recovery failure means failure. Never auto-drop/delete.
+10. Atomically write allowlisted privacy-safe final evidence/checksums.
+11. Cleanup is separately approved and validates pending/final linkage, dump hash, exact target/OID/owner, protected/source distinctness, cleanup owner, zero connections/Jobs, and eligible state before exactly one drop; verify absent; never delete dump.
+12. Python tests use independent hard-coded golden hashes for canonical rows/Unicode/Decimal/time/duplicate paths/identity/OID binding/privacy/no-output failures.
+13. PowerShell tests are table-driven and mutation-counting for every nested/preflight/approval/drift failure; every execution/recovery failure; successful absent/existing-empty paths; all cleanup guards; privacy sentinels; deterministic checksums; no temporary residue. Every preflight/cleanup failure must prove zero mutation.
+14. Update only the Stage B README section and do not claim runtime acceptance.
+
+## Current Acceptance
+
+Allowed commands are the Python test, PowerShell test, Python compile, PowerShell parser API, scoped diff, and `git diff --check`. Accept only if all fake/static tests pass, public modes dispatch to code-complete paths, all guards precede mutation, all stage and recovery results are mandatory, canonical golden/cross-language literals match, all negative cases prove zero mutation, cleanup is separate, privacy scans pass, and no prohibited operation occurs.
+
+Update `.codex/agents/.implementer/HANDOFF.md` with exact files/results, mutation-count proof, golden literals, confirmation production adapters were not invoked, prohibited-operation confirmation, and unresolved runtime prerequisites.
+
+---
+
+## Superseded Prior Plan
 
 ## Goal
 

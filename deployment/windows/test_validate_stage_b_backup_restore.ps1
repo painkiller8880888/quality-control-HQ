@@ -1,23 +1,32 @@
 $ErrorActionPreference='Stop'; Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot 'validate_stage_b_backup_restore.ps1')
 function Assert-True($Value,[string]$Message){if(-not $Value){throw $Message}}
-Assert-True (Test-StageBIdentifier 'restore_db') 'identifier'
-foreach($bad in @('Restore','a-b')){Assert-True (-not(Test-StageBIdentifier $bad)) 'invalid identifier'}
-Assert-True ((Normalize-StageBHost ' Db.Example. ') -eq 'db.example') 'host normalization'
-Assert-True ((Normalize-StageBPort '05432') -eq '5432') 'port normalization'
-try {Normalize-StageBHost 'http://secret'; throw 'host accepted'} catch {Assert-True ($_.Exception.Message -ne 'host accepted') 'host rejected'}
-$source=@{endpoint_hash='a';database_hash='b';oid_hash='c'}; $restore=@{endpoint_hash='x';database_hash='y';oid_hash='z';state='absent'}
-$manifest=[pscustomobject]@{schema_version=1;run_id='run';scope='stage-b-backup-restore';live_blocked=$true;criterion_8='not_evaluable';created_at=[DateTimeOffset]::UtcNow.ToString('o');expires_at=[DateTimeOffset]::UtcNow.AddHours(1).ToString('o');source=$source;restore=$restore;protected=@(@{endpoint_hash='p';database_hash='q';oid_hash='r'});source_baseline_hash=('a'*64);clients=@();storage=@{};owners=@{restore_owner_hash=('b'*64)};services=@{};execution_state='pending'}
-Test-StageBManifest $manifest
-$approval=[pscustomobject]@{scope='stage-b-backup-restore';action='execute';manifest_sha256=('c'*64);approved_at=[DateTimeOffset]::UtcNow.ToString('o');approver_hash=('d'*64)}
-Test-StageBApproval $approval ('c'*64) 'execute'
-try {Test-StageBApproval $approval ('e'*64) 'execute'; throw 'tamper accepted'} catch {Assert-True ($_.Exception.Message -ne 'tamper accepted') 'tamper rejected'}
-try {Test-StageBManifest ([pscustomobject]@{schema_version=1}); throw 'schema accepted'} catch {Assert-True ($_.Exception.Message -ne 'schema accepted') 'schema rejected'}
-$events=[Collections.Generic.List[string]]::new(); $adapter=@{Jobs=0; Service={param($action,$name) $null=$events.Add("$action-$name")}; Snapshot={param($target,$mode,$oid) [pscustomobject]@{identity=@{oid_hash=if($mode -eq 'source'){'c'}else{'z'}}}}; Process={param($name,$args,$env) $null=$events.Add($name); [pscustomobject]@{success=$true;size=1;hash=('f'*64)}}; Catalog={param($target) [pscustomobject]@{state='absent';oid_hash=$null}}; CreateRestore={param($target,$owner) $null=$events.Add('create')}; DropRestore={param($target) $null=$events.Add('drop')}}
-$result=Invoke-StageBSequence $manifest $adapter
-Assert-True ($result.status -eq 'success') 'sequence'
-Assert-True (($events -join ',') -eq 'stop-worker,stop-web,pg_dump,create,pg_restore,start-web,start-worker') 'order'
-Assert-True (-not($events -contains 'drop')) 'no automatic cleanup'
-try { throw 'password host db role C:\\secret' } catch {Assert-True ((Get-StageBRedactedError $_) -eq 'stage_b_operation_failed') 'redaction'}
-$root=Join-Path ([IO.Path]::GetTempPath()) ('stage-b-'+[guid]::NewGuid()); New-Item -ItemType Directory -Path $root|Out-Null; [IO.File]::WriteAllText((Join-Path $root 'z.txt'),'z'); [IO.File]::WriteAllText((Join-Path $root 'a.txt'),'a'); Write-StageBChecksums $root; $lines=Get-Content (Join-Path $root 'checksums.sha256'); Assert-True ($lines[0] -match '  a.txt$') 'checksum order'; Remove-Item -LiteralPath $root -Recurse -Force
+function Assert-Throws($Action,[string]$Message){try {& $Action; throw $Message} catch {if($_.Exception.Message -eq $Message){throw $Message}}}
+function New-Manifest {
+ $h={param($x) Get-StageBTextHash $x}; [pscustomobject]@{schema_version=1;run_id='run-001';scope='stage-b-backup-restore';live_blocked=$true;criterion_8='not_evaluable';created_at=[DateTimeOffset]::UtcNow.ToString('o');expires_at=[DateTimeOffset]::UtcNow.AddHours(1).ToString('o');source=[pscustomobject]@{endpoint_hash=&$h 'source-endpoint';database_hash=&$h 'source-db';oid_hash=&$h 'source-oid';role_hash=&$h 'source-role';server_version_num_hash=&$h '16'};restore=[pscustomobject]@{endpoint_hash=&$h 'restore-endpoint';database_hash=&$h 'restore-db';oid_hash=&$h 'restore-oid';owner_hash=&$h 'restore-owner';state='absent'};protected=@([pscustomobject]@{endpoint_hash=&$h 'protected-endpoint';database_hash=&$h 'protected-db';oid_hash=&$h 'protected-oid'});source_baseline_hash=&$h 'baseline';clients=[pscustomobject]@{pg_dump_hash=&$h 'dump';pg_restore_hash=&$h 'restore';server_version_num_hash=&$h '16'};storage=[pscustomobject]@{root_hash=&$h 'local';capacity_bytes=100;required_bytes=10;retention_days=1};owners=[pscustomobject]@{restore_owner_hash=&$h 'restore-owner';cleanup_owner_hash=&$h 'cleanup-owner'};services=[pscustomobject]@{worker_hash=&$h 'worker';web_hash=&$h 'web';stop_order=@('worker','web');recovery_order=@('web','worker')};execution_state='pending'}
+}
+function Copy-Manifest($m){$m|ConvertTo-Json -Depth 20|ConvertFrom-Json}
+function New-FakeAdapter($m,$Failure='') {
+ $script:events=[Collections.Generic.List[string]]::new(); $script:mutations=0
+ $script:state=[pscustomobject]@{jobs=0;source_baseline_hash=$m.source_baseline_hash;source=$m.source;restore=$m.restore;clients=$m.clients;storage=$m.storage;owners=$m.owners;services=$m.services}; $script:manifest=$m; $script:failure=$Failure
+ @{Jobs={0};State={param($manifest) $script:state};Service={param($action,$name) $null=$script:events.Add("$action-$name"); if($action -eq 'stop'){$script:mutations++}; if($script:failure -eq "service-$action-$name"){throw 'service failure'}};Snapshot={param($target,$mode,$oid) if($script:failure -eq "snapshot-$mode"){throw 'snapshot failure'}; [pscustomobject]@{identity=[pscustomobject]@{oid_hash=if($mode -eq 'source'){$script:manifest.source.oid_hash}else{$script:manifest.restore.oid_hash}};baseline_hash=$script:manifest.source_baseline_hash;semantic_hash='semantic'}};Process={param($name,$args,$env) $null=$script:events.Add($name); if($script:failure -eq $name){return [pscustomobject]@{success=$false;size=0;hash=$null}}; [pscustomobject]@{success=$true;size=1;hash=(Get-StageBTextHash 'dump')}};Catalog={param($target) if($script:failure -eq 'catalog') {throw 'catalog failure'}; [pscustomobject]@{state='absent';oid_hash=$null;owner_hash=$null;connections=0}};CreateRestore={param($target,$owner) $script:mutations++; $null=$script:events.Add('create')};DropRestore={param($target,$owner) $script:mutations++; $null=$script:events.Add('drop')}}
+}
+Assert-True (Test-StageBIdentifier 'restore_db') 'identifier'; Assert-True ((Normalize-StageBHost ' Db.Example. ') -eq 'db.example') 'host'; Assert-True ((Normalize-StageBPort '05432') -eq '5432') 'port'
+$m=New-Manifest; Test-StageBManifest $m
+$negative=@(
+ @{name='nested-extra';change={param($x) $x.clients|Add-Member bad x}},
+ @{name='bad-hash';change={param($x) $x.source.oid_hash='x'}},
+ @{name='expiry';change={param($x) $x.expires_at=$x.created_at}},
+ @{name='capacity';change={param($x) $x.storage.capacity_bytes=1}},
+ @{name='service-order';change={param($x) $x.services.stop_order=@('web','worker')}},
+ @{name='collision';change={param($x) $x.restore.oid_hash=$x.source.oid_hash}}
+)
+foreach($case in $negative){$bad=Copy-Manifest $m; & $case.change $bad; Assert-Throws {Test-StageBManifest $bad} $case.name}
+$approval=[pscustomobject]@{scope='stage-b-backup-restore';action='execute';manifest_sha256=('c'*64);approved_at=[DateTimeOffset]::UtcNow.ToString('o');approver_hash=('d'*64)}; Test-StageBApproval $approval ('c'*64) 'execute'; Assert-Throws {Test-StageBApproval $approval ('e'*64) 'execute'} 'approval'
+foreach($case in @('state','pg_dump','pg_restore_list','catalog')) {$a=New-FakeAdapter $m $case; if($case -eq 'state'){$script:state.jobs=1}; $r=Invoke-StageBSequence $m $a; Assert-True ($r.status -eq 'failed') "$case failed"; if($case -eq 'state'){Assert-True ($script:mutations -eq 0) "$case zero mutation"}}
+$a=New-FakeAdapter $m; $r=Invoke-StageBSequence $m $a; if($r.status -ne 'success'){$r|ConvertTo-Json -Depth 10|Write-Output}; Assert-True ($r.status -eq 'success') 'success'; Assert-True (($script:events -join ',') -eq 'stop-worker,stop-web,pg_dump,pg_restore_list,create,pg_restore,start-web,start-worker') 'order'; Assert-True (-not($script:events -contains 'drop')) 'no automatic cleanup'
+$a=New-FakeAdapter $m 'service-start-web'; $r=Invoke-StageBSequence $m $a; Assert-True ($r.status -eq 'failed') 'recovery failure'
+foreach($case in @('bad-final','cleanup-guard')) {$a=New-FakeAdapter $m; if($case -eq 'cleanup-guard'){$a.Catalog={param($target) [pscustomobject]@{state='eligible';oid_hash=$m.restore.oid_hash;owner_hash=$m.owners.restore_owner_hash;connections=1}}}; $final=if($case -eq 'bad-final'){[pscustomobject]@{status='failed';dump_hash=(Get-StageBTextHash 'dump');manifest_sha256=('a'*64)}}else{[pscustomobject]@{status='success';dump_hash=(Get-StageBTextHash 'dump');manifest_sha256=('a'*64)}}; Assert-Throws {Invoke-StageBCleanup $m $a $final ('a'*64)} $case; Assert-True ($script:mutations -eq 0) "$case zero mutation"}
+try {throw 'password host db C:\\secret'} catch {Assert-True ((Get-StageBRedactedError $_) -eq 'stage_b_operation_failed') 'redaction'}
+$root=Join-Path ([IO.Path]::GetTempPath()) ('stage-b-'+[guid]::NewGuid()); New-Item -ItemType Directory -Path $root|Out-Null; try {[IO.File]::WriteAllText((Join-Path $root 'z.txt'),'z');[IO.File]::WriteAllText((Join-Path $root 'a.txt'),'a');Write-StageBChecksums $root;Assert-True ((Get-Content (Join-Path $root 'checksums.sha256'))[0] -match '  a.txt$') 'checksum'} finally {Remove-Item -LiteralPath $root -Recurse -Force}
 Write-Output 'Stage B pure validation tests passed'

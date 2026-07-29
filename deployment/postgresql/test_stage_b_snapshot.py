@@ -7,16 +7,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 SPEC = importlib.util.spec_from_file_location("stage_b_snapshot", Path(__file__).with_name("stage_b_snapshot.py"))
-snapshot = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(snapshot)
-
+snapshot = importlib.util.module_from_spec(SPEC); SPEC.loader.exec_module(snapshot)
 
 class Cursor:
-    def __init__(self, rows, columns=("value",)):
-        self.rows, self.description = rows, [type("Column", (), {"name": c}) for c in columns]
+    def __init__(self, rows, columns=("value",)): self.rows, self.description = rows, [type("Column", (), {"name": c}) for c in columns]
     def fetchall(self): return self.rows
     def fetchone(self): return self.rows[0]
-
 
 class Connection:
     def execute(self, query, parameters=None):
@@ -28,35 +24,33 @@ class Connection:
         if query.startswith("SELECT to_regclass"): return Cursor([(None,)])
         raise AssertionError(query)
 
-
 class SnapshotTests(unittest.TestCase):
-    def test_canonical_stable_unicode_and_scalars(self):
-        left = {"z": None, "a": [True, 2, "日本語", decimal.Decimal("1.20"), dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)]}
-        right = {"a": [True, 2, "日本語", decimal.Decimal("1.20"), dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)], "z": None}
-        self.assertEqual(snapshot.canonical_json_bytes(left), snapshot.canonical_json_bytes(right))
-        with self.assertRaises(ValueError): snapshot.canonical_json_bytes({"bad": float("nan")})
+    def test_canonical_golden_unicode_decimal_time(self):
+        value = {"z": None, "a": [True, 2, "日本語", decimal.Decimal("1.20"), dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)]}
+        self.assertEqual(snapshot.digest(value), "5da2618377a0ae442c3c0cd87af286fcb60ecb89902a6eb1f41f64ea79092ab7")
+        self.assertEqual(snapshot.canonical_json_bytes(value), snapshot.canonical_json_bytes(dict(reversed(list(value.items())))))
 
-    def test_row_and_path_contracts(self):
-        self.assertEqual(snapshot.rows_hash([(1, "x")], ["id", "name"]), snapshot.rows_hash([(1, "x")], ["id", "name"]))
-        self.assertEqual(snapshot.digest(sorted({"z", "a", "a"})), snapshot.digest(["a", "z"]))
+    def test_row_shape_excludes_updated_at_and_preserves_duplicate_paths(self):
+        self.assertEqual(snapshot.rows_hash([(1, "x", "volatile")], ["id", "name", "updated_at"]), {"count": 1, "stable_hash": "a61793f8ec74bdeada7a7f9a4f8b1de35719aaf2bc867a9c75ec9f2a10420dde", "fields": ["id", "name"]})
+        self.assertEqual(snapshot.digest(sorted(["z", "a", "a"])), "1083f9182b5913e7df6d35f8b8382e55e0d70a2523460db161f9e915bdb8c7ef")
 
-    def test_identity_normalization(self):
+    def test_identity_is_direct_normalized_text_hash(self):
         result = snapshot.identity(" DB.EXAMPLE. ", "05432", "restore_db", 22, "owner", "160002")
-        self.assertEqual(result["endpoint_hash"], snapshot.digest("db.example\n5432"))
+        self.assertEqual(result["endpoint_hash"], "ef6cea1eb186f0c9dd952eba0f2d66c425294d06dc4ea1b3050d4a88d7235908")
+        self.assertEqual(result["oid_hash"], "785f3ec7eb32f30b90cd0fcf3657d388b5ff4297f2f9716ff66e9b69c05ddd09")
         with self.assertRaises(ValueError): snapshot.identity("http://bad", "5432", "restore_db", 22, "owner", "1")
 
-    def test_restore_requires_distinct_oid_and_no_output_on_failure(self):
+    def test_restore_requires_valid_distinct_source_oid_and_no_output(self):
         with tempfile.TemporaryDirectory() as temp, patch.object(snapshot.psycopg, "connect") as connect, patch.dict("os.environ", {"STAGE_B_DB_NAME":"restore_db","STAGE_B_DB_HOST":"db","STAGE_B_DB_PORT":"5432","STAGE_B_DB_USER":"u","STAGE_B_DB_PASSWORD":"p"}, clear=False):
-            connect.return_value.__enter__.return_value = Connection()
-            target = Path(temp) / "result.json"
-            with patch("sys.argv", ["snapshot", "--output", str(target), "--identity-mode", "restore", "--expected-distinct-oid-hash", snapshot.digest(22)]):
-                with self.assertRaises(SystemExit): snapshot.main()
-            self.assertFalse(target.exists())
+            connect.return_value.__enter__.return_value = Connection(); target = Path(temp) / "result.json"
+            for supplied in (None, "not-a-hash", snapshot.identity("db", "5432", "restore_db", 22, "owner", "160002")["oid_hash"]):
+                argv=["snapshot", "--output", str(target), "--identity-mode", "restore"] + ([] if supplied is None else ["--expected-source-oid-hash", supplied])
+                with patch("sys.argv", argv):
+                    with self.assertRaises(SystemExit): snapshot.main()
+                self.assertFalse(target.exists())
 
-    def test_source_snapshot_is_privacy_safe(self):
+    def test_snapshot_is_privacy_safe(self):
         data = snapshot.snapshot(Connection(), "db.example.", "5432")
-        self.assertNotIn("restore_db", str(data))
-        self.assertTrue(data["empty_proof"]["is_empty"])
-
+        self.assertNotIn("restore_db", str(data)); self.assertTrue(data["empty_proof"]["is_empty"])
 
 if __name__ == "__main__": unittest.main()

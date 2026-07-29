@@ -48,7 +48,8 @@ def _canonical(value):
 
 
 def canonical_json_bytes(value):
-    return json.dumps(_canonical(value), ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    """Match the established S2-CR-08 stable-hash encoding exactly."""
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
 
 
 def digest(value):
@@ -86,12 +87,14 @@ def identity(host, port, database, oid, role, server_version_num):
     host, port, database = normalized_host(host), normalized_port(port), database.lower()
     if not IDENTIFIER.fullmatch(database):
         raise ValueError("invalid database")
-    return {"host_hash": digest(host), "port_hash": digest(port), "endpoint_hash": digest(host + "\n" + port), "database_hash": digest(database), "oid_hash": digest(oid), "role_hash": digest(role), "server_version_num_hash": digest(server_version_num)}
+    text_hash = lambda value: hashlib.sha256(str(value).encode("utf-8")).hexdigest()
+    return {"host_hash": text_hash(host), "port_hash": text_hash(port), "endpoint_hash": text_hash(host + "\n" + port), "database_hash": text_hash(database), "oid_hash": text_hash(oid), "role_hash": text_hash(role), "server_version_num_hash": text_hash(server_version_num)}
 
 
 def rows_hash(rows, columns):
-    ordered = [[_scalar(row[index]) for index, _ in enumerate(columns)] for row in rows]
-    return {"count": len(ordered), "stable_hash": digest(ordered)}
+    fields = [name for name in columns if name != "updated_at"]
+    ordered = [{name: row[index] for index, name in enumerate(columns) if name != "updated_at"} for row in rows]
+    return {"count": len(ordered), "stable_hash": digest(ordered), "fields": fields}
 
 
 def scalar_hash(connection, query):
@@ -109,9 +112,9 @@ def snapshot(connection, host, port):
     result = {"identity": identity(host, port, database, oid, role, version), "empty_proof": {"object_counts": dict(objects), "django_migrations_present": bool(migrations), "is_empty": not objects and not migrations}, "schema_inventory": rows_hash(inventory, [item.name for item in inventory_cursor.description]), "migrations": scalar_hash(connection, "SELECT app,name FROM django_migrations ORDER BY app,name") if migrations else {"count": 0, "stable_hash": digest([])}}
     for table in ("quality_master", "quality_masterclass", "quality_structure", "quality_inspectionfile", "quality_appsetting"):
         exists = connection.execute("SELECT to_regclass(%s)", ("public." + table,)).fetchone()[0]
-        result[table] = scalar_hash(connection, "SELECT * FROM " + table + " ORDER BY id") if exists else {"count": 0, "stable_hash": digest([])}
+        result[table] = scalar_hash(connection, "SELECT * FROM " + table + " ORDER BY id") if exists else {"count": 0, "stable_hash": digest([]), "fields": []}
     paths = connection.execute("SELECT file_path FROM quality_inspectionfile WHERE file_path IS NOT NULL ORDER BY file_path").fetchall() if result["quality_inspectionfile"]["count"] else []
-    result["inspection_file_path_set_hash"] = digest(sorted({row[0] for row in paths}))
+    result["inspection_file_path_set_hash"] = digest(sorted(row[0] for row in paths))
     return result
 
 
@@ -119,12 +122,12 @@ def main():
     parser = argparse.ArgumentParser(description="Stage B privacy-safe read-only snapshot")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--identity-mode", choices=("source", "restore"), required=True)
-    parser.add_argument("--expected-distinct-oid-hash")
+    parser.add_argument("--expected-source-oid-hash")
     args = parser.parse_args()
-    if args.identity_mode == "restore" and not args.expected_distinct_oid_hash:
-        raise SystemExit("restore snapshot requires expected distinct OID hash")
-    if args.identity_mode == "source" and args.expected_distinct_oid_hash:
-        raise SystemExit("source snapshot cannot accept expected distinct OID hash")
+    if args.identity_mode == "restore" and (not args.expected_source_oid_hash or not re.fullmatch(r"[a-f0-9]{64}", args.expected_source_oid_hash)):
+        raise SystemExit("restore snapshot requires valid expected source OID hash")
+    if args.identity_mode == "source" and args.expected_source_oid_hash:
+        raise SystemExit("source snapshot cannot accept expected source OID hash")
     name, host, port = required("STAGE_B_DB_NAME"), required("STAGE_B_DB_HOST"), required("STAGE_B_DB_PORT")
     if not IDENTIFIER.fullmatch(name):
         raise SystemExit("database identifier must be lowercase PostgreSQL identifier")
@@ -135,7 +138,7 @@ def main():
         raise
     except Exception:
         raise SystemExit("read-only snapshot failed")
-    if args.identity_mode == "restore" and result["identity"]["oid_hash"] == args.expected_distinct_oid_hash:
+    if args.identity_mode == "restore" and result["identity"]["oid_hash"] == args.expected_source_oid_hash:
         raise SystemExit("restore identity is not distinct")
     write_json(args.output, result)
 

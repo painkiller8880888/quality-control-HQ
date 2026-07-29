@@ -1,4 +1,88 @@
-# Reviewer Handoff: Stage B Four-Finding Correction
+# Reviewer Handoff: Stage B Retry
+
+## Current Review Scope
+
+- Stage B PowerShell/Python implementation
+- Stage B PowerShell/Python tests
+- Stage B README section
+- planner/implementer handoffs
+- approved artifacts, canonical gates, criterion 8, and scoped diff
+
+## Current Verdict
+
+**FAIL**
+
+The implementation improved canonical encoding, strict validation helpers, runtime skeletons, and fake tests, but all four P1 findings remain blocked by incomplete production callbacks, execution/cleanup guards, ForeignKey canonical mapping, and negative coverage. Pipeline stops at the mandatory user decision gate.
+
+## Current Blocking Findings
+
+### P1: Public modes are not connected to functional production callbacks
+
+`New-StageBProductionAdapter` still uses fixed throws for core pending/snapshot/catalog/service/state/create/drop callbacks. Valid PlanOnly/Execute/Cleanup therefore cannot complete. Execute also does not persist final privacy-safe evidence/checksums through the public path.
+
+Required correction: implement the actual local read/service/catalog/snapshot/dump/list/restore/create/drop callbacks using array arguments and child-only credentials, connect all public modes, and atomically persist privacy-safe execution/cleanup evidence.
+
+### P1: Execute and Cleanup guards/success conditions remain incomplete
+
+Create is not followed by strict target/OID/owner revalidation. Snapshot callback schemas are not strict, so missing semantic hashes can compare as equal. Post-restore source identity, service stop/start results, and recovery states are not mandatory success conditions.
+
+Cleanup does not bind approval to final evidence, recheck final checksum/dump bytes/cleanup owner, or use a cleanup-specific current-state contract. A valid post-restore cleanup can conflict with the pending absent/empty state check.
+
+Required correction: strict typed callback schemas; create-time identity proof; complete semantic/source/recovery checks; cleanup-specific state and final-evidence linkage; dump/checksum/operator/zero-connections/zero-Jobs/target checks before the sole drop.
+
+### P1: ForeignKey canonical field mapping is incompatible
+
+Existing canonical hashes use Django field names such as `master` and `class_master`; the new DB-row dictionaries use column names such as `master_id` and `class_master_id`. MasterClass and InspectionFile hashes therefore differ from the approved canonical bytes.
+
+Required correction: define exact per-table Django-field-to-DB-column mappings and add hard-coded golden tests covering ForeignKeys, Unicode, Decimal/time values, duplicate paths, identity, and OID across Python and PowerShell.
+
+### P1: Negative zero-mutation coverage remains insufficient
+
+Tests do not cover every nested missing/extra/type/collision/time/action/current-state/adapter failure, all runtime stage/recovery failures, both restore-state success paths, cleanup guards and one-drop success, public dispatch, privacy artifacts, or atomic residue.
+
+Required correction: implement the planner's table-driven suite. Every preflight/cleanup failure must show mutation count zero; runtime failures must show drop/delete zero; cleanup success must show exactly one drop and verified absence.
+
+## Current Verified Facts
+
+- Python tests pass: 5 tests.
+- PowerShell fake test passes.
+- Python compile and PowerShell parser checks pass.
+- Scoped `git diff --check` has no errors.
+- Changes remain within the five product/test files and handoffs.
+- Direct normalized-text identity hashing, non-compact Python JSON encoding, `updated_at` exclusion, duplicate path preservation, and restore source-OID argument format checks are present.
+- Approved artifacts are unchanged.
+- Both `LIVE_BLOCKED=True` gates, criterion 8=`not_evaluable`, and Stage-B-only status remain intact.
+- No real database/service/PostgreSQL binary/network/UNC/Job/login/live-A/B operation occurred.
+
+## Current Unverified Items
+
+- Functional production adapters and all public runtime modes.
+- Real manifest generation, dump/list/restore/recovery/cleanup.
+- Runtime identity, capacity, retention, permissions, and service behavior.
+- Final privacy-safe evidence and checksums.
+
+## Next Minimum Scope
+
+Keep the same five product/test files. Correct only functional production callbacks/public evidence, Execute/Cleanup strict guards, canonical ForeignKey mapping, and complete mutation-count/privacy tests. Do not perform runtime execution.
+
+## Safety Gates
+
+- Preserve approved artifacts and their hashes.
+- Preserve both `LIVE_BLOCKED=True` gates and criterion 8=`not_evaluable`.
+- Do not operate services/databases, invoke PostgreSQL binaries, use network/UNC, run real PlanOnly, submit Jobs, log in, or run live A/B.
+- Do not stage, commit, push, or refactor outside the minimum scope.
+
+## Route Conditions
+
+After explicit user selection, either a Codex implementer or external implementer may receive the same minimum scope. A separate Codex reviewer must independently verify returned code/tests and update this handoff.
+
+## Current User Decision Gate
+
+The user must explicitly select Codex implementation or external implementation before another correction cycle.
+
+---
+
+## Superseded Prior Review
 
 ## Review Scope
 
