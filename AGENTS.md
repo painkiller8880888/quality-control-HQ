@@ -1,5 +1,9 @@
 # agentsS.md
 
+## About reading files
+
+- When reading files in PowerShell, be sure to include `-Encoding UTF8`.
+
 ## Safe batching of independent tool calls
 
 When working in Code Mode, batch tool calls only when all calls for the current stage are already known, mutually independent, and safe to run without ordering, approval, or shared-state conflicts.
@@ -53,12 +57,20 @@ Codex内のサブエージェント構成は、このファイルとは別に定
 ## Handoff Rules
 
 agents間通信は structured handoff のみで行う。
+plannerはhandoff生成前に、次の条件をすべて満たすことを確認する:
 
-各agentsは:
-- 自分の責務だけ実行する
-- 次agentsに必要な情報だけ渡す
-- 思考ログを丸ごと渡さない
-- 未検証情報を事実として渡さない
+1. サイクルに主要な成果が1つだけある。
+2. 実装対象が1つの独立してreview可能なbehavior boundaryに収まる。
+3. implementerが1turn内で実装と指定validationを完了できる。
+4. acceptance criteriaが現在の権限内で検証可能である。
+5. 独立したruntime phase、cleanup phase、evidence phase、test expansionを同一サイクルへ不用意に束ねていない。
+
+いずれかを満たさない場合:
+
+- plannerは最初のdependency-completeな最小scopeだけを次サイクルへ渡す。
+- 残りは`Deferred Scope`へ簡潔に記録する。
+- Deferred Scopeは現在サイクルのacceptance criteriaへ含めない。
+- reviewer findingsが複数ある場合も、相互に不可分でないfindingを一括実装させない。
 
 handoffの標準配置:
 
@@ -68,6 +80,41 @@ handoffの標準配置:
 
 handoffは補助資料であり、実装や検証結果そのものの証拠ではない。
 reviewerは外部agentsのhandoffを無条件に信用せず、working tree、diff、対象コード、テスト結果を自ら確認する。
+
+### Required Current-Cycle Sections
+
+planner handoff:
+
+- Goal
+- In Scope
+- Out of Scope / Deferred Scope
+- Affected Files
+- Required Changes
+- Validation
+- Acceptance Criteria
+- Safety Gates
+
+implementer handoff:
+
+- Status
+- Product Changes
+- Validation Performed
+- Validation Results
+- Unverified Items
+- Safety Confirmation
+- Working-Tree Scope
+
+reviewer handoff:
+
+- Review Scope
+- Verdict: `PASS`、`FAIL`、または`BLOCKED`
+- Verified Facts
+- Unverified Items
+- Findings and Priority
+- Next Minimum Scope
+- Safety Gates
+- Route Conditions
+- User Decision Gate
 
 ---
 

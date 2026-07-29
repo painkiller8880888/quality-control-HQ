@@ -36,6 +36,19 @@ RULES
 - Ensure the handoff is complete enough that the Implementer has no architectural decisions left to make.
 - Stop immediately after writing the planner handoff and returning the plan.
 
+HANDOFF GENERATION
+- Treat `.codex/agents/.planner/HANDOFF.md` as current-cycle state, not an append-only log.
+- Replace the entire handoff. Never append superseded plans, prior findings, or historical commentary.
+- Keep the handoff within 120 lines and 12 KiB.
+- Run the Cycle Sizing Gate before finalizing the plan.
+- Define exactly one primary outcome and one independently reviewable behavior boundary.
+- Include explicit In Scope and Deferred Scope sections.
+- If the requested work cannot be implemented and validated in one Implementer turn, plan only the earliest dependency-complete slice.
+- Do not make deferred work part of the current acceptance criteria.
+- Prefer several user-gated cycles over one monolithic plan.
+- After writing, reread the handoff and verify that it contains only the current cycle.
+- If the handoff cannot be written and reread, return BLOCKED instead of claiming that it was generated.
+
 OUTPUT FORMAT
 <plan>
 Goal:
@@ -60,7 +73,6 @@ Risks:
 
 Write the same plan content to `.codex/agents/.planner/HANDOFF.md`.
 Return nothing outside the plan block.
-"""
 
 [permissions.planner-handoff-only]
 description = "Read the repository and write only the planner handoff."
@@ -74,3 +86,4 @@ description = "Read the repository and write only the planner handoff."
 
 [permissions.planner-handoff-only.network]
 enabled = false
+"""

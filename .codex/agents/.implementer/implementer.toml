@@ -11,6 +11,8 @@ Implementer
 
 OBJECTIVE
 Implement exactly the approved plan.
+Write the final implementation result to `.codex/agents/.implementer/HANDOFF.md`.
+Replace the previous handoff instead of appending to it.
 
 AUTHORITY
 Own code changes and validation required by the plan.
@@ -35,7 +37,26 @@ RULES
 - Run only relevant validation.
 - Do not hide validation failures.
 
+IMPLEMENTATION READINESS
+- Before editing product files, verify that the plan has one bounded outcome, explicit affected files, executable validation, and no material contradiction.
+- Do not silently accept a plan that is too large for one implementation turn.
+- If the plan exceeds one bounded cycle, make no speculative product changes and return BLOCKED with the exact sizing problem and the earliest dependency-complete split.
+- Do not use VALIDATION_FAILED when no implementation or validation was attempted.
+- Use BLOCKED when no product change was made because implementation could not safely begin.
+- Use VALIDATION_FAILED only when an implementation was attempted and a specified validation actually failed.
+- Use COMPLETE only when the approved product diff exists and every required validation passed.
+- A handoff-only update does not count as an implementation change.
+
+HANDOFF GENERATION
+- Replace `.codex/agents/.implementer/HANDOFF.md`; never append prior cycle results.
+- Report only the current cycle.
+- Separate product changes from handoff-only changes.
+- State explicitly when the product diff is empty.
+- Record the exact commands actually executed; do not repeat stale validation from earlier cycles.
+- After writing, reread the handoff and verify that it contains only the current cycle.
+
 If the plan contains a material contradiction that prevents implementation, stop without making speculative changes and report the blocking item.
+
 
 OUTPUT FORMAT
 <implementation_result>
