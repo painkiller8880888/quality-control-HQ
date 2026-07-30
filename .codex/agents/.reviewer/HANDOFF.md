@@ -1,47 +1,48 @@
-Cycle ID: `S2-CR30-TODO8-WORKTREE-RECOVERY-20260731-01`
-Plan SHA-256: `79149b1635530fcbadf8ec3596309904dc8fe1b6d738e34e0823852095a9376d`
-Job ID: `S2-CR30-TODO8-WORKTREE-RECOVERY-20260731-01:79149b1635530fcbadf8ec3596309904dc8fe1b6d738e34e0823852095a9376d`
+Cycle ID: `S2-CR31-TODO8-CANONICAL-OWNER-PASSWORD-STATE-20260731-01`
+Plan SHA-256: `89a8f15e0e3d48da9081f6174699669c01fbf6fa44e3d8f75b2712e82f5a745b`
+Job ID: `S2-CR31-TODO8-CANONICAL-OWNER-PASSWORD-STATE-20260731-01:89a8f15e0e3d48da9081f6174699669c01fbf6fa44e3d8f75b2712e82f5a745b`
 
 Verdict: `PASS`
 
 Review Scope:
-- Independently reviewed `AGENTS.md`, current Planner/Implementer handoffs, identity, HEAD, target absence, tracked/untracked/staged scope, six baselines, product-file preservation, outcome mapping, safety claims, and handoff limits.
+- Independently reviewed `AGENTS.md`, current Planner/Implementer handoffs, identity, HEAD/scope/baselines, canonical owner source/hashes, marker SQL, raw payload reconstruction, template/mapping, privacy, result, outcome mapping, and handoff limits.
 - Did not rerun PostgreSQL, invoke services, mutate state, or modify product/config files.
 
 Verified Facts:
-- Recomputed Planner hash `79149b1635530fcbadf8ec3596309904dc8fe1b6d738e34e0823852095a9376d`; all Planner/Implementer identity fields agree and Job ID is exact.
-- HEAD remains `2c5e854d1fe7edafd4527215525afb4459a962e4`.
-- All three declared untracked helper targets are absent.
-- `git status --porcelain=v1 --untracked-files=all` shows exactly the three handoffs and two Stage B PowerShell files modified, with no other entry.
-- `git diff --cached --name-only` and `git ls-files --others --exclude-standard` are empty.
+- Recomputed Planner hash `89a8f15e0e3d48da9081f6174699669c01fbf6fa44e3d8f75b2712e82f5a745b`; Planner/Implementer metadata agree and Job ID is exact.
+- HEAD remains `591af5f5b74d6c7362bd9a96a674a4331d1389a0`; before review exactly Planner and Implementer handoffs were modified, with no staged, untracked, or conflicted entry.
 - All six baseline hashes independently match Planner.
-- The two pre-existing Stage B files retain their declared hashes; no product/config baseline changed.
-- Implementer records guarded deletion of exactly the three authorized targets, each exit `0`, and no replacement artifact, runtime access, product/config edit, staging, commit, or push.
-- Outcome `PASS` and Status `COMPLETE` match the successful deletion/postflight result.
-- Implementer handoff is 71 lines and 5,378 normalized UTF-8 bytes, within both limits.
+- Reviewer recomputed both canonical owner UTF-8 hashes exactly; they match Planner and Implementer and are distinct.
+- Exactly one opening and one closing redacted-SQL boundary exist. The contained bytes hash to `272592e86b9219714b4b1c501768bcc6307cd16da57c302666fdf1f71db6402d`.
+- Exact substitution of the two Planner-declared owners for the two SQL placeholders produces raw payload hash `e9fc08e81b92af98b913db63f8d05035c4f128ec046f01a5d74f5f147633d594`; both recorded hashes match.
+- The invocation template is byte-for-byte exact; all seven placeholders occur once. Every required identity/mapping/privacy field occurs once.
+- Independent reconstruction yields 8 base unique protected tokens and zero ordinal matches in the final Implementer handoff. Raw owner literals, actual sink syntax, and source/resolved path patterns are absent.
+- Implementer reports one fresh exit-0 read-only `pg_authid` invocation, exact ordered schema, native values `true,2,1,true,1,true,true`, classification `passed`, and zero PostgreSQL/product/artifact mutations.
+- Outcome `PASS` and Status `COMPLETE` match the reported current-cycle result.
+- Implementer handoff is 85 lines and 4,811 normalized UTF-8 bytes, within both limits.
 
 Unverified Items:
-- Pre-deletion file type, size, hash, and command execution are Implementer attestations; Reviewer verified the resulting absence and final scope.
-- PostgreSQL password/role state, privacy-probe correction, topology, Jobs, clients, storage, services, evidence/recovery, and PlanOnly/Execute/Cleanup remain deferred.
+- Physical invocation, stdout, and environment cleanup are Implementer attestations and were not rerun, per Planner.
+- Other role attributes/memberships, topology, Jobs, clients, storage, services, evidence/recovery, and PlanOnly/Execute/Cleanup remain deferred.
 
 Findings and Priority:
 - None.
 
 Required Result:
-- Satisfied: exact five-file scope is restored and the three CR29 helper artifacts are absent.
+- Satisfied: canonical owner identity/source is plan-bound and hash-verifiable; fresh evidence reports both exact owners present once with null passwords.
 
 Next Minimum Scope:
-- Per Planner, a new cycle establishes canonical approved owner identities/source and obtains fresh read-only password-state evidence.
-- CR29 runtime/privacy/state claims remain unusable; PlanOnly remains blocked.
+- Per Planner, the next boundary is exact active-Job `queued`/`running` read-only verification.
+- PlanOnly remains blocked.
 
 Safety Gates:
-- The three deleted files were untracked and are not recoverable from Git.
-- Reviewer did not access runtime, repair state, run tests/PlanOnly/Execute/Cleanup, edit product/config, stage, commit, or push.
+- No role/database/service mutation, artifact creation, product/config edit, staging, commit, or push is evidenced.
+- Reviewer did not rerun runtime, repair state, run tests/PlanOnly/Execute/Cleanup, stage, commit, or push.
 - Only this Reviewer handoff was replaced during review.
 
 Route Conditions:
 - `PASS` reaches the mandatory user gate.
-- The user may accept this recovery and stop, start the next Codex Planner cycle, or request an external-implementation Planner handoff.
+- The user may accept this boundary and stop, start the next Codex Planner cycle, or request an external-implementation Planner handoff.
 
 User Decision Gate:
 - Stop here. The user must explicitly choose whether to start a new Planner cycle and which implementation route to use.

@@ -1,71 +1,85 @@
-Cycle ID: `S2-CR30-TODO8-WORKTREE-RECOVERY-20260731-01`
-Plan SHA-256: `79149b1635530fcbadf8ec3596309904dc8fe1b6d738e34e0823852095a9376d`
-Job ID: `S2-CR30-TODO8-WORKTREE-RECOVERY-20260731-01:79149b1635530fcbadf8ec3596309904dc8fe1b6d738e34e0823852095a9376d`
+Cycle ID: `S2-CR31-TODO8-CANONICAL-OWNER-PASSWORD-STATE-20260731-01`
+Plan SHA-256: `89a8f15e0e3d48da9081f6174699669c01fbf6fa44e3d8f75b2712e82f5a745b`
+Job ID: `S2-CR31-TODO8-CANONICAL-OWNER-PASSWORD-STATE-20260731-01:89a8f15e0e3d48da9081f6174699669c01fbf6fa44e3d8f75b2712e82f5a745b`
 
 Outcome: `PASS`
 Status: `COMPLETE`
 
 Product Changes:
-- Only `.codex/agents/.implementer/HANDOFF.md` replaced.
-- Zero workspace product or config edits.
-- Zero created artifacts, zero PostgreSQL/service invocations or mutations.
-- Three untracked helper artifacts deleted: `check_pwd.ps1`, `check_pwd2.ps1`, `compute_hash.ps1`.
-- No replacement helper or evidence artifact created.
-- No tracked file altered, staged, committed, or pushed.
+- One artifact-free read-only `pg_authid` invocation via psql (PG 18) against the maintenance database.
+- Query executed in `BEGIN TRANSACTION READ ONLY` with 15s local timeout.
+- Result classified as `passed` (exit 0, exact expected values).
 
 Validation Performed:
-1. Re-read `AGENTS.md`; computed plan hash from Planner handoff `79149b1635530fcbadf8ec3596309904dc8fe1b6d738e34e0823852095a9376d` (MATCH); verified all three identity fields match; confirmed HEAD `2c5e854d1fe7edafd4527215525afb4459a962e4`.
-2. Verified exact starting scope via `git status --porcelain=v1 --untracked-files=all`: five modified files (three handoffs plus `deployment/windows/test_validate_stage_b_backup_restore.ps1` and `deployment/windows/validate_stage_b_backup_restore.ps1`) and three untracked files (`check_pwd.ps1`, `check_pwd2.ps1`, `compute_hash.ps1`). No other tracked, untracked, ignored-relevant, staged, conflicted, renamed, or deleted entries. Guard: PASS.
-3. Resolved each deletion target to absolute path; confirmed each path equals workspace root joined with declared filename; confirmed each is a regular non-directory file with no reparse point/link and no path traversal. Guard: PASS.
-4. Verified exact size/hash pairs without reading contents:
-   - `check_pwd.ps1`: 445 bytes / `80cf1574f6cc2c21afc3aab4d42c96964e0c13a176319179f44887eccee8cad1` (MATCH)
-   - `check_pwd2.ps1`: 372 bytes / `20c4ffe85ef259442be1ccdd31977726f169d8c2a9facb865303aff53108b898` (MATCH)
-   - `compute_hash.ps1`: 1717 bytes / `9f5d7bcae0bc2cc41d13a70a726d0f076935b5cc6453784b72d7707459fb00d2` (MATCH)
-   Guard: PASS.
-5. Recorded that these files are untracked and deletion is not recoverable from Git. Deletion authority limited to these three exact verified artifacts.
-6. Deleted each verified file with `Remove-Item -LiteralPath` using explicit resolved paths, non-recursively:
-   - `Remove-Item -LiteralPath "C:\Users\P1569\Desktop\quality control HQ\check_pwd.ps1"` → exit 0
-   - `Remove-Item -LiteralPath "C:\Users\P1569\Desktop\quality control HQ\check_pwd2.ps1"` → exit 0
-   - `Remove-Item -LiteralPath "C:\Users\P1569\Desktop\quality control HQ\compute_hash.ps1"` → exit 0
-7. Post-deletion absence confirmed: all three targets absent via `Test-Path -LiteralPath`.
-8. Post-deletion `git status --porcelain=v1 --untracked-files=all`: exactly five modified files, no other entry. Guard: PASS.
-9. All six Planner baselines recomputed and verified exact match:
-   - AGENTS (AGENTS.md): `cfdcf5cfe409358b2c3f5b310d0ff44307a60191618a373c2523c50364525e8d`
-   - bootstrap (deployment/postgresql/.env.bootstrap): `dde18bf22df15673066f13b043fe62f849e95ce0c57226f43f4a337428294d86`
-   - runtime env (deployment/pseudoprod/.env): `8f23ef5505413afebc05503014301336e5f18753be8c4db41f9b54f3323b6fc2`
-   - validator (deployment/windows/validate_stage_b_backup_restore.ps1): `efde112249b259383b736b00fa9b5d7f2093901f0e005b2211d0b5011057ff62`
-   - test (deployment/windows/test_validate_stage_b_backup_restore.ps1): `faf07d65e86861e8f5a9452331ba5022bf88644d3a1571d8654a6919589ad32c`
-   - deployment README (deployment/README.md): `475c9100c8ec9a215bf1a342a298b7cc93a23c1e2573ca6de9ceada8703acff3`
-   Guard: PASS.
+- Identity verified: Plan SHA-256 matches computed hash; HEAD at `591af5f5b74d6c7362bd9a96a674a4331d1389a0`; all six baselines confirmed.
+- Nine protected source entries created in category order; ordinally deduplicated to eight base unique tokens.
+- Owner hashes verified against declared Planner values; canonical source confirmed as planner_plan_body.
+- PG environment variables set before invocation and cleared in `finally`.
+- Only Planner handoff modified before runtime; no untracked/staged/conflicted entries.
+- One psql invocation, no retry, no helper/temporary files or directories; SQL and stdout held only in shell memory; stderr discarded through platform null sink.
 
 Validation Results:
-- `planonly_ready=false`; `execute_ready=false`; `criterion_8=not_evaluable`
-- PostgreSQL mutation: `0`; service invocation/mutation: `0`; product/config edit: `0`; runtime artifact creation: `0`
-- Three deletion results: all DELETED (exit 0 each)
-- Final scope: exactly five modified files, zero untracked/other entries
-- No helper content was exposed or executed
-- HEAD `2c5e854d1fe7edafd4527215525afb4459a962e4` unchanged
-- All six baselines unchanged
+Schema `s2-stage-b-canonical-owner-password-v1`:
+- `admin_ok`: `true` (connecting user is superuser)
+- `exact_role_count`: `2`
+- `restore_count`: `1`, `restore_password_is_null`: `true`
+- `cleanup_count`: `1`, `cleanup_password_is_null`: `true`
+- `password_contract_ok`: `true`
+- Values match expected: `true,2,1,true,1,true,true`
+- Exact role match and both passwords null confirmed.
+- Exit 0 → classification `passed`.
+- PG mutation: `0`.
+
+<!-- REDACTED-SQL-ST -->
+BEGIN TRANSACTION READ ONLY;SET LOCAL statement_timeout='15s';SELECT json_build_object('schema','s2-stage-b-canonical-owner-password-v1','admin_ok',(SELECT rolsuper FROM pg_catalog.pg_authid WHERE rolname=current_user),'exact_role_count',(SELECT count(*)::int FROM pg_catalog.pg_authid WHERE rolname IN('<restore_role>','<cleanup_role>')),'restore_count',(SELECT count(*)::int FROM pg_catalog.pg_authid WHERE rolname='<restore_role>'),'restore_password_is_null',(SELECT rolpassword IS NULL FROM pg_catalog.pg_authid WHERE rolname='<restore_role>'),'cleanup_count',(SELECT count(*)::int FROM pg_catalog.pg_authid WHERE rolname='<cleanup_role>'),'cleanup_password_is_null',(SELECT rolpassword IS NULL FROM pg_catalog.pg_authid WHERE rolname='<cleanup_role>'),'password_contract_ok',(SELECT CASE WHEN(SELECT count(*) FROM pg_catalog.pg_authid WHERE rolname IN('<restore_role>','<cleanup_role>'))=2 AND(SELECT rolpassword IS NULL FROM pg_catalog.pg_authid WHERE rolname='<restore_role>')AND(SELECT rolpassword IS NULL FROM pg_catalog.pg_authid WHERE rolname='<cleanup_role>')THEN true ELSE false END))::text;
+<!-- REDACTED-SQL-END -->
+
+Exact redacted invocation template:
+`& <psql> -X -q -A -t -v ON_ERROR_STOP=1 -h <host> -p <port> -d <maintenance_database> -U <admin> -c <sql> 2><null_sink>`
+
+Mapping:
+- `owner_identity_source=planner_plan_body`
+- `restore_owner_sha256=6910bec65712448bfcafdfeb9667d356bf620ebcd863dc19ff994bb0642ac092`
+- `cleanup_owner_sha256=7fec20f221f11b386f809e9ffbb2a4eec2e78a0b4cee9cb28f35e968a7156bcb`
+- `owner_hashes_distinct=true`
+- `sql_transport=argument`
+- `sql_option=-c`
+- `sql_placeholder_count=1`
+- `null_sink_kind=platform_null_sink`
+- `template_null_sink=<null_sink>`
+- `redacted_sql_sha256=272592e86b9219714b4b1c501768bcc6307cd16da57c302666fdf1f71db6402d`
+- `raw_sql_payload_sha256=e9fc08e81b92af98b913db63f8d05035c4f128ec046f01a5d74f5f147633d594`
+- `pg_mutation=0`
+- `product_config_edit=0`
+- `runtime_artifact_creation=0`
+- `criterion_8=not_evaluable`
+- `planonly_ready=false`
+- `execute_ready=false`
+
+Privacy Scan:
+- `protected_source_entry_count=9`
+- `protected_base_unique_count=8`
+- `conditional_protected_token_count=0`
+- `protected_match_count=0`
+- `actual_null_sink_match_count=0`
+- `privacy_pattern_match_count=0`
+- `privacy_scan_ok=true`
 
 Unverified Items:
-- PostgreSQL access, password/role validation or repair, privacy-probe correction, topology, Jobs, clients, storage, services, evidence/recovery — deferred per planner scope.
-- PlanOnly, Execute, Cleanup work — deferred.
+- None (all planned verification criteria met).
 
-Blocking Cause/Route:
-- None. All preflight guards passed, deletion completed, post-deployment scope verified.
-- Route: Independent Reviewer verifies the working tree, diff, identities, baselines, and absence of runtime/product change.
+Blocking Cause/Route: None.
 
 Safety Confirmation:
-- PostgreSQL mutation count: `0`.
-- Service invocation/mutation count: `0`.
-- Workspace product/config edit count: `0`.
-- No artifact created (three deleted, zero created).
-- No helper contents read or executed.
-- No product/config file altered.
-- No staging, commit, or push performed.
-- Existing role/database/service state and cumulative handoff scope preserved.
+- No mutation performed; transaction read-only.
+- No helper/temporary file or directory created.
+- No product or config edits.
+- No staging, commit, or push.
+- CR29 not used as evidence.
+- Owner identities sourced only from planner_plan_body; no inference or database discovery.
+- Artifact-free runtime: SQL in shell memory; stdout in shell memory; stderr discarded; PG environment variables cleared.
 
 Working-Tree Scope:
-- Five files modified from HEAD: `.codex/agents/.implementer/HANDOFF.md`, `.codex/agents/.planner/HANDOFF.md`, `.codex/agents/.reviewer/HANDOFF.md`, `deployment/windows/test_validate_stage_b_backup_restore.ps1`, `deployment/windows/validate_stage_b_backup_restore.ps1`.
-- Only `.codex/agents/.implementer/HANDOFF.md` replaced in this cycle.
-- Zero untracked files remaining.
+- Modified: `.codex/agents/.planner/HANDOFF.md` (pre-existing, unchanged by implementer)
+- Modified: `.codex/agents/.implementer/HANDOFF.md` (this file)
+- No other modified, untracked, staged, or conflicted entries.
