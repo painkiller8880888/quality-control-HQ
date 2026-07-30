@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([switch]$PlanOnly,[switch]$Execute,[switch]$Cleanup,[string]$ApprovalPath,[string]$PendingManifestPath,[string]$EvidenceRoot)
+param([switch]$PlanOnly,[switch]$Execute,[switch]$Cleanup,[string]$ApprovalPath,[string]$PendingManifestPath,[string]$EvidenceRoot,[string]$CleanupEvidenceRoot)
 $ErrorActionPreference='Stop'; Set-StrictMode -Version Latest
 
 function Get-StageBSha256([string]$Path) { (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant() }
@@ -69,6 +69,24 @@ function Assert-StageBAdapter($Adapter) {
     if($callback -isnot [scriptblock]){throw 'invalid adapter contract'}
     $actual=@($callback.Ast.ParamBlock.Parameters|ForEach-Object {$_.Name.VariablePath.UserPath})
     if(($actual -join "`0") -cne (@($contract[$name])-join "`0")){throw 'invalid adapter contract'}
+  }
+}
+function Assert-StageBRuntimeProvider($Provider) {
+  $contract=[ordered]@{
+    Snapshot=@('target','mode','expectedSourceOidHash')
+    Catalog=@('target')
+    Process=@('operation','arguments','environment')
+    Service=@('action','service')
+    State=@('manifest')
+    CreateRestore=@('target','ownerHash')
+    DropRestore=@('target','ownerHash')
+  }
+  if($Provider -isnot [Collections.IDictionary] -or (@($Provider.Keys|Sort-Object)-join "`0") -cne (@($contract.Keys|Sort-Object)-join "`0")){throw 'invalid runtime provider contract'}
+  foreach($name in $contract.Keys){
+    $callback=$Provider[$name]
+    if($callback -isnot [scriptblock]){throw 'invalid runtime provider contract'}
+    $actual=@($callback.Ast.ParamBlock.Parameters|ForEach-Object {$_.Name.VariablePath.UserPath})
+    if(($actual -join "`0") -cne (@($contract[$name])-join "`0")){throw 'invalid runtime provider contract'}
   }
 }
 function Assert-StageBResult($Value,[string[]]$Fields) { Assert-StageBPropertySet $Value $Fields; $s=$Value.success; if($s -isnot [bool] -or $s -ne $true){throw 'callback failed'} }
@@ -161,13 +179,34 @@ function New-StageBPendingFromReadOnlyData($Configuration,$ActiveJobs) {
     execution_state='pending'
   }
 }
-function New-StageBProductionAdapter([scriptblock]$ConfigurationProvider,[scriptblock]$JobsProvider) {
+function New-StageBProductionAdapter([scriptblock]$ConfigurationProvider,[scriptblock]$JobsProvider,$RuntimeProvider) {
+  if($null -ne $RuntimeProvider){Assert-StageBRuntimeProvider $RuntimeProvider}
   if($null -eq $ConfigurationProvider){$ConfigurationProvider={param() if(-not $env:STAGE_B_PENDING_CONFIG){throw 'missing'}; $env:STAGE_B_PENDING_CONFIG|ConvertFrom-Json}}
   if($null -eq $JobsProvider){$JobsProvider={param() $configuration=& $ConfigurationProvider; Assert-StageBPropertySet $configuration @('manifest','active_jobs'); Assert-StageBJobsValue $configuration.active_jobs}.GetNewClosure()}
   $pending={param() try {$configuration=& $ConfigurationProvider; if($configuration.psobject.Properties.Name -contains 'manifest'){Assert-StageBPropertySet $configuration @('manifest','active_jobs'); $configuration=$configuration.manifest}; $manifest=New-StageBPendingFromReadOnlyData $configuration (& $JobsProvider); Test-StageBManifest $manifest; $manifest} catch {throw 'pending configuration invalid'}}.GetNewClosure()
-  $runProcess={param($operation,$arguments,$environment) $psi=[Diagnostics.ProcessStartInfo]::new(); $psi.FileName=$operation; $psi.UseShellExecute=$false; $psi.RedirectStandardOutput=$true; $psi.RedirectStandardError=$true; foreach($argument in @($arguments)){$null=$psi.ArgumentList.Add([string]$argument)}; foreach($key in $environment.Keys){$psi.Environment[$key]=[string]$environment[$key]}; $p=[Diagnostics.Process]::Start($psi); $p.WaitForExit(); [pscustomobject]@{success=($p.ExitCode -eq 0);exit_code=$p.ExitCode;size=0;hash=$null}}
   $jobs={param() & $JobsProvider}.GetNewClosure()
-  $adapter=@{Pending=$pending;Process=$runProcess;Snapshot={param($target,$mode,$expectedSourceOidHash) throw 'snapshot configuration unavailable'};Catalog={param($target) throw 'catalog configuration unavailable'};Service={param($action,$service) throw 'service configuration unavailable'};Jobs=$jobs;State={param($manifest) throw 'runtime state configuration unavailable'};CreateRestore={param($target,$ownerHash) throw 'create configuration unavailable'};DropRestore={param($target,$ownerHash) throw 'drop configuration unavailable'}}
+  if($null -eq $RuntimeProvider){
+    $adapter=@{Pending=$pending;Process={param($operation,$arguments,$environment) throw 'process configuration unavailable'};Snapshot={param($target,$mode,$expectedSourceOidHash) throw 'snapshot configuration unavailable'};Catalog={param($target) throw 'catalog configuration unavailable'};Service={param($action,$service) throw 'service configuration unavailable'};Jobs=$jobs;State={param($manifest) throw 'runtime state configuration unavailable'};CreateRestore={param($target,$ownerHash) throw 'create configuration unavailable'};DropRestore={param($target,$ownerHash) throw 'drop configuration unavailable'}}
+  } else {
+    $snapshotProvider=$RuntimeProvider.Snapshot
+    $catalogProvider=$RuntimeProvider.Catalog
+    $processProvider=$RuntimeProvider.Process
+    $serviceProvider=$RuntimeProvider.Service
+    $stateProvider=$RuntimeProvider.State
+    $createRestoreProvider=$RuntimeProvider.CreateRestore
+    $dropRestoreProvider=$RuntimeProvider.DropRestore
+    $adapter=@{
+      Pending=$pending
+      Snapshot={param($target,$mode,$expectedSourceOidHash) & $snapshotProvider $target $mode $expectedSourceOidHash}.GetNewClosure()
+      Catalog={param($target) & $catalogProvider $target}.GetNewClosure()
+      Process={param($operation,$arguments,$environment) & $processProvider $operation $arguments $environment}.GetNewClosure()
+      Service={param($action,$service) & $serviceProvider $action $service}.GetNewClosure()
+      Jobs=$jobs
+      State={param($manifest) & $stateProvider $manifest}.GetNewClosure()
+      CreateRestore={param($target,$ownerHash) & $createRestoreProvider $target $ownerHash}.GetNewClosure()
+      DropRestore={param($target,$ownerHash) & $dropRestoreProvider $target $ownerHash}.GetNewClosure()
+    }
+  }
   Assert-StageBAdapter $adapter
   $adapter
 }
@@ -212,7 +251,46 @@ function Invoke-StageBSequence($Manifest,$Adapter) {
   }
   $result
 }
-function Invoke-StageBCleanup($Manifest,$Adapter,$FinalEvidence,[string]$ManifestHash) { Test-StageBManifest $Manifest; Assert-StageBAdapter $Adapter; Assert-StageBCurrentState $Manifest (Get-StageBCurrentState $Manifest $Adapter); Assert-StageBPropertySet $FinalEvidence @('status','dump_hash','manifest_sha256'); if($FinalEvidence.status -cne 'success' -or -not(Test-StageBHash $FinalEvidence.dump_hash) -or -not(Test-StageBHash $FinalEvidence.manifest_sha256) -or -not(Test-StageBConstantTimeBytes ([Text.Encoding]::UTF8.GetBytes($FinalEvidence.manifest_sha256)) ([Text.Encoding]::UTF8.GetBytes($ManifestHash)))){throw 'invalid final evidence'}; $catalog=& $Adapter.Catalog $Manifest.restore; if($catalog.state -ne 'eligible' -or $catalog.oid_hash -cne $Manifest.restore.oid_hash -or $catalog.owner_hash -cne $Manifest.owners.restore_owner_hash -or [int]$catalog.connections -ne 0){throw 'cleanup guard failed'}; & $Adapter.DropRestore $Manifest.restore $Manifest.owners.cleanup_owner_hash; $after=& $Adapter.Catalog $Manifest.restore; if($after.state -ne 'absent'){throw 'cleanup verification failed'}; @{status='success';live_blocked=$true;criterion_8='not_evaluable';dump_hash=$FinalEvidence.dump_hash} }
+function Assert-StageBExactZeroJobs($Value) {
+  if($Value -isnot [System.Int32] -or $Value -ne 0){throw 'cleanup jobs guard failed'}
+}
+function Assert-StageBRetainedDump($Value,[string]$ExpectedHash) {
+  Assert-StageBPropertySet $Value @('success','exit_code','size','hash')
+  if($Value.success -isnot [System.Boolean] -or $Value.success -ne $true -or $Value.exit_code -isnot [System.Int32] -or $Value.exit_code -ne 0 -or $Value.size -isnot [System.Int64] -or $Value.size -le 0 -or -not(Test-StageBHash $Value.hash) -or -not(Test-StageBConstantTimeBytes ([Text.Encoding]::UTF8.GetBytes($Value.hash)) ([Text.Encoding]::UTF8.GetBytes($ExpectedHash)))){throw 'retained dump validation failed'}
+}
+function Assert-StageBCleanupCatalog($Value,[string]$State,$Manifest) {
+  Assert-StageBCatalog $Value
+  if($State -ceq 'eligible'){
+    if($Value.state -cne 'eligible' -or $Value.oid_hash -cne $Manifest.restore.oid_hash -or $Value.owner_hash -cne $Manifest.owners.restore_owner_hash -or $Value.connections -isnot [System.Int32] -or $Value.connections -ne 0){throw 'cleanup catalog guard failed'}
+  } elseif($State -ceq 'absent'){
+    if($Value.state -cne 'absent' -or $null -ne $Value.oid_hash -or $null -ne $Value.owner_hash -or $Value.connections -isnot [System.Int32] -or $Value.connections -ne 0){throw 'cleanup verification failed'}
+  } else {throw 'cleanup catalog guard failed'}
+}
+function Invoke-StageBCleanup($Manifest,$Adapter,$ExecutionEvidence,[string]$ManifestHash,[string]$ExecutionHash) {
+  Test-StageBManifest $Manifest
+  Assert-StageBAdapter $Adapter
+  Assert-StageBExecutionEvidence $ExecutionEvidence $ManifestHash
+  if($ExecutionEvidence.status -cne 'success' -or -not(Test-StageBHash $ExecutionHash)){throw 'invalid execution evidence'}
+  Assert-StageBCurrentState $Manifest (Get-StageBCurrentState $Manifest $Adapter)
+  $retainedBefore=& $Adapter.Process 'retained_dump' @() @{}
+  Assert-StageBRetainedDump $retainedBefore $ExecutionEvidence.dump_hash
+  $catalog=& $Adapter.Catalog $Manifest.restore
+  Assert-StageBCleanupCatalog $catalog 'eligible' $Manifest
+  Assert-StageBExactZeroJobs (& $Adapter.Jobs)
+  $dropped=& $Adapter.DropRestore $Manifest.restore $Manifest.owners.cleanup_owner_hash
+  Assert-StageBResult $dropped @('success')
+  $after=& $Adapter.Catalog $Manifest.restore
+  Assert-StageBCleanupCatalog $after 'absent' $Manifest
+  $retainedAfter=& $Adapter.Process 'retained_dump' @() @{}
+  Assert-StageBRetainedDump $retainedAfter $ExecutionEvidence.dump_hash
+  if($retainedAfter.size -ne $retainedBefore.size){throw 'retained dump validation failed'}
+  [pscustomobject][ordered]@{
+    status='success';live_blocked=$true;criterion_8='not_evaluable';manifest_sha256=$ManifestHash;execution_sha256=$ExecutionHash
+    dump_hash=$ExecutionEvidence.dump_hash;dump_size=[int64]$retainedAfter.size;restore_oid_hash=$Manifest.restore.oid_hash
+    restore_owner_hash=$Manifest.owners.restore_owner_hash;cleanup_owner_hash=$Manifest.owners.cleanup_owner_hash
+    restore_state='absent';drop_count=[int]1
+  }
+}
 function Assert-StageBExecutionEvidence($Evidence,[string]$ManifestHash) {
   Assert-StageBPropertySet $Evidence @('status','dump_hash','manifest_sha256')
   if($Evidence.status -isnot [System.String] -or $Evidence.status -cnotin @('success','failed') -or -not(Test-StageBHash $Evidence.manifest_sha256)){throw 'invalid execution evidence'}
@@ -243,7 +321,7 @@ function Assert-StageBEvidenceBundle([string]$Root,[string]$ManifestHash) {
   if((ConvertTo-StageBCanonicalJson $parsed)+"`n" -cne $json){throw 'execution evidence verification failed'}
   $parsed
 }
-function Publish-StageBExecutionBundle([string]$EvidenceRoot,$SequenceResult,[string]$ManifestHash,[scriptblock]$PostWriteHook) {
+function Publish-StageBExecutionBundle([string]$EvidenceRoot,$SequenceResult,[string]$ManifestHash,[scriptblock]$PostWriteHook,[scriptblock]$PreWriteHook) {
   $temporary=$null
   $published=$false
   try {
@@ -257,7 +335,9 @@ function Publish-StageBExecutionBundle([string]$EvidenceRoot,$SequenceResult,[st
     $evidence=New-StageBExecutionEvidence $SequenceResult $ManifestHash
     $executionPath=Join-Path $temporary 'execution.json'
     $checksumPath=Join-Path $temporary 'checksums.sha256'
+    if($null -ne $PreWriteHook){& $PreWriteHook $executionPath}
     [IO.File]::WriteAllText($executionPath,(ConvertTo-StageBCanonicalJson $evidence)+"`n",[Text.UTF8Encoding]::new($false))
+    if($null -ne $PreWriteHook){& $PreWriteHook $checksumPath}
     [IO.File]::WriteAllText($checksumPath,((Get-StageBSha256 $executionPath)+'  execution.json'+"`n"),[Text.UTF8Encoding]::new($false))
     if($null -ne $PostWriteHook){& $PostWriteHook $executionPath $checksumPath}
     $null=Assert-StageBEvidenceBundle $temporary $ManifestHash
@@ -268,6 +348,66 @@ function Publish-StageBExecutionBundle([string]$EvidenceRoot,$SequenceResult,[st
     Assert-StageBEvidenceBundle $final $ManifestHash
   } catch {
     if($published -and $null -ne $final -and (Test-Path -LiteralPath $final)){Remove-Item -LiteralPath $final -Recurse -Force}
+    throw 'stage_b_operation_failed'
+  } finally {
+    if($null -ne $temporary -and (Test-Path -LiteralPath $temporary)){Remove-Item -LiteralPath $temporary -Recurse -Force}
+  }
+}
+function Assert-StageBCleanupEvidence($Evidence,[string]$ManifestHash,[string]$ExecutionHash) {
+  Assert-StageBPropertySet $Evidence @('status','live_blocked','criterion_8','manifest_sha256','execution_sha256','dump_hash','dump_size','restore_oid_hash','restore_owner_hash','cleanup_owner_hash','restore_state','drop_count')
+  if($Evidence.status -isnot [System.String] -or $Evidence.status -cne 'success' -or $Evidence.live_blocked -isnot [System.Boolean] -or $Evidence.live_blocked -ne $true -or $Evidence.criterion_8 -isnot [System.String] -or $Evidence.criterion_8 -cne 'not_evaluable' -or $Evidence.dump_size -isnot [System.Int64] -or $Evidence.dump_size -le 0 -or $Evidence.restore_state -isnot [System.String] -or $Evidence.restore_state -cne 'absent' -or $Evidence.drop_count -isnot [System.Int32] -or $Evidence.drop_count -ne 1){throw 'cleanup evidence verification failed'}
+  foreach($name in @('manifest_sha256','execution_sha256','dump_hash','restore_oid_hash','restore_owner_hash','cleanup_owner_hash')){if(-not(Test-StageBHash $Evidence.$name)){throw 'cleanup evidence verification failed'}}
+  if(-not(Test-StageBConstantTimeBytes ([Text.Encoding]::UTF8.GetBytes($Evidence.manifest_sha256)) ([Text.Encoding]::UTF8.GetBytes($ManifestHash))) -or -not(Test-StageBConstantTimeBytes ([Text.Encoding]::UTF8.GetBytes($Evidence.execution_sha256)) ([Text.Encoding]::UTF8.GetBytes($ExecutionHash)))){throw 'cleanup evidence verification failed'}
+}
+function Assert-StageBCleanupBundle([string]$Root,[string]$ManifestHash,[string]$ExecutionHash) {
+  $items=@(Get-ChildItem -LiteralPath $Root -Force)
+  if($items.Count -ne 2 -or (@($items.Name|Sort-Object)-join "`0") -cne (@(@('checksums.sha256','cleanup.json')|Sort-Object)-join "`0") -or @($items|Where-Object {-not $_.PSIsContainer}).Count -ne 2){throw 'cleanup evidence verification failed'}
+  $cleanupPath=Join-Path $Root 'cleanup.json'
+  $checksumPath=Join-Path $Root 'checksums.sha256'
+  try {
+    $utf8=[Text.UTF8Encoding]::new($false,$true)
+    $json=$utf8.GetString([IO.File]::ReadAllBytes($cleanupPath))
+    $checksum=$utf8.GetString([IO.File]::ReadAllBytes($checksumPath))
+  } catch {throw 'cleanup evidence verification failed'}
+  if($json -cnotmatch '^[^\r\n]+\n$' -or $checksum -cnotmatch '^([a-f0-9]{64})  cleanup\.json\n$'){throw 'cleanup evidence verification failed'}
+  $actual=Get-StageBSha256 $cleanupPath
+  if(-not(Test-StageBConstantTimeBytes ([Text.Encoding]::UTF8.GetBytes($Matches[1])) ([Text.Encoding]::UTF8.GetBytes($actual)))){throw 'cleanup evidence verification failed'}
+  try {
+    $parsed=$json|ConvertFrom-Json
+    if($parsed.dump_size -isnot [System.Int32] -and $parsed.dump_size -isnot [System.Int64]){throw 'cleanup evidence verification failed'}
+    if($parsed.drop_count -isnot [System.Int32]){throw 'cleanup evidence verification failed'}
+    $parsed.dump_size=[System.Int64]$parsed.dump_size
+    $parsed.drop_count=[System.Int32]$parsed.drop_count
+  } catch {throw 'cleanup evidence verification failed'}
+  Assert-StageBCleanupEvidence $parsed $ManifestHash $ExecutionHash
+  if((ConvertTo-StageBCanonicalJson $parsed)+"`n" -cne $json){throw 'cleanup evidence verification failed'}
+  $parsed
+}
+function Publish-StageBCleanupBundle([string]$CleanupRoot,$Evidence,[string]$ManifestHash,[string]$ExecutionHash,[scriptblock]$PostWriteHook,[scriptblock]$PreWriteHook) {
+  $temporary=$null
+  try {
+    if([string]::IsNullOrWhiteSpace($CleanupRoot)){throw 'invalid cleanup evidence destination'}
+    $final=[IO.Path]::GetFullPath($CleanupRoot)
+    $parent=[IO.Path]::GetDirectoryName($final)
+    $leaf=[IO.Path]::GetFileName($final)
+    if(-not $leaf -or -not(Test-Path -LiteralPath $parent -PathType Container) -or (Test-Path -LiteralPath $final)){throw 'invalid cleanup evidence destination'}
+    $temporary=Join-Path $parent ('.stage-b-cleanup-'+[guid]::NewGuid().ToString('n')+'.tmp')
+    New-Item -ItemType Directory -Path $temporary|Out-Null
+    Assert-StageBCleanupEvidence $Evidence $ManifestHash $ExecutionHash
+    $cleanupPath=Join-Path $temporary 'cleanup.json'
+    $checksumPath=Join-Path $temporary 'checksums.sha256'
+    if($null -ne $PreWriteHook){& $PreWriteHook $cleanupPath}
+    [IO.File]::WriteAllText($cleanupPath,(ConvertTo-StageBCanonicalJson $Evidence)+"`n",[Text.UTF8Encoding]::new($false))
+    if($null -ne $PreWriteHook){& $PreWriteHook $checksumPath}
+    [IO.File]::WriteAllText($checksumPath,((Get-StageBSha256 $cleanupPath)+'  cleanup.json'+"`n"),[Text.UTF8Encoding]::new($false))
+    if($null -ne $PostWriteHook){& $PostWriteHook $cleanupPath $checksumPath 'staged'}
+    $null=Assert-StageBCleanupBundle $temporary $ManifestHash $ExecutionHash
+    if(Test-Path -LiteralPath $final){throw 'invalid cleanup evidence destination'}
+    Move-Item -LiteralPath $temporary -Destination $final
+    $temporary=$null
+    if($null -ne $PostWriteHook){& $PostWriteHook (Join-Path $final 'cleanup.json') (Join-Path $final 'checksums.sha256') 'published'}
+    Assert-StageBCleanupBundle $final $ManifestHash $ExecutionHash
+  } catch {
     throw 'stage_b_operation_failed'
   } finally {
     if($null -ne $temporary -and (Test-Path -LiteralPath $temporary)){Remove-Item -LiteralPath $temporary -Recurse -Force}
@@ -306,7 +446,7 @@ function Publish-StageBPendingBundle([string]$ManifestPath,$Manifest,[scriptbloc
     foreach($temporary in @($manifestTemp,$checksumTemp)){if(Test-Path -LiteralPath $temporary){Remove-Item -LiteralPath $temporary -Force}}
   }
 }
-function Invoke-StageBMain([scriptblock]$AdapterFactory,[scriptblock]$PostWriteHook) {
+function Invoke-StageBMain([scriptblock]$AdapterFactory,[scriptblock]$PostWriteHook,[scriptblock]$PreWriteHook) {
   if(@($PlanOnly,$Execute,$Cleanup|Where-Object {$_}).Count -ne 1){throw 'Specify exactly one mode.'}
   if($null -eq $AdapterFactory){$AdapterFactory={param() New-StageBProductionAdapter}}
   if($Execute){
@@ -319,11 +459,33 @@ function Invoke-StageBMain([scriptblock]$AdapterFactory,[scriptblock]$PostWriteH
     Test-StageBApproval $approval $hash 'execute'
     try {$manifest=Get-Content -Raw -LiteralPath $PendingManifestPath|ConvertFrom-Json; Test-StageBManifest $manifest} catch {throw 'invalid pending manifest'}
   }
+  if($Cleanup){
+    try {
+      if([string]::IsNullOrWhiteSpace($CleanupEvidenceRoot)){throw 'invalid cleanup evidence destination'}
+      $cleanupFinal=[IO.Path]::GetFullPath($CleanupEvidenceRoot)
+      $cleanupParent=[IO.Path]::GetDirectoryName($cleanupFinal)
+      if(-not [IO.Path]::GetFileName($cleanupFinal) -or -not(Test-Path -LiteralPath $cleanupParent -PathType Container) -or (Test-Path -LiteralPath $cleanupFinal)){throw 'invalid cleanup evidence destination'}
+      if(-not $ApprovalPath -or -not $PendingManifestPath -or -not(Test-Path -LiteralPath $ApprovalPath -PathType Leaf)){throw 'explicit approval and manifest required'}
+      $hash=Get-StageBPendingManifestHash $PendingManifestPath
+      $approval=Get-Content -Raw -LiteralPath $ApprovalPath|ConvertFrom-Json
+      Test-StageBApproval $approval $hash 'cleanup'
+      $manifest=Get-Content -Raw -LiteralPath $PendingManifestPath|ConvertFrom-Json
+      Test-StageBManifest $manifest
+      if(-not(Test-StageBConstantTimeBytes ([Text.Encoding]::UTF8.GetBytes($approval.approver_hash)) ([Text.Encoding]::UTF8.GetBytes($manifest.owners.cleanup_owner_hash)))){throw 'cleanup owner mismatch'}
+      if([string]::IsNullOrWhiteSpace($EvidenceRoot)){throw 'invalid execution evidence'}
+      $execution=Assert-StageBEvidenceBundle ([IO.Path]::GetFullPath($EvidenceRoot)) $hash
+      if($execution.status -cne 'success'){throw 'invalid execution evidence'}
+      $executionHash=Get-StageBSha256 (Join-Path ([IO.Path]::GetFullPath($EvidenceRoot)) 'execution.json')
+    } catch {throw 'stage_b_operation_failed'}
+  }
   $adapter=& $AdapterFactory
   Assert-StageBAdapter $adapter
   if($PlanOnly){if(-not $PendingManifestPath){throw 'pending manifest path required'}; $manifest=New-StageBPendingManifest $adapter; Publish-StageBPendingBundle $PendingManifestPath $manifest $PostWriteHook; return}
-  if($Execute){$sequence=Invoke-StageBSequence $manifest $adapter; Publish-StageBExecutionBundle $EvidenceRoot $sequence $hash $PostWriteHook; return}
-  if(-not $ApprovalPath -or -not $PendingManifestPath -or -not(Test-Path -LiteralPath $ApprovalPath) -or -not(Test-Path -LiteralPath $PendingManifestPath)){throw 'explicit approval and manifest required'}; $hash=Get-StageBSha256 $PendingManifestPath; $approval=Get-Content -Raw -LiteralPath $ApprovalPath|ConvertFrom-Json; Test-StageBApproval $approval $hash $(if($Cleanup){'cleanup'}else{'execute'}); $manifest=Get-Content -Raw -LiteralPath $PendingManifestPath|ConvertFrom-Json
-  if($Cleanup){if(-not $EvidenceRoot){throw 'final evidence path required'}; $final=Get-Content -Raw -LiteralPath $EvidenceRoot|ConvertFrom-Json; Invoke-StageBCleanup $manifest $adapter $final $hash; return}; Invoke-StageBSequence $manifest $adapter
+  if($Execute){$sequence=Invoke-StageBSequence $manifest $adapter; Publish-StageBExecutionBundle $EvidenceRoot $sequence $hash $PostWriteHook $PreWriteHook; return}
+  if($Cleanup){
+    try {$cleanupEvidence=Invoke-StageBCleanup $manifest $adapter $execution $hash $executionHash; Publish-StageBCleanupBundle $CleanupEvidenceRoot $cleanupEvidence $hash $executionHash $PostWriteHook $PreWriteHook; return}
+    catch {throw 'stage_b_operation_failed'}
+  }
+  Invoke-StageBSequence $manifest $adapter
 }
 if($MyInvocation.InvocationName -ne '.'){Invoke-StageBMain}

@@ -1,47 +1,47 @@
-Cycle ID: `S2-CR08-TODO5-20260729-02`
-Plan SHA-256: `da39da32ef4d23deba6d486602b562f914ab808d3dc568fff691d9f2e5fa648f`
-Job ID: `S2-CR08-TODO5-20260729-02:da39da32ef4d23deba6d486602b562f914ab808d3dc568fff691d9f2e5fa648f`
+Cycle ID: `S2-CR30-TODO8-WORKTREE-RECOVERY-20260731-01`
+Plan SHA-256: `79149b1635530fcbadf8ec3596309904dc8fe1b6d738e34e0823852095a9376d`
+Job ID: `S2-CR30-TODO8-WORKTREE-RECOVERY-20260731-01:79149b1635530fcbadf8ec3596309904dc8fe1b6d738e34e0823852095a9376d`
 
-Verdict: `FAIL`
+Verdict: `PASS`
 
 Review Scope:
-- Independently reviewed the current Planner and Implementer handoffs, canonical plan identity, accepted `AGENTS.md` baseline, working-tree scope, full TODO 5 implementation paths, direct Execute tests, and TODO 1-4 regressions.
-- Reviewed only `deployment/windows/validate_stage_b_backup_restore.ps1`, `deployment/windows/test_validate_stage_b_backup_restore.ps1`, accepted `AGENTS.md`, role handoffs, and relevant `specification/RELEASE.md` TODO 5/6 text.
+- Independently reviewed `AGENTS.md`, current Planner/Implementer handoffs, identity, HEAD, target absence, tracked/untracked/staged scope, six baselines, product-file preservation, outcome mapping, safety claims, and handoff limits.
+- Did not rerun PostgreSQL, invoke services, mutate state, or modify product/config files.
 
 Verified Facts:
-- Recomputed the normalized Planner body SHA-256 as `da39da32ef4d23deba6d486602b562f914ab808d3dc568fff691d9f2e5fa648f`; exactly one start marker and one end marker exist. Planner and Implementer Cycle ID, Plan SHA-256, and Job ID agree.
-- Planner handoff is 68 lines / 9,114 UTF-8 bytes; Implementer handoff is 49 lines / 5,583 UTF-8 bytes, both within limits and with required current-cycle schemas.
-- `git diff -- AGENTS.md` shows only the accepted safe-batching preamble (19 added diff lines) and it remained unchanged during this review.
-- Current product implementation performs Execute destination, pending checksum, recomputed manifest hash, approval, and manifest validation before AdapterFactory/sequence mutation.
-- Pending checksum parsing requires strict UTF-8, one lowercase 64-hex entry, exact two-space separator, exact pending-manifest leaf, and one LF; checksum and approval linkage use constant-time byte comparison.
-- Execution evidence is allowlist-projected and validated as exact `status`, `dump_hash`, `manifest_sha256`; staged and published bundles are restricted to `execution.json` and `checksums.sha256`, canonical UTF-8/LF, checksum-linked, and published by sibling-directory rename without overwrite.
-- Existing destination, checksum/approval mismatch, staged tamper/unexpected file, privacy sentinel, hook failure, and move/race cases are directly tested for fail-closed behavior; valid fake order is exact and no automatic `DropRestore` occurs.
-- `powershell.exe -NoProfile -ExecutionPolicy Bypass -File deployment/windows/test_validate_stage_b_backup_restore.ps1` exited 0: 22 passed / 0 failed and pure validation tests passed.
-- `python deployment/postgresql/test_stage_b_snapshot.py` exited 0: 6 tests passed.
-- `git diff --check -- deployment/windows/validate_stage_b_backup_restore.ps1 deployment/windows/test_validate_stage_b_backup_restore.ps1` exited 0 with line-ending warnings only.
-- `git status --short` contains only accepted `AGENTS.md`, the two cumulative product files, and the three role handoffs. No TODO 6 product/evidence implementation was found; `LIVE_BLOCKED=True` and criterion 8 `not_evaluable` remain preserved.
+- Recomputed Planner hash `79149b1635530fcbadf8ec3596309904dc8fe1b6d738e34e0823852095a9376d`; all Planner/Implementer identity fields agree and Job ID is exact.
+- HEAD remains `2c5e854d1fe7edafd4527215525afb4459a962e4`.
+- All three declared untracked helper targets are absent.
+- `git status --porcelain=v1 --untracked-files=all` shows exactly the three handoffs and two Stage B PowerShell files modified, with no other entry.
+- `git diff --cached --name-only` and `git ls-files --others --exclude-standard` are empty.
+- All six baseline hashes independently match Planner.
+- The two pre-existing Stage B files retain their declared hashes; no product/config baseline changed.
+- Implementer records guarded deletion of exactly the three authorized targets, each exit `0`, and no replacement artifact, runtime access, product/config edit, staging, commit, or push.
+- Outcome `PASS` and Status `COMPLETE` match the successful deletion/postflight result.
+- Implementer handoff is 71 lines and 5,378 normalized UTF-8 bytes, within both limits.
 
 Unverified Items:
-- Real PostgreSQL, Windows services, database/network/UNC/Job/login/backup/restore behavior and external concurrent filesystem actors were not exercised and remain deferred.
-- A real or deterministic Execute evidence-file write failure is not exercised by the current direct tests.
+- Pre-deletion file type, size, hash, and command execution are Implementer attestations; Reviewer verified the resulting absence and final scope.
+- PostgreSQL password/role state, privacy-probe correction, topology, Jobs, clients, storage, services, evidence/recovery, and PlanOnly/Execute/Cleanup remain deferred.
 
 Findings and Priority:
-- P1 — Failing behavior: the TODO 5 test suite does not directly induce an `execution.json` or execution `checksums.sha256` write failure. Evidence/impact: the only Execute publication fault cases at test lines 522-535 are `unexpected`, `content`, `checksum`, `hook`, and `race`; `hook` throws only after both writes, while `race` exercises destination/move collision. Therefore cleanup/no-partial-publication behavior for the Planner-required write-failure boundary is unproven, despite Required Change 11 and the Acceptance Criteria requiring every named write failure to be directly rejected. Required result: add a direct deterministic Execute bundle write-failure validation that proves the privacy-safe failure, no final bundle, no invocation temporary residue, and no damage to any pre-existing destination, while preserving all existing passing coverage.
+- None.
 
 Required Result:
-- A new Planner cycle must close the P1 test-evidence gap and obtain fresh Implementer validation and independent Reviewer review before TODO 5 can be accepted.
-- All current TODO 5 positive, negative, privacy, tamper, move/race, residue, TODO 1-4 regression, scope, and safety results must remain passing.
+- Satisfied: exact five-file scope is restored and the three CR29 helper artifacts are absent.
 
 Next Minimum Scope:
-- TODO 5 only: the smallest dependency-complete change that directly validates Execute evidence-file write-failure cleanup and no-partial-publication behavior. TODO 6 remains deferred.
+- Per Planner, a new cycle establishes canonical approved owner identities/source and obtains fresh read-only password-state evidence.
+- CR29 runtime/privacy/state claims remain unusable; PlanOnly remains blocked.
 
 Safety Gates:
-- No product file was edited by Reviewer; no dependency was installed; nothing was staged, committed, pushed, or deployed; no service, database, network, UNC, or live Execute/Cleanup resource was invoked.
-- Preserve the accepted user-owned `AGENTS.md` safe-batching preamble, exact current identity contract, cumulative TODO 1-4 behavior, no automatic `DropRestore`, `LIVE_BLOCKED=True`, and criterion 8 `not_evaluable`.
+- The three deleted files were untracked and are not recoverable from Git.
+- Reviewer did not access runtime, repair state, run tests/PlanOnly/Execute/Cleanup, edit product/config, stage, commit, or push.
+- Only this Reviewer handoff was replaced during review.
 
 Route Conditions:
-- `FAIL` reaches the mandatory user decision gate. Any correction must start with a new Planner cycle; Reviewer must not fix the finding or start TODO 6.
-- Codex implementation and external implementation are both available after the user explicitly selects a route.
+- `PASS` reaches the mandatory user gate.
+- The user may accept this recovery and stop, start the next Codex Planner cycle, or request an external-implementation Planner handoff.
 
 User Decision Gate:
-- The user must explicitly choose one: accept/finish despite the recorded failure, start a new Codex Planner cycle for the Next Minimum Scope, or route the required result to external implementation.
+- Stop here. The user must explicitly choose whether to start a new Planner cycle and which implementation route to use.

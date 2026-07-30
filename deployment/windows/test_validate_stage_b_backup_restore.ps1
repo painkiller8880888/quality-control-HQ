@@ -519,6 +519,55 @@ try {
   Assert-Throws {Invoke-StageBMain {param() $script:executeAdapter}} 'execute missing parent'
   Assert-True ($script:mutations -eq 0) 'execute missing parent zero mutation'
 
+  Reset-ExecuteInputs
+  $script:EvidenceRoot=Join-Path $executeRoot 'write-failure-execution'
+  $script:executeAdapter=New-FakeAdapter $m
+  $script:writeFailureContext='SENTINEL-CREDENTIAL user@raw-host C:\secret\dump'
+  $script:preWriteTargets=@()
+  $executionWriteError=$null
+  $executionWriteObstruction={
+    param($stagedPath)
+    $script:preWriteTargets+=@([IO.Path]::GetFileName($stagedPath))
+    if([IO.Path]::GetFileName($stagedPath) -ceq 'execution.json'){
+      New-Item -ItemType Directory -LiteralPath $stagedPath|Out-Null
+      [IO.File]::WriteAllText((Join-Path $stagedPath 'SENTINEL-CREDENTIAL.txt'),$script:writeFailureContext,[Text.UTF8Encoding]::new($false))
+    }
+  }
+  try {Invoke-StageBMain {param() $script:executeAdapter} $null $executionWriteObstruction; throw 'execution write failure expected'} catch {$executionWriteError=$_.Exception.Message}
+  Assert-True ($executionWriteError -ceq 'stage_b_operation_failed' -and $executionWriteError -notmatch 'SENTINEL|raw-host|secret|user@') 'execute execution write privacy-safe error'
+  Assert-True (($script:preWriteTargets -join ',') -ceq 'execution.json' -and -not(Test-Path -LiteralPath $script:EvidenceRoot)) 'execute execution real write failure no final bundle'
+  Assert-True (@(Get-ChildItem -LiteralPath $executeRoot -Directory -Filter '.stage-b-evidence-*.tmp').Count -eq 0) 'execute execution write no residue'
+
+  Reset-ExecuteInputs
+  $checksumDestination=Join-Path $executeRoot 'write-failure-checksum'
+  $checksumKeepPath=Join-Path $checksumDestination 'keep.txt'
+  $checksumKeepBytes=[Text.Encoding]::UTF8.GetBytes(('keep-'+[guid]::NewGuid().ToString('n')))
+  $script:checksumDestination=$checksumDestination
+  $script:checksumKeepPath=$checksumKeepPath
+  $script:checksumKeepBytes=$checksumKeepBytes
+  $script:EvidenceRoot=$checksumDestination
+  $script:executeAdapter=New-FakeAdapter $m
+  $script:preWriteTargets=@()
+  $checksumWriteError=$null
+  $checksumWriteObstruction={
+    param($stagedPath)
+    $script:preWriteTargets+=@([IO.Path]::GetFileName($stagedPath))
+    if([IO.Path]::GetFileName($stagedPath) -ceq 'checksums.sha256'){
+      [IO.Directory]::CreateDirectory($stagedPath)|Out-Null
+      [IO.File]::WriteAllText((Join-Path $stagedPath 'SENTINEL-CREDENTIAL.txt'),$script:writeFailureContext,[Text.UTF8Encoding]::new($false))
+      [IO.Directory]::CreateDirectory($script:checksumDestination)|Out-Null
+      [IO.File]::WriteAllBytes($script:checksumKeepPath,$script:checksumKeepBytes)
+    }
+  }
+  try {Invoke-StageBMain {param() $script:executeAdapter} $null $checksumWriteObstruction; throw 'checksum write failure expected'} catch {$checksumWriteError=$_.Exception.Message}
+  Assert-True ($checksumWriteError -ceq 'stage_b_operation_failed' -and $checksumWriteError -notmatch 'SENTINEL|raw-host|secret|user@') 'execute checksum write privacy-safe error'
+  Assert-True (($script:preWriteTargets -join ',') -ceq 'execution.json,checksums.sha256') 'execute checksum real write boundary'
+  $checksumInventory=if(Test-Path -LiteralPath $checksumDestination -PathType Container){@((Get-ChildItem -LiteralPath $checksumDestination -Force).Name)-join ','}else{'<missing>'}
+  Assert-True ($checksumInventory -ceq 'keep.txt') 'execute checksum destination exact inventory'
+  Assert-True ([Convert]::ToBase64String([IO.File]::ReadAllBytes($checksumKeepPath)) -ceq [Convert]::ToBase64String($checksumKeepBytes)) 'execute checksum destination sentinel bytes preserved'
+  Assert-True (-not(Test-Path -LiteralPath (Join-Path $checksumDestination 'execution.json')) -and -not(Test-Path -LiteralPath (Join-Path $checksumDestination 'checksums.sha256'))) 'execute checksum no partial bundle'
+  Assert-True (@(Get-ChildItem -LiteralPath $executeRoot -Directory -Filter '.stage-b-evidence-*.tmp').Count -eq 0) 'execute checksum write no residue'
+
   foreach($tamper in @('unexpected','content','checksum','hook','race')){
     Reset-ExecuteInputs
     $script:EvidenceRoot=Join-Path $executeRoot ('tamper-'+$tamper)
@@ -537,6 +586,419 @@ try {
 } finally {
   $script:Execute=$false; $script:PendingManifestPath=$null; $script:ApprovalPath=$null; $script:EvidenceRoot=$null
   Remove-Item -LiteralPath $executeRoot -Recurse -Force
+}
+
+# Cleanup: exact successful execution linkage, guards, one drop, retained dump, and atomic evidence.
+$cleanupRoot=Join-Path ([IO.Path]::GetTempPath()) ('stage-b-cleanup-'+[guid]::NewGuid())
+New-Item -ItemType Directory -Path $cleanupRoot|Out-Null
+try {
+  $script:PlanOnly=$false; $script:Execute=$false; $script:Cleanup=$true
+  $script:PendingManifestPath=Join-Path $cleanupRoot 'pending.json'
+  $script:ApprovalPath=Join-Path $cleanupRoot 'approval.json'
+  $script:EvidenceRoot=Join-Path $cleanupRoot 'execution'
+  function Reset-CleanupInputs {
+    foreach($path in @($script:PendingManifestPath,$script:ApprovalPath,(Join-Path $cleanupRoot 'checksums.sha256'),$script:EvidenceRoot)){if(Test-Path -LiteralPath $path){Remove-Item -LiteralPath $path -Recurse -Force}}
+    [IO.File]::WriteAllText($script:PendingManifestPath,(ConvertTo-StageBCanonicalJson $m)+"`n",[Text.UTF8Encoding]::new($false))
+    $script:cleanupManifestHash=Get-StageBSha256 $script:PendingManifestPath
+    [IO.File]::WriteAllText((Join-Path $cleanupRoot 'checksums.sha256'),($script:cleanupManifestHash+'  pending.json'+"`n"),[Text.UTF8Encoding]::new($false))
+    $approval=[pscustomobject]@{scope='stage-b-backup-restore';action='cleanup';manifest_sha256=$script:cleanupManifestHash;approved_at=[DateTimeOffset]::UtcNow.ToString('o');approver_hash=$m.owners.cleanup_owner_hash}
+    [IO.File]::WriteAllText($script:ApprovalPath,(ConvertTo-StageBCanonicalJson $approval)+"`n",[Text.UTF8Encoding]::new($false))
+    $sequence=[pscustomobject]@{status='success';dump_hash=(Get-StageBTextHash 'dump')}
+    $null=Publish-StageBExecutionBundle $script:EvidenceRoot $sequence $script:cleanupManifestHash $null $null
+    $script:cleanupExecutionHash=Get-StageBSha256 (Join-Path $script:EvidenceRoot 'execution.json')
+  }
+  function New-CleanupAdapter {
+    $a=New-FakeAdapter $m
+    $script:cleanupEvents=[Collections.Generic.List[string]]::new()
+    $script:cleanupJobs=[int]0
+    $script:retainedCall=0
+    $script:retainedSize=[int64]17
+    $script:retainedHash=Get-StageBTextHash 'dump'
+    $script:retainedSecondSize=$script:retainedSize
+    $script:retainedSecondHash=$script:retainedHash
+    $script:cleanupCatalogMode='normal'
+    $script:cleanupDropMode='normal'
+    $a.Process={param($operation,$arguments,$environment)
+      $null=$script:cleanupEvents.Add($operation)
+      if($operation -cne 'retained_dump' -or @($arguments).Count -ne 0 -or $environment -isnot [Collections.IDictionary] -or $environment.Count -ne 0){throw 'retained invocation mismatch'}
+      $script:retainedCall++
+      [pscustomobject]@{success=$true;exit_code=[int]0;size=if($script:retainedCall -eq 1){[int64]$script:retainedSize}else{[int64]$script:retainedSecondSize};hash=if($script:retainedCall -eq 1){$script:retainedHash}else{$script:retainedSecondHash}}
+    }
+    $a.Catalog={param($target)
+      $null=$script:cleanupEvents.Add('catalog')
+      if((ConvertTo-StageBCanonicalJson $target) -cne (ConvertTo-StageBCanonicalJson $m.restore)){throw 'catalog invocation mismatch'}
+      if($script:cleanupCatalogMode -eq 'malformed'){return [pscustomobject]@{state='eligible'}}
+      if($script:dropCalls -eq 0){
+        [pscustomobject]@{state=if($script:cleanupCatalogMode -eq 'state'){'existing_empty'}else{'eligible'};oid_hash=if($script:cleanupCatalogMode -eq 'oid'){('e'*64)}else{$m.restore.oid_hash};owner_hash=if($script:cleanupCatalogMode -eq 'owner'){('e'*64)}else{$m.owners.restore_owner_hash};connections=if($script:cleanupCatalogMode -eq 'connections'){'0'}elseif($script:cleanupCatalogMode -eq 'busy'){[int]1}else{[int]0}}
+      } else {
+        [pscustomobject]@{state=if($script:cleanupCatalogMode -eq 'after-state'){'eligible'}else{'absent'};oid_hash=if($script:cleanupCatalogMode -eq 'after-malformed'){$m.restore.oid_hash}else{$null};owner_hash=$null;connections=if($script:cleanupCatalogMode -eq 'after-busy'){[int]1}else{[int]0}}
+      }
+    }
+    $a.Jobs={param() $null=$script:cleanupEvents.Add('jobs'); $script:cleanupJobs}
+    $a.DropRestore={param($target,$ownerHash)
+      $script:dropCalls++; $null=$script:cleanupEvents.Add('drop')
+      if((ConvertTo-StageBCanonicalJson $target) -cne (ConvertTo-StageBCanonicalJson $m.restore) -or $ownerHash -cne $m.owners.cleanup_owner_hash){throw 'drop invocation mismatch'}
+      if($script:cleanupDropMode -eq 'throw'){throw 'SENTINEL-CREDENTIAL C:\secret'}
+      if($script:cleanupDropMode -eq 'false'){return [pscustomobject]@{success=$false}}
+      if($script:cleanupDropMode -eq 'malformed'){return [pscustomobject]@{success=$true;extra='x'}}
+      [pscustomobject]@{success=$true}
+    }
+    $a
+  }
+
+  Reset-CleanupInputs
+  $script:CleanupEvidenceRoot=Join-Path $cleanupRoot 'cleanup-success'
+  $script:cleanupAdapter=New-CleanupAdapter
+  $script:publishStages=[Collections.Generic.List[string]]::new()
+  $result=Invoke-StageBMain {param() $script:cleanupAdapter} {param($cleanupPath,$checksumPath,$stage) $null=$script:publishStages.Add($stage)} $null
+  Assert-True (($script:cleanupEvents -join ',') -ceq 'retained_dump,catalog,jobs,drop,catalog,retained_dump') 'cleanup exact success order'
+  Assert-True ($script:dropCalls -eq 1 -and $script:retainedCall -eq 2 -and ($script:publishStages -join ',') -ceq 'staged,published') 'cleanup exact counts and atomic publish order'
+  $cleanupText=[IO.File]::ReadAllText((Join-Path $script:CleanupEvidenceRoot 'cleanup.json'),[Text.Encoding]::UTF8)
+  $cleanupFile=$cleanupText|ConvertFrom-Json
+  Assert-True ((@($cleanupFile.psobject.Properties.Name|Sort-Object)-join ',') -ceq 'cleanup_owner_hash,criterion_8,drop_count,dump_hash,dump_size,execution_sha256,live_blocked,manifest_sha256,restore_oid_hash,restore_owner_hash,restore_state,status') 'cleanup exact schema'
+  Assert-True ($cleanupFile.live_blocked -is [bool] -and $cleanupFile.live_blocked -and $cleanupFile.criterion_8 -ceq 'not_evaluable' -and $cleanupFile.restore_state -ceq 'absent' -and $cleanupFile.drop_count -is [int] -and $cleanupFile.drop_count -eq 1) 'cleanup exact values'
+  Assert-True ($cleanupFile.execution_sha256 -ceq $script:cleanupExecutionHash -and $cleanupFile.dump_size -eq [int64]17 -and (ConvertTo-StageBCanonicalJson $result) -ceq (ConvertTo-StageBCanonicalJson $cleanupFile)) 'cleanup linkage returned file equality'
+  Assert-True ((@((Get-ChildItem -LiteralPath $script:CleanupEvidenceRoot -Force).Name|Sort-Object)-join ',') -ceq 'checksums.sha256,cleanup.json') 'cleanup exact inventory'
+  $cleanupChecksum=[IO.File]::ReadAllText((Join-Path $script:CleanupEvidenceRoot 'checksums.sha256'),[Text.Encoding]::UTF8)
+  Assert-True ($cleanupChecksum -cmatch '^([a-f0-9]{64})  cleanup\.json\n$' -and $Matches[1] -ceq (Get-StageBSha256 (Join-Path $script:CleanupEvidenceRoot 'cleanup.json'))) 'cleanup checksum recomputation'
+  Assert-True ($cleanupText -notmatch 'raw-|C:\\|user@|SENTINEL|command|credential') 'cleanup privacy'
+
+  foreach($case in @('missing','extra','tampered','failed','linkage')){
+    Reset-CleanupInputs
+    switch($case){
+      'missing' {Remove-Item -LiteralPath $script:EvidenceRoot -Recurse -Force}
+      'extra' {[IO.File]::WriteAllText((Join-Path $script:EvidenceRoot 'extra.txt'),'x')}
+      'tampered' {[IO.File]::WriteAllText((Join-Path $script:EvidenceRoot 'execution.json'),'{}'+"`n",[Text.UTF8Encoding]::new($false))}
+      'failed' {$failed=[pscustomobject]@{status='failed';dump_hash=$null}; Remove-Item $script:EvidenceRoot -Recurse -Force; $null=Publish-StageBExecutionBundle $script:EvidenceRoot $failed $script:cleanupManifestHash $null $null}
+      'linkage' {[IO.File]::WriteAllText((Join-Path $script:EvidenceRoot 'execution.json'),(ConvertTo-StageBCanonicalJson ([pscustomobject]@{status='success';dump_hash=(Get-StageBTextHash 'dump');manifest_sha256=('e'*64)}))+"`n",[Text.UTF8Encoding]::new($false)); [IO.File]::WriteAllText((Join-Path $script:EvidenceRoot 'checksums.sha256'),((Get-StageBSha256 (Join-Path $script:EvidenceRoot 'execution.json'))+'  execution.json'+"`n"))}
+    }
+    $script:CleanupEvidenceRoot=Join-Path $cleanupRoot ('bad-execution-'+$case)
+    $script:cleanupAdapter=New-CleanupAdapter
+    Assert-Throws {Invoke-StageBMain {param() $script:cleanupAdapter}} ('cleanup execution '+$case)
+    Assert-True ($script:dropCalls -eq 0 -and -not(Test-Path $script:CleanupEvidenceRoot)) ('cleanup execution zero drop '+$case)
+  }
+
+  Reset-CleanupInputs
+  $ownerApproval=Get-Content -Raw $script:ApprovalPath|ConvertFrom-Json; $ownerApproval.approver_hash='e'*64
+  [IO.File]::WriteAllText($script:ApprovalPath,(ConvertTo-StageBCanonicalJson $ownerApproval)+"`n",[Text.UTF8Encoding]::new($false))
+  $script:CleanupEvidenceRoot=Join-Path $cleanupRoot 'owner-mismatch'; $script:cleanupAdapter=New-CleanupAdapter
+  Assert-Throws {Invoke-StageBMain {param() $script:cleanupAdapter}} 'cleanup owner mismatch'
+  Assert-True ($script:dropCalls -eq 0) 'cleanup owner mismatch zero drop'
+
+  Reset-CleanupInputs
+  $actionApproval=Get-Content -Raw $script:ApprovalPath|ConvertFrom-Json; $actionApproval.action='execute'
+  [IO.File]::WriteAllText($script:ApprovalPath,(ConvertTo-StageBCanonicalJson $actionApproval)+"`n",[Text.UTF8Encoding]::new($false))
+  $script:CleanupEvidenceRoot=Join-Path $cleanupRoot 'action-mismatch'; $script:cleanupAdapter=New-CleanupAdapter
+  Assert-Throws {Invoke-StageBMain {param() $script:cleanupAdapter}} 'cleanup action mismatch'
+  Assert-True ($script:dropCalls -eq 0 -and -not(Test-Path $script:CleanupEvidenceRoot)) 'cleanup action mismatch zero drop'
+
+  Reset-CleanupInputs
+  [IO.File]::WriteAllText((Join-Path $cleanupRoot 'checksums.sha256'),(('e'*64)+'  pending.json'+"`n"),[Text.UTF8Encoding]::new($false))
+  $script:CleanupEvidenceRoot=Join-Path $cleanupRoot 'pending-linkage'; $script:cleanupAdapter=New-CleanupAdapter
+  Assert-Throws {Invoke-StageBMain {param() $script:cleanupAdapter}} 'cleanup pending linkage'
+  Assert-True ($script:dropCalls -eq 0 -and -not(Test-Path $script:CleanupEvidenceRoot)) 'cleanup pending linkage zero drop'
+
+  foreach($mode in @('state','oid','owner','connections','busy','malformed')){
+    Reset-CleanupInputs; $script:CleanupEvidenceRoot=Join-Path $cleanupRoot ('catalog-'+$mode); $script:cleanupAdapter=New-CleanupAdapter; $script:cleanupCatalogMode=$mode
+    Assert-Throws {Invoke-StageBMain {param() $script:cleanupAdapter}} ('cleanup catalog '+$mode)
+    Assert-True ($script:dropCalls -eq 0 -and -not(Test-Path $script:CleanupEvidenceRoot)) ('cleanup catalog zero drop '+$mode)
+  }
+  $jobCases=@(
+    @{value=$null},@{value=[object[]]@(0,0)},@{value='0'},@{value=[long]0},
+    @{value=[int]-1},@{value=[int]1},@{value=[uint64]::MaxValue}
+  )
+  $jobIndex=0
+  foreach($jobCase in $jobCases){
+    Reset-CleanupInputs; $script:CleanupEvidenceRoot=Join-Path $cleanupRoot ('jobs-'+$jobIndex); $script:cleanupAdapter=New-CleanupAdapter; $script:cleanupJobs=$jobCase.value
+    Assert-Throws {Invoke-StageBMain {param() $script:cleanupAdapter}} ('cleanup jobs '+$jobIndex)
+    Assert-True ($script:dropCalls -eq 0 -and -not(Test-Path $script:CleanupEvidenceRoot)) ('cleanup jobs zero drop '+$jobIndex)
+    $jobIndex++
+  }
+
+  $retainedCases=@(
+    [pscustomobject]@{success=$false;exit_code=[int]0;size=[int64]17;hash=(Get-StageBTextHash 'dump')},
+    [pscustomobject]@{success=$true;exit_code=[long]0;size=[int64]17;hash=(Get-StageBTextHash 'dump')},
+    [pscustomobject]@{success=$true;exit_code=[int]0;size=[int]17;hash=(Get-StageBTextHash 'dump')},
+    [pscustomobject]@{success=$true;exit_code=[int]0;size=[int64]0;hash=(Get-StageBTextHash 'dump')},
+    [pscustomobject]@{success=$true;exit_code=[int]0;size=[int64]17;hash=('e'*64)},
+    [pscustomobject]@{success=$true;exit_code=[int]0;size=[int64]17;hash=(Get-StageBTextHash 'dump');extra='x'}
+  )
+  $retainedIndex=0
+  foreach($bad in $retainedCases){
+    Reset-CleanupInputs; $script:CleanupEvidenceRoot=Join-Path $cleanupRoot ('retained-'+$retainedIndex); $script:cleanupAdapter=New-CleanupAdapter
+    $script:cleanupAdapter.Process={param($operation,$arguments,$environment) $null=$script:cleanupEvents.Add($operation); $bad}.GetNewClosure()
+    Assert-Throws {Invoke-StageBMain {param() $script:cleanupAdapter}} ('cleanup retained '+$retainedIndex)
+    Assert-True ($script:dropCalls -eq 0 -and -not(Test-Path $script:CleanupEvidenceRoot)) ('cleanup retained zero drop '+$retainedIndex)
+    $retainedIndex++
+  }
+  Reset-CleanupInputs; $script:CleanupEvidenceRoot=Join-Path $cleanupRoot 'retained-missing-before'; $script:cleanupAdapter=New-CleanupAdapter
+  $script:cleanupAdapter.Process={param($operation,$arguments,$environment) throw 'SENTINEL-CREDENTIAL retained dump missing'}
+  $cleanupError=$null; try {Invoke-StageBMain {param() $script:cleanupAdapter}; throw 'expected'} catch {$cleanupError=$_.Exception.Message}
+  Assert-True ($cleanupError -ceq 'stage_b_operation_failed' -and $cleanupError -notmatch 'SENTINEL|missing' -and $script:dropCalls -eq 0 -and -not(Test-Path $script:CleanupEvidenceRoot)) 'cleanup retained disappearance before drop'
+
+  Reset-CleanupInputs; $script:CleanupEvidenceRoot=Join-Path $cleanupRoot 'retained-missing-after'; $script:cleanupAdapter=New-CleanupAdapter
+  $script:cleanupAdapter.Process={param($operation,$arguments,$environment) $script:retainedCall++; if($script:retainedCall -eq 2){throw 'SENTINEL-CREDENTIAL retained dump missing'}; [pscustomobject]@{success=$true;exit_code=[int]0;size=[int64]17;hash=(Get-StageBTextHash 'dump')}}
+  $cleanupError=$null; try {Invoke-StageBMain {param() $script:cleanupAdapter}; throw 'expected'} catch {$cleanupError=$_.Exception.Message}
+  Assert-True ($cleanupError -ceq 'stage_b_operation_failed' -and $cleanupError -notmatch 'SENTINEL|missing' -and $script:dropCalls -eq 1 -and $script:retainedCall -eq 2 -and -not(Test-Path $script:CleanupEvidenceRoot)) 'cleanup retained disappearance after exact one drop'
+
+  foreach($mode in @('false','malformed','throw')){
+    Reset-CleanupInputs; $script:CleanupEvidenceRoot=Join-Path $cleanupRoot ('drop-'+$mode); $script:cleanupAdapter=New-CleanupAdapter; $script:cleanupDropMode=$mode
+    $cleanupError=$null; try {Invoke-StageBMain {param() $script:cleanupAdapter}; throw 'expected'} catch {$cleanupError=$_.Exception.Message}
+    Assert-True ($cleanupError -ceq 'stage_b_operation_failed' -and $cleanupError -notmatch 'SENTINEL|secret' -and $script:dropCalls -eq 1 -and -not(Test-Path $script:CleanupEvidenceRoot)) ('cleanup drop fail safe '+$mode)
+  }
+  foreach($mode in @('after-state','after-malformed','after-busy')){
+    Reset-CleanupInputs; $script:CleanupEvidenceRoot=Join-Path $cleanupRoot ('after-'+$mode); $script:cleanupAdapter=New-CleanupAdapter; $script:cleanupCatalogMode=$mode
+    Assert-Throws {Invoke-StageBMain {param() $script:cleanupAdapter}} ('cleanup after '+$mode)
+    Assert-True ($script:dropCalls -eq 1 -and -not(Test-Path $script:CleanupEvidenceRoot)) ('cleanup after exact one drop '+$mode)
+  }
+  foreach($drift in @('hash','size')){
+    Reset-CleanupInputs; $script:CleanupEvidenceRoot=Join-Path $cleanupRoot ('drift-'+$drift); $script:cleanupAdapter=New-CleanupAdapter
+    if($drift -eq 'hash'){$script:retainedSecondHash='e'*64}else{$script:retainedSecondSize=[int64]18}
+    Assert-Throws {Invoke-StageBMain {param() $script:cleanupAdapter}} ('cleanup drift '+$drift)
+    Assert-True ($script:dropCalls -eq 1 -and $script:retainedCall -eq 2 -and -not(Test-Path $script:CleanupEvidenceRoot)) ('cleanup drift exact one drop '+$drift)
+  }
+
+  Reset-CleanupInputs
+  $script:CleanupEvidenceRoot=Join-Path $cleanupRoot 'existing-cleanup'; New-Item -ItemType Directory $script:CleanupEvidenceRoot|Out-Null
+  $keepBytes=[Text.Encoding]::UTF8.GetBytes(('keep-'+[guid]::NewGuid().ToString('n'))); [IO.File]::WriteAllBytes((Join-Path $script:CleanupEvidenceRoot 'keep.txt'),$keepBytes)
+  $script:cleanupAdapter=New-CleanupAdapter; Assert-Throws {Invoke-StageBMain {param() $script:cleanupAdapter}} 'cleanup existing'
+  Assert-True ($script:dropCalls -eq 0 -and [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $script:CleanupEvidenceRoot 'keep.txt'))) -ceq [Convert]::ToBase64String($keepBytes)) 'cleanup existing preserved'
+
+  foreach($boundary in @('write','tamper','checksum','race','post-publish','post-race')){
+    Reset-CleanupInputs; $script:CleanupEvidenceRoot=Join-Path $cleanupRoot ('boundary-'+$boundary); $script:cleanupAdapter=New-CleanupAdapter
+    $pre=$null; $hook=$null
+    if($boundary -eq 'write'){$pre={param($path) if([IO.Path]::GetFileName($path) -ceq 'cleanup.json'){New-Item -ItemType Directory -LiteralPath $path|Out-Null; [IO.File]::WriteAllText((Join-Path $path 'SENTINEL-CREDENTIAL.txt'),'user@raw-host C:\secret')}}}
+    elseif($boundary -eq 'tamper'){$hook={param($json,$checksum,$stage) if($stage -ceq 'staged'){[IO.File]::WriteAllText($json,'{}'+"`n")}}}
+    elseif($boundary -eq 'checksum'){$hook={param($json,$checksum,$stage) if($stage -ceq 'staged'){[IO.File]::WriteAllText($checksum,('e'*64)+'  cleanup.json'+"`n")}}}
+    elseif($boundary -eq 'race'){$hook={param($json,$checksum,$stage) if($stage -ceq 'staged'){New-Item -ItemType Directory $script:CleanupEvidenceRoot|Out-Null; [IO.File]::WriteAllText((Join-Path $script:CleanupEvidenceRoot 'keep.txt'),'keep')}}}
+    elseif($boundary -eq 'post-publish'){$hook={param($json,$checksum,$stage) if($stage -ceq 'published'){[IO.File]::WriteAllText($json,'{}'+"`n"); throw 'SENTINEL-CREDENTIAL C:\secret'}}}
+    else {$script:postRaceOriginal=Join-Path $cleanupRoot 'post-race-original'; $hook={param($json,$checksum,$stage) if($stage -ceq 'published'){Move-Item -LiteralPath $script:CleanupEvidenceRoot -Destination $script:postRaceOriginal; New-Item -ItemType Directory $script:CleanupEvidenceRoot|Out-Null; [IO.File]::WriteAllText((Join-Path $script:CleanupEvidenceRoot 'keep.txt'),'keep'); throw 'SENTINEL-CREDENTIAL C:\secret'}}}
+    $cleanupError=$null; try {Invoke-StageBMain {param() $script:cleanupAdapter} $hook $pre; throw 'expected'} catch {$cleanupError=$_.Exception.Message}
+    Assert-True ($cleanupError -ceq 'stage_b_operation_failed' -and $cleanupError -notmatch 'SENTINEL|secret' -and $script:dropCalls -eq 1) ('cleanup boundary safe exact one drop '+$boundary)
+    if($boundary -in @('race','post-race')){
+      Assert-True ((Get-Content (Join-Path $script:CleanupEvidenceRoot 'keep.txt')) -ceq 'keep') ('cleanup '+$boundary+' destination preserved')
+    } elseif($boundary -eq 'post-publish'){
+      Assert-True (Test-Path -LiteralPath $script:CleanupEvidenceRoot -PathType Container) 'cleanup post-publish retained'
+      Assert-Throws {Assert-StageBCleanupBundle $script:CleanupEvidenceRoot $script:cleanupManifestHash $script:cleanupExecutionHash} 'cleanup post-publish retained invalid'
+    } else {
+      Assert-True (-not(Test-Path $script:CleanupEvidenceRoot)) ('cleanup boundary no false bundle '+$boundary)
+    }
+    Assert-True (@(Get-ChildItem -LiteralPath $cleanupRoot -Directory -Filter '.stage-b-cleanup-*.tmp').Count -eq 0) ('cleanup boundary no residue '+$boundary)
+  }
+
+  Reset-CleanupInputs
+  $script:CleanupEvidenceRoot=Join-Path $cleanupRoot 'boundary-post-same-inventory'
+  $script:postSameOriginal=Join-Path $cleanupRoot 'post-same-inventory-original'
+  $script:cleanupAdapter=New-CleanupAdapter
+  $executionJsonBefore=[IO.File]::ReadAllBytes((Join-Path $script:EvidenceRoot 'execution.json'))
+  $executionChecksumBefore=[IO.File]::ReadAllBytes((Join-Path $script:EvidenceRoot 'checksums.sha256'))
+  $script:replacementCleanupBytes=[Text.Encoding]::UTF8.GetBytes(('replacement-cleanup-'+[guid]::NewGuid().ToString('n')))
+  $script:replacementChecksumBytes=[Text.Encoding]::UTF8.GetBytes(('replacement-checksum-'+[guid]::NewGuid().ToString('n')))
+  $script:originalCleanupBytes=$null
+  $script:originalChecksumBytes=$null
+  $sameInventoryHook={
+    param($json,$checksum,$stage)
+    if($stage -ceq 'published'){
+      $script:originalCleanupBytes=[IO.File]::ReadAllBytes($json)
+      $script:originalChecksumBytes=[IO.File]::ReadAllBytes($checksum)
+      Move-Item -LiteralPath $script:CleanupEvidenceRoot -Destination $script:postSameOriginal
+      New-Item -ItemType Directory -Path $script:CleanupEvidenceRoot|Out-Null
+      [IO.File]::WriteAllBytes((Join-Path $script:CleanupEvidenceRoot 'cleanup.json'),$script:replacementCleanupBytes)
+      [IO.File]::WriteAllBytes((Join-Path $script:CleanupEvidenceRoot 'checksums.sha256'),$script:replacementChecksumBytes)
+      throw 'SENTINEL-CREDENTIAL C:\secret'
+    }
+  }
+  $cleanupError=$null; try {Invoke-StageBMain {param() $script:cleanupAdapter} $sameInventoryHook $null; throw 'expected'} catch {$cleanupError=$_.Exception.Message}
+  Assert-True ($cleanupError -ceq 'stage_b_operation_failed' -and $cleanupError -notmatch 'SENTINEL|secret' -and $script:dropCalls -eq 1 -and $script:retainedCall -eq 2) 'cleanup same-inventory privacy exact one drop no retry'
+  $replacementItems=@(Get-ChildItem -LiteralPath $script:CleanupEvidenceRoot -Force)
+  Assert-True ($replacementItems.Count -eq 2 -and (@($replacementItems.Name|Sort-Object)-join ',') -ceq 'checksums.sha256,cleanup.json' -and @($replacementItems|Where-Object {$_.PSIsContainer}).Count -eq 0) 'cleanup same-inventory replacement exact regular inventory'
+  Assert-True ([Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $script:CleanupEvidenceRoot 'cleanup.json'))) -ceq [Convert]::ToBase64String($script:replacementCleanupBytes) -and [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $script:CleanupEvidenceRoot 'checksums.sha256'))) -ceq [Convert]::ToBase64String($script:replacementChecksumBytes)) 'cleanup same-inventory replacement bytes preserved'
+  $originalItems=@(Get-ChildItem -LiteralPath $script:postSameOriginal -Force)
+  Assert-True ($originalItems.Count -eq 2 -and (@($originalItems.Name|Sort-Object)-join ',') -ceq 'checksums.sha256,cleanup.json' -and @($originalItems|Where-Object {$_.PSIsContainer}).Count -eq 0) 'cleanup same-inventory moved original exact regular inventory'
+  Assert-True ([Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $script:postSameOriginal 'cleanup.json'))) -ceq [Convert]::ToBase64String($script:originalCleanupBytes) -and [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $script:postSameOriginal 'checksums.sha256'))) -ceq [Convert]::ToBase64String($script:originalChecksumBytes)) 'cleanup same-inventory moved original bytes preserved'
+  $null=Assert-StageBCleanupBundle $script:postSameOriginal $script:cleanupManifestHash $script:cleanupExecutionHash
+  Assert-True ([Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $script:EvidenceRoot 'execution.json'))) -ceq [Convert]::ToBase64String($executionJsonBefore) -and [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $script:EvidenceRoot 'checksums.sha256'))) -ceq [Convert]::ToBase64String($executionChecksumBefore)) 'cleanup same-inventory retained execution evidence unchanged'
+  Assert-True (@(Get-ChildItem -LiteralPath $cleanupRoot -Directory -Filter '.stage-b-cleanup-*.tmp').Count -eq 0) 'cleanup same-inventory no residue'
+} finally {
+  $script:Cleanup=$false; $script:PendingManifestPath=$null; $script:ApprovalPath=$null; $script:EvidenceRoot=$null; $script:CleanupEvidenceRoot=$null
+  Remove-Item -LiteralPath $cleanupRoot -Recurse -Force
+}
+
+# Production adapter: exact controlled runtime-provider contract and complete non-live integration.
+$script:providerConfigurationCalls=0
+$script:providerJobsCalls=0
+$script:providerRuntimeCalls=0
+$script:providerDrops=0
+$providerContract=@{
+  Snapshot={param($target,$mode,$expectedSourceOidHash) $script:providerRuntimeCalls++}
+  Catalog={param($target) $script:providerRuntimeCalls++}
+  Process={param($operation,$arguments,$environment) $script:providerRuntimeCalls++}
+  Service={param($action,$service) $script:providerRuntimeCalls++}
+  State={param($manifest) $script:providerRuntimeCalls++}
+  CreateRestore={param($target,$ownerHash) $script:providerRuntimeCalls++}
+  DropRestore={param($target,$ownerHash) $script:providerRuntimeCalls++}
+}
+Assert-StageBRuntimeProvider $providerContract
+foreach($case in @('missing','extra','non-scriptblock','wrong-arity')){
+  $candidate=@{}; foreach($name in $providerContract.Keys){$candidate[$name]=$providerContract[$name]}
+  switch($case){
+    'missing' {$candidate.Remove('State')}
+    'extra' {$candidate.Unexpected={param() $script:providerRuntimeCalls++}}
+    'non-scriptblock' {$candidate.Process='invalid'}
+    'wrong-arity' {$candidate.DropRestore={param($target) $script:providerRuntimeCalls++}}
+  }
+  Assert-Throws {New-StageBProductionAdapter {param() $script:providerConfigurationCalls++; New-ReadOnlyConfiguration} {param() $script:providerJobsCalls++; 0} $candidate} ('runtime provider '+$case)
+}
+Assert-True ($script:providerConfigurationCalls -eq 0 -and $script:providerJobsCalls -eq 0 -and $script:providerRuntimeCalls -eq 0) 'runtime provider rejection before callbacks'
+$defaultProduction=New-StageBProductionAdapter {param() New-ReadOnlyConfiguration} {param() 0}
+try {& $defaultProduction.Process 'SENTINEL-NOT-AN-EXECUTABLE' @() @{}; throw 'default process failure expected'} catch {Assert-True ($_.Exception.Message -ceq 'process configuration unavailable') 'default process unavailable'}
+
+function New-ControlledRuntimeProvider {
+  $script:providerCalls=[Collections.Generic.List[string]]::new()
+  $script:providerArguments=[Collections.Generic.List[string]]::new()
+  $script:providerCreated=$false
+  $script:providerCleanupMode=$false
+  $script:providerDrops=0
+  $script:providerMutations=0
+  $script:providerSentinel='SENTINEL-CREDENTIAL user@raw-host C:\secret\controlled.dump'
+  @{
+    State={param($manifest)
+      $null=$script:providerCalls.Add('state')
+      $null=$script:providerArguments.Add((ConvertTo-StageBCanonicalJson $manifest))
+      if((ConvertTo-StageBCanonicalJson $manifest) -cne (ConvertTo-StageBCanonicalJson $script:controlledManifest)){throw 'controlled state arguments mismatch'}
+      New-CurrentState $manifest
+    }
+    Service={param($action,$service)
+      $null=$script:providerCalls.Add("$action-$service")
+      $null=$script:providerArguments.Add((ConvertTo-StageBCanonicalJson @($action,$service)))
+      if($action -cnotin @('stop','start') -or $service -cnotin @('worker','web')){throw 'controlled service arguments mismatch'}
+      $script:providerMutations++
+      [pscustomobject]@{success=$true;state=if($action -ceq 'stop'){'stopped'}else{'running'}}
+    }
+    Snapshot={param($target,$mode,$expectedSourceOidHash)
+      $null=$script:providerCalls.Add("snapshot-$mode")
+      $null=$script:providerArguments.Add((ConvertTo-StageBCanonicalJson @($target,$mode,$expectedSourceOidHash)))
+      $expectedTarget=if($mode -ceq 'source'){$script:controlledManifest.source}elseif($mode -ceq 'restore'){$script:controlledManifest.restore}else{throw 'controlled snapshot arguments mismatch'}
+      $expectedOid=if($mode -ceq 'source'){$null}else{$script:controlledManifest.source.oid_hash}
+      if((ConvertTo-StageBCanonicalJson $target) -cne (ConvertTo-StageBCanonicalJson $expectedTarget) -or $expectedSourceOidHash -cne $expectedOid){throw 'controlled snapshot arguments mismatch'}
+      [pscustomobject]@{identity=[pscustomobject]@{oid_hash=$target.oid_hash};baseline_hash=$script:controlledManifest.source_baseline_hash;semantic_hash=(Get-StageBTextHash 'controlled-semantic')}
+    }
+    Process={param($operation,$arguments,$environment)
+      $null=$script:providerCalls.Add($operation)
+      $null=$script:providerArguments.Add((ConvertTo-StageBCanonicalJson @($operation,@($arguments),$environment)))
+      $expectedArguments=switch($operation){'pg_dump'{@('--format=custom','--no-owner','--no-acl')};'pg_restore_list'{@('--list')};'pg_restore'{@('--exit-on-error','--single-transaction','--no-owner','--no-acl')};'retained_dump'{@()};default{throw $script:providerSentinel}}
+      if((@($arguments)-join "`0") -cne ($expectedArguments-join "`0") -or $environment -isnot [Collections.IDictionary] -or $environment.Count -ne 0){throw 'controlled process arguments mismatch'}
+      if($operation -ceq 'pg_dump'){[pscustomobject]@{success=$true;exit_code=[int]0;size=[int64]23;hash=(Get-StageBTextHash 'controlled-dump')}}
+      elseif($operation -ceq 'pg_restore_list'){[pscustomobject]@{success=$true;exit_code=[int]0;size=[int64]11;hash=(Get-StageBTextHash 'controlled-list')}}
+      elseif($operation -ceq 'pg_restore'){[pscustomobject]@{success=$true;exit_code=[int]0}}
+      elseif($operation -ceq 'retained_dump'){[pscustomobject]@{success=$true;exit_code=[int]0;size=[int64]23;hash=(Get-StageBTextHash 'controlled-dump')}}
+      else {throw $script:providerSentinel}
+    }
+    Catalog={param($target)
+      $null=$script:providerCalls.Add('catalog')
+      $null=$script:providerArguments.Add((ConvertTo-StageBCanonicalJson $target))
+      if((ConvertTo-StageBCanonicalJson $target) -cne (ConvertTo-StageBCanonicalJson $script:controlledManifest.restore)){throw 'controlled catalog arguments mismatch'}
+      if($script:providerCleanupMode){
+        if($script:providerDrops -eq 0){[pscustomobject]@{state='eligible';oid_hash=$script:controlledManifest.restore.oid_hash;owner_hash=$script:controlledManifest.owners.restore_owner_hash;connections=[int]0}}
+        else {[pscustomobject]@{state='absent';oid_hash=$null;owner_hash=$null;connections=[int]0}}
+      } elseif($script:providerCreated) {
+        [pscustomobject]@{state='existing_empty';oid_hash=$script:controlledManifest.restore.oid_hash;owner_hash=$script:controlledManifest.owners.restore_owner_hash;connections=[int]0}
+      } else {[pscustomobject]@{state='absent';oid_hash=$null;owner_hash=$null;connections=[int]0}}
+    }
+    CreateRestore={param($target,$ownerHash)
+      $null=$script:providerCalls.Add('create')
+      $null=$script:providerArguments.Add((ConvertTo-StageBCanonicalJson @($target,$ownerHash)))
+      if((ConvertTo-StageBCanonicalJson $target) -cne (ConvertTo-StageBCanonicalJson $script:controlledManifest.restore) -or $ownerHash -cne $script:controlledManifest.owners.restore_owner_hash){throw 'controlled create arguments mismatch'}
+      $script:providerMutations++; $script:providerCreated=$true
+      [pscustomobject]@{success=$true}
+    }
+    DropRestore={param($target,$ownerHash)
+      $null=$script:providerCalls.Add('drop')
+      $null=$script:providerArguments.Add((ConvertTo-StageBCanonicalJson @($target,$ownerHash)))
+      if((ConvertTo-StageBCanonicalJson $target) -cne (ConvertTo-StageBCanonicalJson $script:controlledManifest.restore) -or $ownerHash -cne $script:controlledManifest.owners.cleanup_owner_hash){throw 'controlled drop arguments mismatch'}
+      $script:providerMutations++; $script:providerDrops++
+      [pscustomobject]@{success=$true}
+    }
+  }
+}
+
+$providerRoot=Join-Path ([IO.Path]::GetTempPath()) ('stage-b-provider-'+[guid]::NewGuid())
+New-Item -ItemType Directory -Path $providerRoot|Out-Null
+try {
+  $script:providerConfigurationCalls=0
+  $script:providerJobsCalls=0
+  $script:providerRecordJobs=$false
+  $script:controlledConfiguration=New-ReadOnlyConfiguration
+  $script:controlledProvider=New-ControlledRuntimeProvider
+  $script:controlledAdapter=New-StageBProductionAdapter {param() $script:providerConfigurationCalls++; $script:controlledConfiguration} {param() $script:providerJobsCalls++; if($script:providerRecordJobs){$null=$script:providerCalls.Add('jobs')}; 0} $script:controlledProvider
+  Assert-StageBAdapter $script:controlledAdapter
+
+  $script:PlanOnly=$true; $script:Execute=$false; $script:Cleanup=$false
+  $script:PendingManifestPath=Join-Path $providerRoot 'pending.json'
+  $planResult=Invoke-StageBMain {param() $script:controlledAdapter}
+  $script:controlledManifest=Get-Content -Raw -LiteralPath $script:PendingManifestPath|ConvertFrom-Json
+  $script:controlledManifestHash=Get-StageBSha256 $script:PendingManifestPath
+  Test-StageBManifest $script:controlledManifest
+  Assert-True ($planResult.status -ceq 'success' -and $planResult.manifest_sha256 -ceq $script:controlledManifestHash) 'controlled plan linkage'
+  Assert-True ($script:providerConfigurationCalls -eq 1 -and $script:providerJobsCalls -eq 1 -and $script:providerCalls.Count -eq 0 -and $script:providerMutations -eq 0) 'controlled plan zero runtime mutation'
+  Assert-True ((@((Get-ChildItem -LiteralPath $providerRoot -Force).Name|Sort-Object)-join ',') -ceq 'checksums.sha256,pending.json') 'controlled plan exact inventory'
+
+  $script:PlanOnly=$false; $script:Execute=$true
+  $script:ApprovalPath=Join-Path $providerRoot 'execute-approval.json'
+  $executeApproval=[pscustomobject]@{scope='stage-b-backup-restore';action='execute';manifest_sha256=$script:controlledManifestHash;approved_at=[DateTimeOffset]::UtcNow.ToString('o');approver_hash=('d'*64)}
+  [IO.File]::WriteAllText($script:ApprovalPath,(ConvertTo-StageBCanonicalJson $executeApproval)+"`n",[Text.UTF8Encoding]::new($false))
+  $script:EvidenceRoot=Join-Path $providerRoot 'execution'
+  $execution=Invoke-StageBMain {param() $script:controlledAdapter}
+  Assert-True ($execution.status -ceq 'success' -and $execution.dump_hash -ceq (Get-StageBTextHash 'controlled-dump') -and $execution.manifest_sha256 -ceq $script:controlledManifestHash) 'controlled execute success'
+  Assert-True (($script:providerCalls -join ',') -ceq 'state,stop-worker,stop-web,snapshot-source,pg_dump,pg_restore_list,catalog,create,catalog,pg_restore,snapshot-restore,snapshot-source,start-web,start-worker') 'controlled execute exact provider order'
+  Assert-True ($script:providerDrops -eq 0 -and $script:providerCreated -and $script:providerMutations -eq 5) 'controlled execute exact mutations no drop'
+  $null=Assert-StageBEvidenceBundle $script:EvidenceRoot $script:controlledManifestHash
+
+  $script:Execute=$false; $script:Cleanup=$true; $script:providerCleanupMode=$true
+  $script:providerCalls.Clear(); $script:providerArguments.Clear()
+  $script:providerRecordJobs=$true
+  $script:ApprovalPath=Join-Path $providerRoot 'cleanup-approval.json'
+  $cleanupApproval=[pscustomobject]@{scope='stage-b-backup-restore';action='cleanup';manifest_sha256=$script:controlledManifestHash;approved_at=[DateTimeOffset]::UtcNow.ToString('o');approver_hash=$script:controlledManifest.owners.cleanup_owner_hash}
+  [IO.File]::WriteAllText($script:ApprovalPath,(ConvertTo-StageBCanonicalJson $cleanupApproval)+"`n",[Text.UTF8Encoding]::new($false))
+  $script:CleanupEvidenceRoot=Join-Path $providerRoot 'cleanup'
+  $cleanupResult=Invoke-StageBMain {param() $script:controlledAdapter}
+  $executionHash=Get-StageBSha256 (Join-Path $script:EvidenceRoot 'execution.json')
+  Assert-True (($script:providerCalls -join ',') -ceq 'state,retained_dump,catalog,jobs,drop,catalog,retained_dump') ('controlled cleanup provider order actual='+($script:providerCalls -join ','))
+  Assert-True ($script:providerDrops -eq 1 -and $cleanupResult.drop_count -eq 1 -and $cleanupResult.restore_state -ceq 'absent' -and $cleanupResult.live_blocked -eq $true -and $cleanupResult.criterion_8 -ceq 'not_evaluable') 'controlled cleanup exact one drop'
+  $null=Assert-StageBCleanupBundle $script:CleanupEvidenceRoot $script:controlledManifestHash $executionHash
+  Assert-True ((Test-Path -LiteralPath $script:EvidenceRoot -PathType Container) -and (Test-Path -LiteralPath $script:PendingManifestPath -PathType Leaf)) 'controlled retained execution and pending'
+  $allProviderText=(Get-ChildItem -LiteralPath $providerRoot -File -Recurse|ForEach-Object {[IO.File]::ReadAllText($_.FullName,[Text.Encoding]::UTF8)}) -join "`n"
+  Assert-True ($allProviderText -notmatch 'SENTINEL|raw-host|secret|user@|controlled\.dump') 'controlled bundles privacy'
+  Assert-True (@(Get-ChildItem -LiteralPath $providerRoot -Force -Recurse|Where-Object {$_.Name -like '*.tmp'}).Count -eq 0) 'controlled integration no temporary residue'
+
+  $script:Cleanup=$false; $script:Execute=$true; $script:providerCleanupMode=$false
+  $script:providerRecordJobs=$false
+  [IO.File]::WriteAllText($script:ApprovalPath,(ConvertTo-StageBCanonicalJson $executeApproval)+"`n",[Text.UTF8Encoding]::new($false))
+  $throwProvider=New-ControlledRuntimeProvider
+  $throwProvider.Snapshot={param($target,$mode,$expectedSourceOidHash) $null=$script:providerCalls.Add("snapshot-$mode"); throw $script:providerSentinel}
+  $throwAdapter=New-StageBProductionAdapter {param() $script:controlledConfiguration} {param() 0} $throwProvider
+  $script:EvidenceRoot=Join-Path $providerRoot 'throw-execution'
+  $throwResult=Invoke-StageBMain {param() $throwAdapter}
+  Assert-True ($throwResult.status -ceq 'failed' -and $null -eq $throwResult.dump_hash -and $script:providerDrops -eq 0) 'throwing provider failed without drop'
+  Assert-True (($script:providerCalls -join ',') -ceq 'state,stop-worker,stop-web,snapshot-source,start-web,start-worker') 'throwing provider recovery order'
+  $throwText=[IO.File]::ReadAllText((Join-Path $script:EvidenceRoot 'execution.json'),[Text.Encoding]::UTF8)
+  Assert-True ($throwText -notmatch 'SENTINEL|raw-host|secret|user@|controlled\.dump' -and (($throwText|ConvertFrom-Json).status -ceq 'failed')) 'throwing provider privacy no false success'
+  Assert-True (@(Get-ChildItem -LiteralPath $providerRoot -Force -Recurse|Where-Object {$_.Name -like '*.tmp'}).Count -eq 0) 'throwing provider no temporary residue'
+
+  $malformedProvider=New-ControlledRuntimeProvider
+  $malformedProvider.Snapshot={param($target,$mode,$expectedSourceOidHash) $null=$script:providerCalls.Add("snapshot-$mode"); [pscustomobject]@{leak=$script:providerSentinel}}
+  $malformedAdapter=New-StageBProductionAdapter {param() $script:controlledConfiguration} {param() 0} $malformedProvider
+  $script:EvidenceRoot=Join-Path $providerRoot 'malformed-execution'
+  $malformedResult=Invoke-StageBMain {param() $malformedAdapter}
+  $malformedText=[IO.File]::ReadAllText((Join-Path $script:EvidenceRoot 'execution.json'),[Text.Encoding]::UTF8)
+  Assert-True ($malformedResult.status -ceq 'failed' -and $null -eq $malformedResult.dump_hash -and $script:providerDrops -eq 0) 'malformed provider failed without drop'
+  Assert-True (($script:providerCalls -join ',') -ceq 'state,stop-worker,stop-web,snapshot-source,start-web,start-worker') 'malformed provider recovery order'
+  Assert-True ($malformedText -notmatch 'SENTINEL|raw-host|secret|user@|controlled\.dump' -and (($malformedText|ConvertFrom-Json).status -ceq 'failed')) 'malformed provider privacy no false success'
+  Assert-True (@(Get-ChildItem -LiteralPath $providerRoot -Force -Recurse|Where-Object {$_.Name -like '*.tmp'}).Count -eq 0) 'malformed provider no temporary residue'
+} finally {
+  $script:PlanOnly=$false; $script:Execute=$false; $script:Cleanup=$false
+  $script:PendingManifestPath=$null; $script:ApprovalPath=$null; $script:EvidenceRoot=$null; $script:CleanupEvidenceRoot=$null
+  Remove-Item -LiteralPath $providerRoot -Recurse -Force
 }
 $root=Join-Path ([IO.Path]::GetTempPath()) ('stage-b-'+[guid]::NewGuid()); New-Item -ItemType Directory -Path $root|Out-Null; try {[IO.File]::WriteAllText((Join-Path $root 'z.txt'),'z');[IO.File]::WriteAllText((Join-Path $root 'a.txt'),'a');Write-StageBChecksums $root;Assert-True ((Get-Content (Join-Path $root 'checksums.sha256'))[0] -match '  a.txt$') 'checksum'} finally {Remove-Item -LiteralPath $root -Recurse -Force}
 Write-Output 'Stage B pure validation tests passed'
