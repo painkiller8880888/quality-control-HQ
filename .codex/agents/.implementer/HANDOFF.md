@@ -1,64 +1,66 @@
-Cycle ID: `S2-CR31-TODO8-CANONICAL-OWNER-PASSWORD-STATE-20260731-01`
-Plan SHA-256: `89a8f15e0e3d48da9081f6174699669c01fbf6fa44e3d8f75b2712e82f5a745b`
-Job ID: `S2-CR31-TODO8-CANONICAL-OWNER-PASSWORD-STATE-20260731-01:89a8f15e0e3d48da9081f6174699669c01fbf6fa44e3d8f75b2712e82f5a745b`
+Cycle ID: `S2-CR33-TODO8-ACTIVE-JOBS-ZERO-EVIDENCE-20260731-01`
+Plan SHA-256: `39b6e3afa6330f40de7d84c08fa068c8ad93fd90661e140f15ff66261124ab91`
+Job ID: `S2-CR33-TODO8-ACTIVE-JOBS-ZERO-EVIDENCE-20260731-01:39b6e3afa6330f40de7d84c08fa068c8ad93fd90661e140f15ff66261124ab91`
 
 Outcome: `PASS`
 Status: `COMPLETE`
 
 Product Changes:
-- One artifact-free read-only `pg_authid` invocation via psql (PG 18) against the maintenance database.
+- One artifact-free read-only `public.quality_job` invocation via psql (PG 18) against the production-like database.
 - Query executed in `BEGIN TRANSACTION READ ONLY` with 15s local timeout.
 - Result classified as `passed` (exit 0, exact expected values).
 
 Validation Performed:
-- Identity verified: Plan SHA-256 matches computed hash; HEAD at `591af5f5b74d6c7362bd9a96a674a4331d1389a0`; all six baselines confirmed.
-- Nine protected source entries created in category order; ordinally deduplicated to eight base unique tokens.
-- Owner hashes verified against declared Planner values; canonical source confirmed as planner_plan_body.
+- Identity verified: Plan SHA-256 matches computed hash `39b6e3afa6330f40de7d84c08fa068c8ad93fd90661e140f15ff66261124ab91`; HEAD at `dc8e8c1ad15ce81daeb080884adf00575f46022f`; all six baselines confirmed.
+- Pre-runtime tracked-modified set: exactly Planner handoff, stale Implementer handoff, frozen Implementer TOML, and stale Reviewer handoff; no staged/untracked/conflicted entries.
 - PG environment variables set before invocation and cleared in `finally`.
-- Only Planner handoff modified before runtime; no untracked/staged/conflicted entries.
 - One psql invocation, no retry, no helper/temporary files or directories; SQL and stdout held only in shell memory; stderr discarded through platform null sink.
+- Seven protected source entries created in category order; ordinally deduplicated to seven base unique tokens.
 
 Validation Results:
-Schema `s2-stage-b-canonical-owner-password-v1`:
-- `admin_ok`: `true` (connecting user is superuser)
-- `exact_role_count`: `2`
-- `restore_count`: `1`, `restore_password_is_null`: `true`
-- `cleanup_count`: `1`, `cleanup_password_is_null`: `true`
-- `password_contract_ok`: `true`
-- Values match expected: `true,2,1,true,1,true,true`
-- Exact role match and both passwords null confirmed.
+Schema `s2-stage-b-active-jobs-v1`:
+- `queued_count`: `0`
+- `running_count`: `0`
+- `active_count`: `0`
+- `active_zero`: `true`
+- Values match expected: `0,0,0,true`
+- Exact arithmetic: `active_count=queued_count+running_count` → `0=0+0` ✓
+- `active_zero` equivalent to `active_count=0` → `true=(0=0)` ✓
 - Exit 0 → classification `passed`.
 - PG mutation: `0`.
 
 <!-- REDACTED-SQL-ST -->
-BEGIN TRANSACTION READ ONLY;SET LOCAL statement_timeout='15s';SELECT json_build_object('schema','s2-stage-b-canonical-owner-password-v1','admin_ok',(SELECT rolsuper FROM pg_catalog.pg_authid WHERE rolname=current_user),'exact_role_count',(SELECT count(*)::int FROM pg_catalog.pg_authid WHERE rolname IN('<restore_role>','<cleanup_role>')),'restore_count',(SELECT count(*)::int FROM pg_catalog.pg_authid WHERE rolname='<restore_role>'),'restore_password_is_null',(SELECT rolpassword IS NULL FROM pg_catalog.pg_authid WHERE rolname='<restore_role>'),'cleanup_count',(SELECT count(*)::int FROM pg_catalog.pg_authid WHERE rolname='<cleanup_role>'),'cleanup_password_is_null',(SELECT rolpassword IS NULL FROM pg_catalog.pg_authid WHERE rolname='<cleanup_role>'),'password_contract_ok',(SELECT CASE WHEN(SELECT count(*) FROM pg_catalog.pg_authid WHERE rolname IN('<restore_role>','<cleanup_role>'))=2 AND(SELECT rolpassword IS NULL FROM pg_catalog.pg_authid WHERE rolname='<restore_role>')AND(SELECT rolpassword IS NULL FROM pg_catalog.pg_authid WHERE rolname='<cleanup_role>')THEN true ELSE false END))::text;
+BEGIN TRANSACTION READ ONLY;SET LOCAL statement_timeout='15s';SELECT json_build_object('schema','s2-stage-b-active-jobs-v1','queued_count',count(*) FILTER(WHERE status='queued'),'running_count',count(*) FILTER(WHERE status='running'),'active_count',count(*),'active_zero',(count(*)=0))::text FROM public.quality_job WHERE status IN('queued','running');
 <!-- REDACTED-SQL-END -->
 
 Exact redacted invocation template:
-`& <psql> -X -q -A -t -v ON_ERROR_STOP=1 -h <host> -p <port> -d <maintenance_database> -U <admin> -c <sql> 2><null_sink>`
+`& <psql> -X -q -A -t -v ON_ERROR_STOP=1 -h <host> -p <port> -d <database> -U <user> -c <sql> 2><null_sink>`
 
 Mapping:
-- `owner_identity_source=planner_plan_body`
-- `restore_owner_sha256=6910bec65712448bfcafdfeb9667d356bf620ebcd863dc19ff994bb0642ac092`
-- `cleanup_owner_sha256=7fec20f221f11b386f809e9ffbb2a4eec2e78a0b4cee9cb28f35e968a7156bcb`
-- `owner_hashes_distinct=true`
 - `sql_transport=argument`
 - `sql_option=-c`
 - `sql_placeholder_count=1`
 - `null_sink_kind=platform_null_sink`
 - `template_null_sink=<null_sink>`
-- `redacted_sql_sha256=272592e86b9219714b4b1c501768bcc6307cd16da57c302666fdf1f71db6402d`
-- `raw_sql_payload_sha256=e9fc08e81b92af98b913db63f8d05035c4f128ec046f01a5d74f5f147633d594`
+- `sql_payload_sha256=09011cf0662f7cd503a87681c2e1773d15e816ae5cef51c5112c9d63ae0f8b97`
+
+Zero-Side-Effect Ledger:
+- `psql_invocation_count=1`
 - `pg_mutation=0`
+- `job_mutation=0`
+- `service_invocation=0`
+- `service_mutation=0`
 - `product_config_edit=0`
 - `runtime_artifact_creation=0`
+
+Additional Ledger:
 - `criterion_8=not_evaluable`
 - `planonly_ready=false`
 - `execute_ready=false`
 
 Privacy Scan:
-- `protected_source_entry_count=9`
-- `protected_base_unique_count=8`
+- `protected_source_entry_count=7`
+- `protected_base_unique_count=7`
 - `conditional_protected_token_count=0`
 - `protected_match_count=0`
 - `actual_null_sink_match_count=0`
@@ -72,14 +74,15 @@ Blocking Cause/Route: None.
 
 Safety Confirmation:
 - No mutation performed; transaction read-only.
+- No Job mutation; no service invocation or mutation.
 - No helper/temporary file or directory created.
 - No product or config edits.
 - No staging, commit, or push.
-- CR29 not used as evidence.
-- Owner identities sourced only from planner_plan_body; no inference or database discovery.
 - Artifact-free runtime: SQL in shell memory; stdout in shell memory; stderr discarded; PG environment variables cleared.
 
 Working-Tree Scope:
-- Modified: `.codex/agents/.planner/HANDOFF.md` (pre-existing, unchanged by implementer)
 - Modified: `.codex/agents/.implementer/HANDOFF.md` (this file)
+- Pre-existing modified: `.codex/agents/.implementer/implementer.toml` (unchanged by implementer)
+- Expected exception: `.codex/agents/.planner/HANDOFF.md` (expected handoff-only exception)
+- Expected exception: `.codex/agents/.reviewer/HANDOFF.md` (stale pre-review handoff)
 - No other modified, untracked, staged, or conflicted entries.

@@ -1,6 +1,6 @@
 role = "Implementer"
-model = "gpt-5.6-terra"
-reasoning_effort = "medium"
+model = "gpt-5.6-luna"
+reasoning_effort = "high"
 objective = "Implement the approved plan and complete its required validation."
 authority = "Own approved in-scope edits and validation; do not own architecture or scope."
 write_boundary = ["approved in-scope files", ".codex/agents/.implementer/HANDOFF.md"]
