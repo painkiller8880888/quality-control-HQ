@@ -3,9 +3,14 @@ __pycache__/
 *.sqlite3
 db.sqlite3
 .env
+.env.*
+!.env.example
 deployment/pseudoprod/.env
+deployment/pseudoprod/.env.example
 deployment/pseudoprod/.env.migrate
+deployment/pseudoprod/.env.migrate.example
 deployment/postgresql/.env.bootstrap
+deployment/postgresql/.env.bootstrap.example
 .venv/
 backend/frontend_dist/
 runtime/
