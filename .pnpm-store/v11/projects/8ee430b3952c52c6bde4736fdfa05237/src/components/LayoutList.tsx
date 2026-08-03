@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { MapPin } from 'lucide-react';
 import type { FactoryMapResponse, FactoryMapMachine, InspectionTarget, LayoutSummary, LayoutObject, LayoutObjectType } from '../types';
 import { MachinePopup } from './MachinePopup';
+import { getErrorMessage } from '../utils';
 
 const FALLBACK_COLORS: Record<string, string> = {
   machine: '#6366f1',
@@ -19,7 +20,8 @@ const objectLabel = (object: LayoutObject) => {
 };
 
 const objectFillColor = (object: LayoutObject, types: LayoutObjectType[]): string => {
-  if (object.meta_json?.fill_color) return object.meta_json.fill_color;
+  const fillColor = object.meta_json?.fill_color;
+  if (typeof fillColor === 'string' && fillColor) return fillColor;
   const typeDef = types.find((t) => t.code === object.type);
   if (typeDef?.color) return typeDef.color;
   return FALLBACK_COLORS[object.type] || '#6366f1';
@@ -100,12 +102,12 @@ export const LayoutList: React.FC<LayoutListProps> = ({
               }
               return next;
             });
-          } catch (err: any) {
+          } catch (err) {
             setLayoutMaps((prev) => {
               const next = [...prev];
               const targetIdx = next.findIndex(item => item.layout.id === layout.id);
               if (targetIdx !== -1) {
-                next[targetIdx] = { ...next[targetIdx], isLoading: false, error: err.message || '見取り図の取得に失敗しました。' };
+                next[targetIdx] = { ...next[targetIdx], isLoading: false, error: getErrorMessage(err, '見取り図の取得に失敗しました。') };
               }
               return next;
             });

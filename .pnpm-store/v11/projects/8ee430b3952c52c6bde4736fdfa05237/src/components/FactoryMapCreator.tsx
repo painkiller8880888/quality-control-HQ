@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Grid3X3, MousePointer2, Plus, Save, Trash2, Palette, X } from 'lucide-react';
 import type { FactoryMapLayout, LayoutObject, LayoutObjectTypeCode, LayoutSummary, LayoutObjectType } from '../types';
+import { getErrorMessage } from '../utils';
 
 interface MachineOption {
   id: number;
@@ -29,7 +30,8 @@ const FALLBACK_COLORS: Record<string, string> = {
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 
 const objectFillColor = (object: LayoutObject, types: LayoutObjectType[]): string => {
-  if (object.meta_json?.fill_color) return object.meta_json.fill_color;
+  const fillColor = object.meta_json?.fill_color;
+  if (typeof fillColor === 'string' && fillColor) return fillColor;
   const typeDef = types.find((t) => t.code === object.type);
   if (typeDef?.color) return typeDef.color;
   return FALLBACK_COLORS[object.type] || '#6366f1';
@@ -77,8 +79,8 @@ export const FactoryMapCreator: React.FC = () => {
       const data: FactoryMapLayout = await response.json();
       setLayout(data);
       setEditingLayoutId(data.layout_id);
-    } catch (error: any) {
-      setStatusMessage(error.message || '見取り図の取得に失敗しました。');
+    } catch (error) {
+      setStatusMessage(getErrorMessage(error, '見取り図の取得に失敗しました。'));
     } finally {
       setIsLoading(false);
     }
@@ -137,8 +139,8 @@ export const FactoryMapCreator: React.FC = () => {
         const err = await response.json();
         setStatusMessage(err.message || 'レイアウトの作成に失敗しました。');
       }
-    } catch (error: any) {
-      setStatusMessage(error.message || 'レイアウトの作成に失敗しました。');
+    } catch (error) {
+      setStatusMessage(getErrorMessage(error, 'レイアウトの作成に失敗しました。'));
     }
   };
 
@@ -190,7 +192,12 @@ export const FactoryMapCreator: React.FC = () => {
     });
   };
 
-  const gridPointFromEvent = (event: React.PointerEvent<HTMLDivElement>) => {
+  interface PointerCoordinates {
+    clientX: number;
+    clientY: number;
+  }
+
+  const gridPointFromEvent = (event: PointerCoordinates) => {
     if (!layout || !canvasRef.current) return null;
     const rect = canvasRef.current.getBoundingClientRect();
     const x = ((event.clientX - rect.left) / rect.width) * layout.grid_width;
@@ -209,9 +216,9 @@ export const FactoryMapCreator: React.FC = () => {
     const clickY = Math.round(((event.clientY - rect.top) / rect.height) * layout.grid_height);
     setDragOffset({ x: clickX - object.grid_x, y: clickY - object.grid_y });
 
-    const onPointerMove = (moveEvent: React.PointerEvent<HTMLButtonElement>) => {
+    const onPointerMove = (moveEvent: PointerEvent) => {
       if (!layout || draggingId === null || dragOffset === null) return;
-      const point = gridPointFromEvent(moveEvent as any);
+      const point = gridPointFromEvent(moveEvent);
       const obj = layout.objects.find((item) => item.layout_object_id === draggingId);
       if (!point || !obj) return;
       updateObject(draggingId, {
@@ -222,16 +229,16 @@ export const FactoryMapCreator: React.FC = () => {
 
     const onPointerUp = () => {
       button.releasePointerCapture(event.pointerId);
-      button.removeEventListener('pointermove', onPointerMove as any);
-      button.removeEventListener('pointerup', onPointerUp as any);
-      button.removeEventListener('pointercancel', onPointerUp as any);
+      button.removeEventListener('pointermove', onPointerMove);
+      button.removeEventListener('pointerup', onPointerUp);
+      button.removeEventListener('pointercancel', onPointerUp);
       setDraggingId(null);
       setDragOffset(null);
     };
 
-    button.addEventListener('pointermove', onPointerMove as any);
-    button.addEventListener('pointerup', onPointerUp as any);
-    button.addEventListener('pointercancel', onPointerUp as any);
+    button.addEventListener('pointermove', onPointerMove);
+    button.addEventListener('pointerup', onPointerUp);
+    button.addEventListener('pointercancel', onPointerUp);
   };
 
   const handlePointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -284,8 +291,8 @@ export const FactoryMapCreator: React.FC = () => {
       setSelectedId(null);
       setStatusMessage('見取り図を保存しました。');
       await loadLayoutList();
-    } catch (error: any) {
-      setStatusMessage(error.message || '見取り図の保存に失敗しました。');
+    } catch (error) {
+      setStatusMessage(getErrorMessage(error, '見取り図の保存に失敗しました。'));
     } finally {
       setIsSaving(false);
     }

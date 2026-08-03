@@ -1,11 +1,18 @@
 import React, { useState, useEffect, useRef } from 'react';
-import type { AppSettings, Job, ApiError, Class9Setting } from '../types';
+import type { AppSettings, Job, ApiError, Class9Setting, MasterUpdateJobResult } from '../types';
 import { Save, Upload, FolderOpen, Loader2, Database, Plus, Trash2, CheckCircle2, AlertTriangle, Play, Monitor, FileSpreadsheet, Bug } from 'lucide-react';
+import { getErrorMessage } from '../utils';
 
 interface InspectionFolderRow {
   id: number;
   path: string;
   priority: number;
+}
+
+interface MasterUpdateJobState {
+  status: Job['status'];
+  error_message: string | null;
+  result: MasterUpdateJobResult | null;
 }
 
 const folderPathComparisonKey = (path: string) => {
@@ -28,8 +35,8 @@ export const SettingsPanel: React.FC = () => {
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
   const [historyWriteResult] = useState<string | null>(null);
   const [erpResult, setErpResult] = useState<string | null>(null);
-  const [jobResult, setJobResult] = useState<any>(null);
-  const pollingTimerRef = useRef<any>(null);
+  const [jobResult, setJobResult] = useState<MasterUpdateJobState | null>(null);
+  const pollingTimerRef = useRef<number | null>(null);
   const nextFolderRowId = useRef(1);
 
   // Class 9 settings
@@ -42,49 +49,57 @@ export const SettingsPanel: React.FC = () => {
   const [class9Message, setClass9Message] = useState<string | null>(null);
   const searchTimerRef = useRef<number | null>(null);
 
+  async function fetchSettings(): Promise<AppSettings> {
+    const response = await fetch('/api/settings/');
+    if (!response.ok) throw new Error('設定の取得に失敗しました');
+    return await response.json();
+  }
+
+  async function fetchClass9Settings(): Promise<Class9Setting[] | null> {
+    try {
+      const res = await fetch('/api/class9-settings/');
+      if (!res.ok) return null;
+      return await res.json();
+    } catch {
+      return null;
+    }
+  }
+
   useEffect(() => {
-    fetchSettings();
-    fetchClass9Settings();
+    let cancelled = false;
+    void fetchSettings()
+      .then((data) => {
+        if (cancelled) return;
+        setCsvPath(data.csv_path || '');
+        const paths = data.inspection_folder_paths ?? [];
+        setFolderRows(paths.map((path) => ({
+          id: nextFolderRowId.current++,
+          path,
+          priority: data.inspection_folder_priorities?.[path] ?? 0,
+        })));
+        setErpPath(data.erp_path || '');
+        setHistoryFilePath(data.history_file_path || '');
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setSaveMessage('エラー: ' + getErrorMessage(err, '設定の取得に失敗しました'));
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoading(false);
+      });
+    void fetchClass9Settings()
+      .then((data) => {
+        if (!cancelled && data) setClass9Settings(data);
+      })
+      .catch(() => {
+        // Keep the existing silent handling for optional class 9 settings.
+      });
     return () => {
+      cancelled = true;
       if (pollingTimerRef.current) {
         clearInterval(pollingTimerRef.current);
       }
     };
   }, []);
-
-  const fetchSettings = async () => {
-    setIsLoading(true);
-    try {
-      const response = await fetch('/api/settings/');
-      if (!response.ok) throw new Error('設定の取得に失敗しました');
-      const data: AppSettings = await response.json();
-      setCsvPath(data.csv_path || '');
-      const paths = data.inspection_folder_paths ?? [];
-      setFolderRows(paths.map((path) => ({
-        id: nextFolderRowId.current++,
-        path,
-        priority: data.inspection_folder_priorities?.[path] ?? 0,
-      })));
-      setErpPath(data.erp_path || '');
-      setHistoryFilePath(data.history_file_path || '');
-    } catch (err: any) {
-      setSaveMessage('エラー: ' + err.message);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const fetchClass9Settings = async () => {
-    try {
-      const res = await fetch('/api/class9-settings/');
-      if (res.ok) {
-        const data: Class9Setting[] = await res.json();
-        setClass9Settings(data);
-      }
-    } catch {
-      // ignore
-    }
-  };
 
   const handleClass9CodeSearch = (value: string) => {
     setClass9Code(value);
@@ -128,10 +143,11 @@ export const SettingsPanel: React.FC = () => {
       setClass9Code('');
       setClass9SheetPath('');
       setClass9SearchResults([]);
-      await fetchClass9Settings();
+      const data = await fetchClass9Settings();
+      if (data) setClass9Settings(data);
       setClass9Message('特殊検査(クラス9)を登録しました');
-    } catch (err: any) {
-      setClass9Message('エラー: ' + err.message);
+    } catch (err) {
+      setClass9Message('エラー: ' + getErrorMessage(err, '登録に失敗しました'));
     } finally {
       setIsClass9Saving(false);
     }
@@ -141,9 +157,10 @@ export const SettingsPanel: React.FC = () => {
     try {
       const res = await fetch(`/api/class9-settings/${id}/`, { method: 'DELETE' });
       if (!res.ok) throw new Error('削除に失敗しました');
-      await fetchClass9Settings();
-    } catch (err: any) {
-      setClass9Message('エラー: ' + err.message);
+      const data = await fetchClass9Settings();
+      if (data) setClass9Settings(data);
+    } catch (err) {
+      setClass9Message('エラー: ' + getErrorMessage(err, '削除に失敗しました'));
     }
   };
 
@@ -181,8 +198,8 @@ export const SettingsPanel: React.FC = () => {
       }
       setFolderRows(trimmedRows);
       setSaveMessage('設定を保存しました');
-    } catch (err: any) {
-      setSaveMessage('エラー: ' + err.message);
+    } catch (err) {
+      setSaveMessage('エラー: ' + getErrorMessage(err, '保存に失敗しました'));
     } finally {
       setIsSaving(false);
     }
@@ -203,8 +220,8 @@ export const SettingsPanel: React.FC = () => {
       }
       const { job_id } = await response.json();
       startPolling(job_id);
-    } catch (err: any) {
-      setJobResult({ status: 'failed', error_message: err.message });
+    } catch (err) {
+      setJobResult({ status: 'failed', error_message: getErrorMessage(err, '更新に失敗しました'), result: null });
       setIsRunning(false);
     }
   };
@@ -215,7 +232,7 @@ export const SettingsPanel: React.FC = () => {
       try {
         const response = await fetch(`/api/jobs/${jobId}/`);
         if (!response.ok) throw new Error('ジョブ状態の取得に失敗しました');
-        const jobData: Job = await response.json();
+        const jobData: MasterUpdateJobState = await response.json();
         if (jobData.status === 'succeeded' || jobData.status === 'failed') {
           if (pollingTimerRef.current) {
             clearInterval(pollingTimerRef.current);
@@ -224,13 +241,13 @@ export const SettingsPanel: React.FC = () => {
           setIsRunning(false);
           setJobResult(jobData);
         }
-      } catch (err: any) {
+      } catch (err) {
         if (pollingTimerRef.current) {
           clearInterval(pollingTimerRef.current);
           pollingTimerRef.current = null;
         }
         setIsRunning(false);
-        setJobResult({ status: 'failed', error_message: err.message });
+        setJobResult({ status: 'failed', error_message: getErrorMessage(err, 'ジョブ状態の取得に失敗しました'), result: null });
       }
     }, 2500);
   };
@@ -250,8 +267,8 @@ export const SettingsPanel: React.FC = () => {
       }
       const { job_id } = await response.json();
       startErpPolling(job_id);
-    } catch (err: any) {
-      setErpResult('エラー: ' + err.message);
+    } catch (err) {
+      setErpResult('エラー: ' + getErrorMessage(err, 'ERP自動化の実行に失敗しました'));
       setIsErpRunning(false);
     }
   };
@@ -271,10 +288,10 @@ export const SettingsPanel: React.FC = () => {
             setErpResult('エラー: ' + (jobData.error_message || 'ERP自動化に失敗しました'));
           }
         }
-      } catch (err: any) {
+      } catch (err) {
         clearInterval(interval);
         setIsErpRunning(false);
-        setErpResult('エラー: ' + err.message);
+        setErpResult('エラー: ' + getErrorMessage(err, 'ジョブ状態の取得に失敗しました'));
       }
     }, 2500);
   };

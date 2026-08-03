@@ -14,3 +14,7 @@ media/
 reports/
 *.log
 temp/
+JOBDEF.txt
+MEN400.txt
+mymenu_P1569.txt
+start.bat
