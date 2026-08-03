@@ -2013,10 +2013,6 @@ def _write_daily_report(template_path, output_path, target_date, keep_vba=True, 
 
 def print_inspection_file(target_id, user=None):
     import os as os_mod
-    import tempfile
-    import pythoncom
-    import win32com.client
-    import win32api
 
     target = InspectionTarget.objects.select_related("master").get(id=target_id, session__owner_user=user)
     if not target.master:
@@ -2031,6 +2027,11 @@ def print_inspection_file(target_id, user=None):
     file_path = insp_file["file_path"] if isinstance(insp_file, dict) else insp_file.file_path
     if not os_mod.path.exists(file_path):
         raise FileNotFoundError("検査書ファイルが保存場所に存在しません。")
+
+    import tempfile
+    import pythoncom
+    import win32com.client
+    import win32api
 
     ext = os_mod.path.splitext(file_path)[1].lower()
 
