@@ -11,6 +11,7 @@ import { MachineMasterPanel } from './components/MachineMasterPanel';
 import { AssemblyStructureModal } from './components/AssemblyStructureModal';
 import { InspectionSummary } from './components/InspectionSummary';
 import type { Job, InspectionTarget, ApiError, LayoutSummary } from './types';
+import { getErrorMessage } from './utils';
 import { ShieldAlert, RefreshCw, Layers, Map as MapIcon, Cpu, Settings, Palette, Upload, CheckCircle2, Database, Menu, Search, X, CircleUserRound, LogOut, ClipboardList } from 'lucide-react';
 
 interface AuthUser {
@@ -114,7 +115,7 @@ export const App: React.FC = () => {
   const [isLoadingTargets, setIsLoadingTargets] = useState<boolean>(false);
   const [globalError, setGlobalError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
-  const successTimerRef = useRef<any>(null);
+  const successTimerRef = useRef<number | null>(null);
   const [theme, setTheme] = useState<ThemeMode>(() => {
     if (typeof window !== 'undefined') {
       return (localStorage.getItem('theme') as ThemeMode) || 'normal';
@@ -125,7 +126,7 @@ export const App: React.FC = () => {
   const [activeLayoutId, setActiveLayoutId] = useState<number | null>(null);
   const [highlightedTargetCode, setHighlightedTargetCode] = useState<string | null>(null);
   const [highlightedTargetId, setHighlightedTargetId] = useState<number | null>(null);
-  const pollingTimerRef = useRef<any>(null);
+  const pollingTimerRef = useRef<number | null>(null);
   const profileAvatarPreview = React.useMemo(() => profileAvatar ? URL.createObjectURL(profileAvatar) : null, [profileAvatar]);
 
   useEffect(() => () => { if (profileAvatarPreview) URL.revokeObjectURL(profileAvatarPreview); }, [profileAvatarPreview]);
@@ -168,7 +169,6 @@ export const App: React.FC = () => {
 
   useEffect(() => {
     if (!authUser) {
-      setActiveMasterJob(null);
       return;
     }
     let cancelled = false;
@@ -211,7 +211,7 @@ export const App: React.FC = () => {
     const currentUser = await importBrowserSettings(data.user);
     setAuthUser(currentUser); setTheme(currentUser.settings.theme); setAuthPassword(''); void fetchLayouts(); void fetchTargets(selectedDate);
   };
-  const logoutUser = async () => { await apiFetch('/api/auth/logout/', { method: 'POST' }); setAuthUser(null); setUserMenuOpen(false); setActiveTab('dashboard'); };
+  const logoutUser = async () => { await apiFetch('/api/auth/logout/', { method: 'POST' }); setAuthUser(null); setActiveMasterJob(null); setUserMenuOpen(false); setActiveTab('dashboard'); };
   const cycleTheme = () => { const next = getNextTheme(theme); setTheme(next); void apiFetch('/api/me/settings/', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ theme: next }) }); };
   const openProfileModal = () => { userMenuTriggerRef.current?.focus(); setUserMenuOpen(false); setProfileDisplayName(authUser?.display_name || ''); setProfileAvatar(null); setCurrentPassword(''); setNewPassword(''); setNewPasswordConfirm(''); setProfileError(null); setProfileModalOpen(true); };
   const saveProfile = async (event: React.FormEvent) => {
@@ -308,8 +308,8 @@ export const App: React.FC = () => {
       }
       const data: InspectionTarget[] = await response.json();
       setTargets(data);
-    } catch (err: any) {
-      setGlobalError(err.message || '検査対象の取得に失敗しました。');
+    } catch (err) {
+      setGlobalError(getErrorMessage(err, '検査対象の取得に失敗しました。'));
       setTargets([]);
     } finally {
       setIsLoadingTargets(false);
@@ -353,9 +353,9 @@ export const App: React.FC = () => {
             fetchTargets(date);
           }
         }
-      } catch (err: any) {
+      } catch (err) {
         console.error(err);
-        setGlobalError(err.message || 'ジョブの追跡中にエラーが発生しました。');
+        setGlobalError(getErrorMessage(err, 'ジョブの追跡中にエラーが発生しました。'));
         if (pollingTimerRef.current) {
           clearInterval(pollingTimerRef.current);
           pollingTimerRef.current = null;
@@ -414,8 +414,8 @@ export const App: React.FC = () => {
       });
 
       startPolling(jobId, targetDate);
-    } catch (err: any) {
-      setGlobalError(err.message || '取込処理の開始に失敗しました。');
+    } catch (err) {
+      setGlobalError(getErrorMessage(err, '取込処理の開始に失敗しました。'));
       setIsLoadingJob(false);
     }
   };
@@ -453,10 +453,10 @@ export const App: React.FC = () => {
         const response = await fetch(`/api/masters/search/?q=${encodeURIComponent(value.trim())}`, { signal: controller.signal });
         if (!response.ok) throw new Error('検索に失敗しました');
         setStructureResults(await response.json());
-      } catch (err: any) {
-        if (err.name === 'AbortError') return;
+      } catch (err) {
+        if (err instanceof Error && err.name === 'AbortError') return;
         setStructureResults([]);
-        setStructureSearchError(err.message || '検索に失敗しました');
+        setStructureSearchError(getErrorMessage(err, '検索に失敗しました'));
       } finally {
         if (structureSearchAbortRef.current === controller) {
           structureSearchAbortRef.current = null;
@@ -568,8 +568,8 @@ export const App: React.FC = () => {
           }
         }, 2000);
       });
-    } catch (err: any) {
-      setGlobalError(err.message || '検査書印刷の開始に失敗しました');
+    } catch (err) {
+      setGlobalError(getErrorMessage(err, '検査書印刷の開始に失敗しました'));
       throw err;
     }
   };
@@ -599,8 +599,8 @@ export const App: React.FC = () => {
         showSuccess('記入対象の履歴がありません');
       }
       fetchTargets(date);
-    } catch (err: any) {
-      setGlobalError(err.message || '履歴ファイルへの記入に失敗しました');
+    } catch (err) {
+      setGlobalError(getErrorMessage(err, '履歴ファイルへの記入に失敗しました'));
       throw err;
     }
   };
@@ -636,8 +636,8 @@ export const App: React.FC = () => {
           }
         }, 2000);
       });
-    } catch (err: any) {
-      setGlobalError(err.message || '日報発行の開始に失敗しました');
+    } catch (err) {
+      setGlobalError(getErrorMessage(err, '日報発行の開始に失敗しました'));
       throw err;
     }
   };

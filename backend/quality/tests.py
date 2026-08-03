@@ -1,8 +1,10 @@
+import sys
+from contextlib import contextmanager
 import os
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from django.test import TestCase, override_settings
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -69,6 +71,42 @@ MASTER_CSV_LINES = [
 ]
 
 MASTER_CSV = (CSV_HEADER + "\n" + "\n".join(MASTER_CSV_LINES)).encode("cp932")
+
+
+@contextmanager
+def mock_excel_com_modules():
+    """Provide only the COM module surface used by mocked Excel tests on Linux."""
+    if sys.platform == "win32":
+        import pythoncom
+        import win32com.client as win32_client
+
+        yield pythoncom, win32_client
+        return
+
+    class ComError(Exception):
+        pass
+
+    pythoncom = ModuleType("pythoncom")
+    pythoncom.com_error = ComError
+    pythoncom.CoInitialize = MagicMock()
+    pythoncom.CoUninitialize = MagicMock()
+
+    win32com = ModuleType("win32com")
+    win32_client = ModuleType("win32com.client")
+    win32_client.GetActiveObject = MagicMock()
+    win32_client.Dispatch = MagicMock()
+    win32_client.DispatchEx = MagicMock()
+    win32com.client = win32_client
+
+    with patch.dict(
+        sys.modules,
+        {
+            "pythoncom": pythoncom,
+            "win32com": win32com,
+            "win32com.client": win32_client,
+        },
+    ):
+        yield pythoncom, win32_client
 
 
 def csv_with_codes(codes_with_data):
@@ -958,7 +996,6 @@ class PhaseTwoMasterUpdateTests(TestCase):
         from quality.services import issue_inspection_sheets, _excel_serial_date
         from datetime import date
         from unittest.mock import MagicMock, patch, PropertyMock
-        import pythoncom
 
         cm = ClassMaster.objects.get(class_no=1)
         master = Master.objects.create(code="CDP0028", name="TestItem")
@@ -1013,12 +1050,14 @@ class PhaseTwoMasterUpdateTests(TestCase):
             mock_xl = MagicMock()
             mock_xl.Workbooks.Open.return_value = mock_wb
 
-            with patch(
-                "win32com.client.GetActiveObject",
-                side_effect=pythoncom.com_error(-2147023584, "No active Excel instance", None, None),
-            ), patch("win32com.client.Dispatch", return_value=mock_xl) as mocked_dispatch:
-                with override_settings(DAILY_REPORT_TEMPLATE=template_path):
-                    result = issue_inspection_sheets(target_date=date(2026, 6, 26))
+            with mock_excel_com_modules() as (pythoncom, win32_client):
+                with patch.object(
+                    win32_client,
+                    "GetActiveObject",
+                    side_effect=pythoncom.com_error(-2147023584, "No active Excel instance", None, None),
+                ), patch.object(win32_client, "Dispatch", return_value=mock_xl) as mocked_dispatch:
+                    with override_settings(DAILY_REPORT_TEMPLATE=template_path):
+                        result = issue_inspection_sheets(target_date=date(2026, 6, 26))
 
             self.assertEqual(result["issued_count"], 1)
             mocked_dispatch.assert_called_once_with("Excel.Application")
@@ -1058,10 +1097,11 @@ class PhaseTwoMasterUpdateTests(TestCase):
             shared_xl = MagicMock()
             shared_xl.Workbooks.Open.return_value = mock_wb
 
-            with patch("win32com.client.GetActiveObject", return_value=shared_xl) as active_excel, \
-                 patch("win32com.client.Dispatch") as mocked_dispatch, \
-                 override_settings(DAILY_REPORT_TEMPLATE=template_path):
-                result = issue_inspection_sheets(target_date=date(2026, 6, 26))
+            with mock_excel_com_modules() as (_, win32_client):
+                with patch.object(win32_client, "GetActiveObject", return_value=shared_xl) as active_excel, \
+                     patch.object(win32_client, "Dispatch") as mocked_dispatch, \
+                     override_settings(DAILY_REPORT_TEMPLATE=template_path):
+                    result = issue_inspection_sheets(target_date=date(2026, 6, 26))
 
             self.assertEqual(result["issued_count"], 1)
             active_excel.assert_called_once_with("Excel.Application")
@@ -1094,9 +1134,10 @@ class PhaseTwoMasterUpdateTests(TestCase):
             mock_xl = MagicMock()
             mock_xl.Workbooks.Open.return_value = mock_wb
 
-            with patch("win32com.client.Dispatch", return_value=mock_xl):
-                with override_settings(DAILY_REPORT_TEMPLATE=template_path):
-                    result = issue_inspection_sheets(target_date=date(2026, 6, 26))
+            with mock_excel_com_modules() as (_, win32_client):
+                with patch.object(win32_client, "Dispatch", return_value=mock_xl):
+                    with override_settings(DAILY_REPORT_TEMPLATE=template_path):
+                        result = issue_inspection_sheets(target_date=date(2026, 6, 26))
 
             self.assertEqual(result["issued_count"], 0)
             self.assertIn("No printable entries", result["message"])
@@ -1126,9 +1167,10 @@ class PhaseTwoMasterUpdateTests(TestCase):
             mock_xl = MagicMock()
             mock_xl.Workbooks.Open.return_value = mock_wb
 
-            with patch("win32com.client.Dispatch", return_value=mock_xl):
-                with override_settings(DAILY_REPORT_TEMPLATE=template_path):
-                    result = issue_inspection_sheets(target_date=date(2026, 6, 26))
+            with mock_excel_com_modules() as (_, win32_client):
+                with patch.object(win32_client, "Dispatch", return_value=mock_xl):
+                    with override_settings(DAILY_REPORT_TEMPLATE=template_path):
+                        result = issue_inspection_sheets(target_date=date(2026, 6, 26))
 
             self.assertEqual(result["issued_count"], 0)
             self.assertIn("No printable entries", result["message"])

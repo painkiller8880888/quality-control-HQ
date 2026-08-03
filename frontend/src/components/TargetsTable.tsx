@@ -87,7 +87,7 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
     }
     if (node) {
       const observer = new ResizeObserver((entries) => {
-        for (let entry of entries) {
+        for (const entry of entries) {
           // Change layout if the pane width is 750px or less
           if (entry.contentRect.width <= 750) {
             setIsPaneCollapsed(true);
@@ -188,7 +188,7 @@ export const TargetsTable: React.FC<TargetsTableProps> = ({
     } else if (drag.direction === 'uncheck') {
       setHideChecked(prev => { const s = new Set(prev); s.delete(targetId); return s; });
     }
-  }, [targets, hideChecked]);
+  }, [targets]);
 
   const lastPointerRef = useRef({ x: 0, y: 0 });
 

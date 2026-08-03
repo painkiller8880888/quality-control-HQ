@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { Cpu, Plus, X, Search, Check, Save, Trash2 } from 'lucide-react';
 import type { MachineDetail } from '../types';
+import { getErrorMessage } from '../utils';
 
 interface MasterSearchResult {
   code: string;
@@ -83,20 +84,25 @@ export const MachineMasterPanel: React.FC = () => {
     });
   }, [machines]);
 
-  useEffect(() => {
-    fetchMachines();
-  }, []);
+  async function fetchMachines(): Promise<MachineDetail[]> {
+    const res = await fetch('/api/machine-master/');
+    if (!res.ok) throw new Error('機械データの取得に失敗しました');
+    return await res.json();
+  }
 
-  const fetchMachines = async () => {
-    try {
-      const res = await fetch('/api/machine-master/');
-      if (!res.ok) throw new Error('機械データの取得に失敗しました');
-      const data: MachineDetail[] = await res.json();
-      setMachines(data);
-    } catch (err: any) {
-      setMessage({ type: 'error', text: err.message });
-    }
-  };
+  useEffect(() => {
+    let cancelled = false;
+    void fetchMachines()
+      .then((data) => {
+        if (!cancelled) setMachines(data);
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setMessage({ type: 'error', text: getErrorMessage(err, '機械データの取得に失敗しました') });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const selectMachine = (id: number | null) => {
     setSelectedId(id);
@@ -150,10 +156,14 @@ export const MachineMasterPanel: React.FC = () => {
       }
       const saved: MachineDetail = await res.json();
       setMessage({ type: 'success', text: '保存しました' });
-      await fetchMachines();
+      const refreshedMachines = await fetchMachines().catch((err: unknown) => {
+        setMessage({ type: 'error', text: getErrorMessage(err, '機械データの取得に失敗しました') });
+        return null;
+      });
+      if (refreshedMachines) setMachines(refreshedMachines);
       setSelectedId(saved.id);
-    } catch (err: any) {
-      setMessage({ type: 'error', text: err.message });
+    } catch (err) {
+      setMessage({ type: 'error', text: getErrorMessage(err, '保存に失敗しました') });
     } finally {
       setIsSaving(false);
     }
@@ -243,7 +253,7 @@ export const MachineMasterPanel: React.FC = () => {
             </div>
             <div className="form-group">
               <label className="form-label">形状</label>
-              <select className="form-control" value={form.shape_type} onChange={e => setForm(f => ({ ...f, shape_type: e.target.value as any }))}>
+              <select className="form-control" value={form.shape_type} onChange={e => setForm(f => ({ ...f, shape_type: e.target.value as MachineForm['shape_type'] }))}>
                 <option value="circle">Circle</option>
                 <option value="ellipse">Ellipse</option>
                 <option value="rectangle">Rectangle</option>
