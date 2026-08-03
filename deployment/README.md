@@ -25,7 +25,7 @@ Before approval, the backup owner supplies distinct lowercase source/restore ide
 1. `deployment/pseudoprod/.env.example`と`.env.migrate.example`をそれぞれ拡張子なしの実設定へコピーし、置換対象を実値へ変更する。Waitressにはruntime設定だけを渡す。
 2. 管理者PowerShellから`configure_postgresql_localhost.ps1`を実行し、PostgreSQLの待受をlocalhostへ限定する。
 3. `deployment/postgresql/.env.bootstrap.example`を`.env.bootstrap`へコピーして秘密値を設定し、`initialize_databases.py --env-file <path>`で疑似本番・開発のDBとロールを分離する。
-4. 仮想環境へ`requirements.txt`をインストールする。
+4. 仮想環境へ再現可能な固定依存`requirements.lock`をインストールする。
 5. `deployment/windows/build_pseudoprod.ps1`でfrontend build、サービス停止、migration、成果物切替、collectstatic、deployment check、サービス再開を実行する。旧frontend成果物は`runtime/rollback`へ保存される。
 6. `deployment/windows/run_pseudoprod.ps1`でWaitressを手動起動し、疎通と異常応答を確認する。
 7. クライアントIPが確定したら、管理者PowerShellから`configure_firewall.ps1 -ClientIp <IPv4>`を実行する。
