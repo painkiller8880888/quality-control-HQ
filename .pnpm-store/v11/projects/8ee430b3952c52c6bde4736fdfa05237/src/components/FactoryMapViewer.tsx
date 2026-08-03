@@ -24,7 +24,8 @@ const objectLabel = (object: LayoutObject) => {
 };
 
 const objectFillColor = (object: LayoutObject, types: LayoutObjectType[]): string => {
-  if (object.meta_json?.fill_color) return object.meta_json.fill_color;
+  const fillColor = object.meta_json?.fill_color;
+  if (typeof fillColor === 'string' && fillColor) return fillColor;
   const typeDef = types.find((t) => t.code === object.type);
   if (typeDef?.color) return typeDef.color;
   return FALLBACK_COLORS[object.type] || '#6366f1';

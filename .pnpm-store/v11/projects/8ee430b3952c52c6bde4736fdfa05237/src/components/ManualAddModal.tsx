@@ -1,5 +1,6 @@
 import React, { useState, useRef, useCallback } from 'react';
 import { Search, Plus, X, Check } from 'lucide-react';
+import { getErrorMessage } from '../utils';
 
 interface MasterSearchResult {
   code: string;
@@ -39,8 +40,8 @@ export const ManualAddModal: React.FC<ManualAddModalProps> = ({ selectedDate, on
         if (!res.ok) throw new Error('検索に失敗しました');
         const data: MasterSearchResult[] = await res.json();
         setResults(data);
-      } catch (err: any) {
-        setError(err.message);
+      } catch (err) {
+        setError(getErrorMessage(err, '検索に失敗しました'));
       } finally {
         setIsSearching(false);
       }
@@ -72,8 +73,8 @@ export const ManualAddModal: React.FC<ManualAddModalProps> = ({ selectedDate, on
       }
       onAdded();
       onClose();
-    } catch (err: any) {
-      setError(err.message);
+    } catch (err) {
+      setError(getErrorMessage(err, '追加に失敗しました'));
     } finally {
       setIsAdding(false);
     }

@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Plus, X, Check, AlertTriangle } from 'lucide-react';
 import type { Class9Setting } from '../types';
+import { getErrorMessage } from '../utils';
 
 interface SpecialAddModalProps {
   selectedDate: string;
@@ -15,23 +16,28 @@ export const SpecialAddModal: React.FC<SpecialAddModalProps> = ({ selectedDate, 
   const [isAdding, setIsAdding] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    fetchSettings();
-  }, []);
+  async function fetchSettings(): Promise<Class9Setting[]> {
+    const res = await fetch('/api/class9-settings/');
+    if (!res.ok) throw new Error('特殊検査設定の取得に失敗しました');
+    return await res.json();
+  }
 
-  const fetchSettings = async () => {
-    setIsLoading(true);
-    try {
-      const res = await fetch('/api/class9-settings/');
-      if (!res.ok) throw new Error('特殊検査設定の取得に失敗しました');
-      const data: Class9Setting[] = await res.json();
-      setSettings(data);
-    } catch (err: any) {
-      setError(err.message);
-    } finally {
-      setIsLoading(false);
-    }
-  };
+  useEffect(() => {
+    let cancelled = false;
+    void fetchSettings()
+      .then((data) => {
+        if (!cancelled) setSettings(data);
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setError(getErrorMessage(err, '特殊検査設定の取得に失敗しました'));
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const toggleSelect = (code: string) => {
     setSelectedCodes(prev => {
@@ -61,8 +67,8 @@ export const SpecialAddModal: React.FC<SpecialAddModalProps> = ({ selectedDate, 
       }
       onAdded();
       onClose();
-    } catch (err: any) {
-      setError(err.message);
+    } catch (err) {
+      setError(getErrorMessage(err, '追加に失敗しました'));
     } finally {
       setIsAdding(false);
     }
