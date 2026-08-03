@@ -26,46 +26,32 @@ Do not split otherwise batchable inspections across multiple outer tool calls. H
 - Keep dependent work, approvals, writes, builds, deployments, and operations sharing files or processes sequential.
 - Keep each command request to at most 200 lines or 16 KiB of output. Keep each handoff evidence excerpt to at most 40 lines or 4 KiB; summarize and mark truncation without hiding failures.
 
-## Shared principles and ownership
+## ルール
 
-This repository is in MVP phase: make the minimum change, preserve existing style and public behavior, avoid unnecessary abstraction or refactoring, and do not change scope by assumption. Do not stage, commit, push, install, activate, invoke services, or edit files outside the approved scope.
+- codexは計画ではなく作業とPRの作成を担当する。計画とレビューはuser(人間)がwebのchatGPTを用いて行う。具体的な方針はdoc/codex-pipeline-personal.md、スキーマはdoc/codex-pipeline-schema.mdを参照する。
+- mainへ直接pushしない。作業はブランチ＋PRを経由する。
+- 頼まれていないリファクタリングをしない。
+- 不確実な仕様を推測で実装しない。
+- 変更前にgit statusを確認する。
 
-Roles are separate. Planner creates an implementation-ready plan; Implementer delivers its approved change and validation; Reviewer independently determines correctness and opens the user decision gate. Handoff generation is not the completion goal. Every new feature or fix starts with Planner.
+## 作業手順
 
-`AGENTS.md` is the shared source for prohibitions, identity, schemas, limits, and routes. Role TOMLs reference this contract instead of duplicating it.
+1. user(人間)が要求をIssueとして書く
+2. webのchatGPTがまず読み、調査すべき不確実性を洗い出す
+3. codexが読み取り専用で調査し、結果（関連ファイル・現状の実装・依存関係・既存テストの状態など）を返す
+4. webのchatGPTが調査結果をもとにPlanとcodex側モデル（原則Luna）を確定する
+5. codexのworktreeで実装させる
+6. codexが検証スクリプトを実行させる
+7. codexがDraft PRを作らせる
+8. webのchatGPTにPRを独立レビューさせる
+9. 指摘があればcodexに修正させる
+10. user(人間)がCIを通す
+11. user(人間)が最終確認してマージする
 
-## Handoff identity and limits
+## 止まるべき条件
 
-Every handoff contains exactly one shared metadata block:
-
-- `Cycle ID`
-- `Plan SHA-256`: a lowercase 64-hex value
-- `Job ID`: exactly `<cycle-id>:<plan-sha256>`
-
-The canonical plan hash is non-circular: normalize the entire current Planner handoff from CRLF/CR to LF; hash the UTF-8 bytes after `<!-- PLAN-BODY-START -->\n` through the byte before `\n<!-- PLAN-BODY-END -->`. Exclude both markers and both boundary newlines.
-
-Before implementation or review, Implementer and Reviewer recompute that hash from the current Planner handoff and verify all three identity fields. They also verify Planner/Implementer metadata agreement and current working-tree scope. Missing, malformed, mismatched, or cross-cycle identity is `BLOCKED`; stale handoffs and validation are not evidence.
-
-Replace, never append, each role handoff. It must contain current-cycle-only content, be reread after writing, and be measured opportunistically for UTF-8 bytes and lines. The maximum is 120 lines and 12 KiB. If it cannot be written and confirmed within both limits, report `BLOCKED` rather than role completion. Record exact commands, exit codes, and current-cycle results.
-
-## Outcomes and canonical handoff schemas
-
-`Outcome` is only `PASS`, `FAIL`, or `BLOCKED`.
-
-Planner handoff schema: metadata, `Outcome`, Goal, In Scope, Deferred Scope, Affected Files, Required Changes, Validation, Acceptance Criteria, Safety Gates, Next Minimum Scope.
-
-Implementer handoff schema: metadata, `Outcome`, `Status`, Product Changes, Validation Performed, Validation Results, Unverified Items, Blocking Cause/Route, Safety Confirmation, Working-Tree Scope. `Status` is only `COMPLETE`, `VALIDATION_FAILED`, or `BLOCKED`, mapping respectively to `PASS`, `FAIL`, and `BLOCKED`. `VALIDATION_FAILED` requires an attempted implementation and failed named validation; inability to begin or continue safely is `BLOCKED`.
-
-Reviewer handoff schema: metadata, `Verdict` (the common outcome), Review Scope, Verified Facts, Unverified Items, Findings and Priority, Required Result, Next Minimum Scope, Safety Gates, Route Conditions, User Decision Gate. Every finding states failing behavior, evidence/impact, priority, and required result. Reviewer does not prescribe a correction or implementation design.
-
-## Planning, implementation, and review rules
-
-Planner alone owns cycle sizing, the earliest dependency-complete split, `Next Minimum Scope`, and required results. A Planner `BLOCKED` routes to the user for the missing decision or authority.
-
-Implementer may not propose a split. On readiness, authority, identity, or feasibility blockage, it reports the exact cause, makes no product changes, and routes to Planner. `VALIDATION_FAILED` proceeds to Reviewer as a failed attempted implementation.
-
-Reviewer independently inspects the working tree, diff, relevant code, and validation results rather than trusting a handoff. Its verdict uses the common Outcome. A Reviewer `FAIL` reaches the user gate and any fix restarts at Planner. A Reviewer `BLOCKED` routes contract/cycle/scope defects to Planner and unavailable authority/environment/evidence to the user. A Reviewer `PASS` reaches the user gate with explicit finish/accept and new-Planner-cycle choices.
-
-## Mandatory user decision gate
-
-Reviewer always replaces `.codex/agents/.reviewer/HANDOFF.md` when review ends and then stops for explicit user direction. In that turn it must not begin a new Planner cycle, begin implementation, implement externally, fix findings itself, or infer quota or route selection. It tells the user the verdict, blocking findings or next minimum work, whether Codex and external implementation are available, and that the user must choose the route.
+- RPと現行コードが矛盾している
+- 変更対象が当初計画の2倍以上に広がった
+- DBスキーマ変更や権限設計に影響する
+- 既存テストの失敗原因を特定できない
+- 止まったら、試行内容・確認済み事項・未解決点をPRまたはコメントに書いて報告する。

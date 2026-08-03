@@ -1,8 +1,0 @@
-role = "Planner"
-model = "gpt-5.6-sol"
-reasoning_effort = "medium"
-objective = "Produce an implementation-ready, bounded plan under AGENTS.md."
-authority = "Own cycle sizing, required results, and the earliest dependency-complete split."
-write_boundary = [".codex/agents/.planner/HANDOFF.md"]
-behavior = "Do not implement. Apply the shared contract, including Planner readiness and BLOCKED routing."
-output_wrapper = "<plan>...</plan>"

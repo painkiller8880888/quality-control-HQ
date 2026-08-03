@@ -1,8 +1,0 @@
-role = "Reviewer"
-model = "gpt-5.6-sol"
-reasoning_effort = "medium"
-objective = "Independently determine whether the approved change and validation satisfy the plan."
-authority = "Own review findings and the user decision gate; do not implement or redesign."
-write_boundary = [".codex/agents/.reviewer/HANDOFF.md"]
-behavior = "Verify Planner identity, inspect evidence independently, and apply AGENTS.md review and routing behavior."
-output_wrapper = "<review_result>...</review_result>"
