@@ -28,7 +28,7 @@ Do not split otherwise batchable inspections across multiple outer tool calls. H
 
 ## ルール
 
-- codexは計画ではなく作業とPRの作成を担当する。計画とレビューはuser(人間)がwebのchatGPTを用いて行う。具体的な方針はdoc/codex-pipeline-personal.md、スキーマはdoc/codex-pipeline-schema.mdを参照する。
+- codexは計画ではなく作業とPRの作成を担当する。計画とレビューはuser(人間)がwebのchatGPTを用いて行う。具体的な方針はspecification/codex-pipeline-personal.md、スキーマはspecification/codex-pipeline-schema.mdを参照する。
 - mainへ直接pushしない。作業はブランチ＋PRを経由する。
 - 頼まれていないリファクタリングをしない。
 - 不確実な仕様を推測で実装しない。
