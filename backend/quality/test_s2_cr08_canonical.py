@@ -629,13 +629,13 @@ class CommandDryRunTests(TransactionTestCase):
         self._baseline_patcher.start()
         # Mock canonical payload verification to pass (F5)
         self._verify_patcher = patch(
-            "quality.s2_cr08_canonical._verify_canonical_payload",
+            "quality.management.commands.measure_s2_cr08_canonical._verify_canonical_payload",
             return_value={"passed": True, "csv_exists": True, "csv_hash": "mocked_hash", "csv_row_count": 2, "folder_paths_count": 1, "priorities_count": 1, "status": "valid", "issues": []}
         )
         self._verify_patcher.start()
         # Mock preflight to return privacy-safe values (F7)
         self._preflight_patcher = patch(
-            "quality.s2_cr08_canonical.run_preflight",
+            "quality.management.commands.measure_s2_cr08_canonical.run_preflight",
             return_value={
                 "env_identity": {"passed": True, "found": True},
                 "django_check": {"passed": True, "output": "system check output"},
