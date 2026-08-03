@@ -93,7 +93,7 @@ return $result | ConvertTo-Json -Compress
         if isinstance(data, dict):
             return [(int(data["ChildPid"]), str(data.get("LocalAddress", "")), int(data["LocalPort"]))]
         return [(int(d["ChildPid"]), str(d.get("LocalAddress", "")), int(d["LocalPort"])) for d in data]
-    except (subprocess.TimeoutExpired, ValueError, json.JSONDecodeError, KeyError):
+    except (FileNotFoundError, subprocess.TimeoutExpired, ValueError, json.JSONDecodeError, KeyError):
         return []
 
 
@@ -1286,7 +1286,7 @@ Write-Output "$($svc.Status)|$($svc.StartType)"
             "running": running,
             "automatic": automatic,
         }
-    except (subprocess.TimeoutExpired, IndexError):
+    except (FileNotFoundError, subprocess.TimeoutExpired, IndexError):
         return {"passed": False, "found": False, "status": "error"}
 
 
