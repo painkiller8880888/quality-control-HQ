@@ -55,7 +55,7 @@ export interface Job {
 export interface InspectionTargetWarning {
   error_code: string;
   message: string;
-  details: Record<string, any>;
+  details: Record<string, unknown>;
 }
 
 export interface InspectionTarget {
@@ -115,7 +115,7 @@ export interface ApiError {
   status: 'error';
   error_code: string;
   message: string;
-  details?: Record<string, any>;
+  details?: Record<string, unknown>;
 }
 
 export type LayoutObjectTypeCode = 'machine' | 'wall' | 'path' | 'area' | 'stairs' | 'entrance';
@@ -141,7 +141,7 @@ export interface LayoutObject {
   width: number;
   height: number;
   rotation?: number;
-  meta_json?: Record<string, any>;
+  meta_json?: Record<string, unknown>;
 }
 
 export interface AssignedItem {
