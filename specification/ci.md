@@ -7,7 +7,7 @@ Branch rulesetで要求するstatus check名は、workflowのjob名と同じ次�
 - backend: `requirements.lock`からPython依存をclean installし、PostgreSQL 18 service上でDjango check、migration drift check、configとqualityの全Django test、production-likeな check --deploy を実行します。`requirements.lock`は`requirements.txt`をPython 3.12向けにuvで固定したファイルです。Django test runnerが作るtest databaseのため、CIのservice roleにはCREATE DATABASE権限が必要です。
 - frontend: frontend/package-lock.jsonに対する npm ci の後、lint、build、生成物が空でないことを確認します。
 - dependency-audit: `requirements.lock`の固定versionをpip-audit、Nodeを npm audit --audit-level=high で監査します。High/Critical相当の結果は失敗扱いにし、恒久的なignoreは作りません。
-- windows-dependency-audit: Windows runnerで同じ`requirements.lock`を`--require-hashes`付きでclean installし、`pip check`、`pip-audit --strict`、Windows固有依存（pywin32、Waitress等）のimportを確認します。実サービス、Office、UNC、ERPへは接続しません。
+- windows-dependency-audit: Windows runner（現在利用可能なPython 3.12.10 x64）で同じ`requirements.lock`を`--require-hashes`付きでclean installし、`pip check`、`pip-audit --strict`、Windows固有依存（pywin32、Waitress等）のimportを確認します。実サービス、Office、UNC、ERPへは接続しません。
 - secret-scan: PRでは`pull_request.base.sha..pull_request.head.sha`をGitleaks CLIの`--log-opts`へ明示的に渡して差分を検査します。mainへのpushでは`before..sha`を検査します。APIのコミット一覧には依存しません。検出時は失敗し、コメント・artifact・job summaryへの出力はありません。
 - secret-scan-history: `.github/workflows/secret-history.yml`の`workflow_dispatch`でGitleaks CLIによるrepository全履歴検査を実行します。通常CIとはworkflowとconcurrencyを分離し、PR差分のrequired checkにはしません。
 
