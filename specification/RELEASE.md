@@ -280,7 +280,7 @@ reviewerの最新検証は、PowerShellがexit 0、focused case 20/20の後に`S
 - privacy-safeかつatomicなevidence rootとchecksum/linkage plan。
 - rollback/recovery condition、およびlive approvalが別承認であることの確認。
 
-このcheckpointは現在のfake/static作業を閉じるだけで、追加testやruntime actionを一切承認しない。本節のTODOはself-executing approvalではなく、userが次のrouteと単一scopeを明示選択した場合だけ再開する。次のplannerは、userが別の単一dependency-complete boundaryを明示しない限りTODO 1から開始する。再開した各cycleは独立reviewer handoffと新たなuser decision gateで必ず停止する。
+このcheckpointは現在のfake/static作業を閉じるだけで、追加testやruntime actionを一切承認しない。本節のTODOはself-executing approvalではなく、userが次のrouteと単一scopeを明示選択した場合だけ再開する。旧checkpoint時点では、userが別の単一dependency-complete boundaryを明示しない限り、次のplannerはTODO 1から開始する想定だった。このTODO 1〜8は履歴として保持するが、2026-08-04の「Stage B backup/restore 現行main同期」節によりsupersededされており、現在の実装計画や再開地点としては使用しない。現在の開始地点は同同期節の「承認待ち・次の開始地点」である。再開した各cycleは独立reviewer handoffと新たなuser decision gateで必ず停止する。
 
 #### Stage B backup/restore 現行main同期（2026-08-04）
 
@@ -300,7 +300,7 @@ reviewerの最新検証は、PowerShellがexit 0、focused case 20/20の後に`S
 
 - `powershell.exe -NoProfile -ExecutionPolicy Bypass -File deployment/windows/test_validate_stage_b_backup_restore.ps1`: exit 0。最終出力は`Service ownership + invalid truthy tests: 22 passed, 0 failed`、`Stage B pure validation tests passed`。Process resultの異常型、service ownership/recovery、PlanOnly、Execute evidence、Cleanup evidence、controlled provider integration、privacy、failure時の残骸防止をfake/static境界で検証した。これは実runtime済みを意味しない。
 - `python deployment/postgresql/test_stage_b_snapshot.py`: exit 0。`Ran 6 tests`、`OK`。canonical hash、FK dictionary名、identity normalization、restoreのdistinct OID guard、privacy-safe snapshotを検証した。
-- `git diff --check -- specification/RELEASE.md`: exit 0（この同期節追加前にも実行）。補助的に`powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/verify.ps1 -Scope Frontend`を実行したが、exit 2で失敗した。現行mainの`6f5fa9b`で`frontend/eslint.config.js`が削除され、`npm run lint`が設定ファイル不足で停止する既存問題であり、今回の文書変更またはStage B testの失敗ではない。製品コードは修正していない。
+- `git diff --check -- specification/RELEASE.md`: exit 0。追加節を含む現行作業HEAD `c962ace`をcheckoutした状態で再実行し、今回の失効表示・CI記録修正後のworking treeでも再実行した。補助的なローカル`powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/verify.ps1 -Scope Frontend`はexit 2で失敗したが、これは`6f5fa9b`で`frontend/eslint.config.js`が削除されたことによる別の既存問題である。PR #13の確認済みCI run `30875608506`でfrontendが失敗した原因はそれではなく、`npm ci`が`typescript@7.0.2`と`typescript-eslint@8.60.0`（peerは`typescript >=4.8.4 <6.1.0`）の競合で停止したためである。dependency-auditの失敗は、`requirements.txt`から再生成した内容と`requirements.lock`が一致せず、少なくとも`psycopg-binary==3.3.4`がlockへ反映されていないためである。これらは今回の文書変更の対象外であり、製品コード・依存lockは修正していない。`c962ace`現行HEADでのCI既知結果はbackend、windows-dependency-audit、secret-scanが成功、frontendとdependency-auditが失敗である。
 - PR #3（merge `1a8a047`、CI run `30790809596`）はbackend/frontend/dependency-audit/secret-scanが成功、PR #10（merge `fce3ad7`、CI run `30866280112`）はbackend/frontend/dependency-audit/windows-dependency-audit/secret-scanが成功した。PR #11のhead run `30871694235`はbackend/secret-scan/windows-dependency-auditが成功した一方、frontendとdependency-auditが失敗した。PR #11本文は`--`であり、これらのCI結果はいずれもStage B runtime受入の証跡ではない。
 
 ##### runtime未実施・未証明
