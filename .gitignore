@@ -19,11 +19,8 @@ media/
 reports/
 *.log
 temp/
-<<<<<<< HEAD
 .pnpm-store/
-=======
 JOBDEF.txt
 MEN400.txt
 mymenu_P1569.txt
 start.bat
->>>>>>> origin/main
