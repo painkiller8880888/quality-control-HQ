@@ -282,6 +282,42 @@ reviewerの最新検証は、PowerShellがexit 0、focused case 20/20の後に`S
 
 このcheckpointは現在のfake/static作業を閉じるだけで、追加testやruntime actionを一切承認しない。本節のTODOはself-executing approvalではなく、userが次のrouteと単一scopeを明示選択した場合だけ再開する。次のplannerは、userが別の単一dependency-complete boundaryを明示しない限りTODO 1から開始する。再開した各cycleは独立reviewer handoffと新たなuser decision gateで必ず停止する。
 
+#### Stage B backup/restore 現行main同期（2026-08-04）
+
+2026-08-04の現行`main`（確認したHEAD: `fdca02d`）では、上記2026-07-29 checkpointのTODO 1〜8は履歴上の再開記録であり、現在の実装作業をTODO 1から再開する一覧ではない。現行ファイルを正として、2026-07-29以降の関連commit（snapshotの`0de70ad`、Stage B validator/testの`591af5f`、CIの`0a75137`、`87d7e32`、`f3b6be6`、`fce3ad7`）とPR #3、#10、#11の本文・差分・checkを照合した。以下では「実装済み」「test済み」「runtime済み」「承認済み」を分ける。
+
+##### 実装済み（コード上）
+
+- `deployment/windows/validate_stage_b_backup_restore.ps1`に、strict pending manifest、protected source/targetとOIDの分離、owner、client/server version、storage/retention、service order、active Job 0、`LIVE_BLOCKED=True`、`criterion_8=not_evaluable`の検証、およびexact adapter contractがある。
+- TODO 1〜3相当は実装済みである。`Assert-StageBPgDumpResult`、`Assert-StageBPgRestoreListResult`、`Assert-StageBPgRestoreResult`が、`success`のBoolean、`exit_code`のInt32かつ0、dump/listの正数Int64 size、lowercase SHA-256 hashをstrictに検証し、`Invoke-StageBSequence`がfail-closedに適用する。
+- TODO 4相当もコード上は実装済みである。`Assert-StageBRuntimeProvider`、`New-StageBProductionAdapter`、`State` callback、`Assert-StageBCurrentState`、serviceのstop/start state検証が、production adapterとruntime-providerの境界を固定する。ただしprovider未注入時のcallbackは利用不可エラーを返すfail-closedの既定値であり、実Windows serviceや実PostgreSQLへ接続するproduction runtime providerが完成済みという意味ではない。
+- TODO 5相当は実装済みである。Executeはpending manifestのchecksumとapprovalを同一manifestへlinkし、service stop/recovery、source/restore snapshot、dump/list/restore、privacy-safe result、`execution.json`とchecksumのatomic bundleを扱う。
+- TODO 6相当は実装済みである。Cleanupは成功execution evidence、cleanup owner、retained dumpのhash/size、restore OID/owner/connection、exact zero active Job、exact one drop、drop後のabsence、および`cleanup.json`のatomic bundleを検証する。
+- TODO 7相当は、strictな`New-StageBProductionAdapter`とcontrolled runtime-providerを受けるコード上の境界として実装済みである。controlled providerによるPlanOnly/Execute/Cleanupの非live integrationはtestに存在するが、これは実環境のproduction-provider受入ではない。TODO 8相当のruntime exerciseは未実施である。
+- `deployment/postgresql/stage_b_snapshot.py`はread-only transaction設定、source/restoreのOID差異、schema/table/migration/path-setのprivacy-safe snapshotを実装する。これはhelperの実装であり、実DBでのruntime受入を示さない。
+
+##### fake/static合格（現行testの再実行）
+
+- `powershell.exe -NoProfile -ExecutionPolicy Bypass -File deployment/windows/test_validate_stage_b_backup_restore.ps1`: exit 0。最終出力は`Service ownership + invalid truthy tests: 22 passed, 0 failed`、`Stage B pure validation tests passed`。Process resultの異常型、service ownership/recovery、PlanOnly、Execute evidence、Cleanup evidence、controlled provider integration、privacy、failure時の残骸防止をfake/static境界で検証した。これは実runtime済みを意味しない。
+- `python deployment/postgresql/test_stage_b_snapshot.py`: exit 0。`Ran 6 tests`、`OK`。canonical hash、FK dictionary名、identity normalization、restoreのdistinct OID guard、privacy-safe snapshotを検証した。
+- `git diff --check -- specification/RELEASE.md`: exit 0（この同期節追加前にも実行）。補助的に`powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/verify.ps1 -Scope Frontend`を実行したが、exit 2で失敗した。現行mainの`6f5fa9b`で`frontend/eslint.config.js`が削除され、`npm run lint`が設定ファイル不足で停止する既存問題であり、今回の文書変更またはStage B testの失敗ではない。製品コードは修正していない。
+- PR #3（merge `1a8a047`、CI run `30790809596`）はbackend/frontend/dependency-audit/secret-scanが成功、PR #10（merge `fce3ad7`、CI run `30866280112`）はbackend/frontend/dependency-audit/windows-dependency-audit/secret-scanが成功した。PR #11のhead run `30871694235`はbackend/secret-scan/windows-dependency-auditが成功した一方、frontendとdependency-auditが失敗した。PR #11本文は`--`であり、これらのCI結果はいずれもStage B runtime受入の証跡ではない。
+
+##### runtime未実施・未証明
+
+- 実PostgreSQL binary/databaseでのsource/restore分離、実`pg_dump`・`pg_restore --list`・`pg_restore`、実restore整合性、実service state readback、service回復、Job同時状態、storage容量、retention、dump保持、UNC/network、login、application-runtime provider、主要E2E、復旧、rollback、正式artifact/evidence保管は、現行mainのfake/static testまたは現行証跡だけではruntime済みと証明できない。
+- 現行のproduction adapterはprovider未注入時にruntime callbackを拒否する。したがって、現在確認できるのはcallback schemaとcontrolled fake integrationまでであり、実行可能なdeployment固有provider、実client/server identity、実owner/role、実service identity、同一承認環境性は未確認である。
+- 2026-07-31の`591af5f`に対応するhandoffは、PostgreSQL password/role、topology、Jobs、clients、storage、services、evidence/recovery、およびPlanOnly/Execute/Cleanupをdeferredと明記している。過去handoffの自己申告だけでruntime済みとは扱わない。2026-07-28の既存canonical dry-run記録も、backup/restore runtimeや今回のfresh evidenceを代替しない。
+- PR #3/#10のCIはLinux PostgreSQL service、frontend、依存監査、Windows依存import、secret scan等を実行するが、実UNC、ERP、Office、printer、Windows service、疑似本番DBでのStage B PlanOnly/Execute/Cleanupは実行しない。PR #11のCI失敗も含め、CI結果をruntime受入の代替にしない。
+
+##### 承認待ち・次の開始地点
+
+次のIssueは、古いTODO 1の再実装ではなく、`production adapter/runtime providerのreadiness gap再確認` → `fresh read-only prerequisite/evidenceの取得` → `PlanOnly（user decision gate）` → `manifest/checksumの独立確認とExecute approval` → `Execute（user decision gate）` → `execution evidence review` → `cleanup ownerによる別approvalと再確認` → `Cleanup（user decision gate）` → `cleanup evidence reviewとrollback判断`の順に、各段階を分離して開始する。実runtime exerciseは本Issueでは実行しない。
+
+PlanOnlyの前に、対象environment/actionのapproval、protected source/target separation、distinct endpoint/database/OID、owner/roleとservice identity、active Job 0、PostgreSQL client/server versionとexecutable identity、storage capacity/retention/dump policy、service pre/post stateとinvocation-local ownership、privacy-safe atomic evidence root、rollback/recovery条件をfresh read-only evidenceとして揃える。ExecuteとCleanupは同じapprovalを流用せず、それぞれexact manifestまたは成功execution evidenceへlinkしたuser decision gateを置く。
+
+この同期で`LIVE_BLOCKED=True`、`criterion_8=not_evaluable`、Stage B-only approval、no-live-approval、およびbackup/restore Critical未解消、S2-CR-08の部分実施状態は維持する。
+
 ### S2-CR-08 テスト方針の優先順位と暫定推奨閾値（未承認）
 
 S2-CR-08は、既存回帰試験の件数増加よりも、測定対象の同一性、欠測時の安全停止、正式証跡の合否判定可能性を優先する。次の優先順位を崩さず、各修正とそのdirect positive/negative testを同一iterationで完了させる。後続優先度への着手は、先行優先度のreviewer PASS後とする。
