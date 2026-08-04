@@ -1,0 +1,707 @@
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { createPortal } from 'react-dom';
+import { X, ChevronRight, ChevronDown, Crown, Folder, FileText, Package, Maximize2, Minimize2, Printer, Eye, ZoomIn, ZoomOut } from 'lucide-react';
+
+interface StructureEdge {
+  parent_code: string;
+  child_code: string;
+  parent_name: string;
+  child_name: string;
+  parent_department: string;
+  parent_node_type_1: string;
+  parent_node_type_2: string;
+  parent_has_inspection_file: boolean;
+  child_department: string;
+  child_node_type_1: string;
+  child_node_type_2: string;
+  child_has_inspection_file: boolean;
+  level: number;
+  quantity: number | null;
+}
+
+interface StructureData {
+  root_code: string;
+  root_name: string;
+  root_department: string;
+  root_node_type_1: string;
+  root_node_type_2: string;
+  root_has_inspection_file: boolean;
+  edges: StructureEdge[];
+}
+
+interface NodeMeta {
+  department: string;
+  node_type_1: string;
+  node_type_2: string;
+  has_inspection_file: boolean;
+}
+
+interface TreeNode {
+  code: string;
+  name: string;
+  level: number;
+  children: TreeNode[];
+  quantity: number | null;
+  meta: NodeMeta;
+}
+
+interface AssemblyStructureModalProps {
+  code: string;
+  name: string;
+  onClose?: () => void;
+}
+
+const GROUP_COLORS = ['var(--ast-group-0)', 'var(--ast-group-1)', 'var(--ast-group-2)'];
+
+function buildTree(data: StructureData): TreeNode | null {
+  const childrenOf = new Map<string, Array<{ child_code: string; quantity: number | null }>>();
+  const nameMap = new Map<string, string>();
+  const metaMap = new Map<string, NodeMeta>();
+
+  const rootMeta: NodeMeta = {
+    department: data.root_department || '',
+    node_type_1: data.root_node_type_1 || '',
+    node_type_2: data.root_node_type_2 || '',
+    has_inspection_file: data.root_has_inspection_file || false,
+  };
+  nameMap.set(data.root_code, data.root_name);
+  metaMap.set(data.root_code, rootMeta);
+
+  for (const e of data.edges) {
+    if (!childrenOf.has(e.parent_code)) {
+      childrenOf.set(e.parent_code, []);
+    }
+    childrenOf.get(e.parent_code)!.push({ child_code: e.child_code, quantity: e.quantity });
+    nameMap.set(e.parent_code, e.parent_name);
+    nameMap.set(e.child_code, e.child_name);
+    if (!metaMap.has(e.parent_code)) {
+      metaMap.set(e.parent_code, {
+        department: e.parent_department || '',
+        node_type_1: e.parent_node_type_1 || '',
+        node_type_2: e.parent_node_type_2 || '',
+        has_inspection_file: e.parent_has_inspection_file || false,
+      });
+    }
+    if (!metaMap.has(e.child_code)) {
+      metaMap.set(e.child_code, {
+        department: e.child_department || '',
+        node_type_1: e.child_node_type_1 || '',
+        node_type_2: e.child_node_type_2 || '',
+        has_inspection_file: e.child_has_inspection_file || false,
+      });
+    }
+  }
+
+  const build = (code: string, level: number, quantity: number | null): TreeNode => {
+    const children = (childrenOf.get(code) || []).map(
+      c => build(c.child_code, level + 1, c.quantity)
+    );
+    return {
+      code,
+      name: nameMap.get(code) || code,
+      level,
+      children,
+      quantity,
+      meta: metaMap.get(code) || { department: '', node_type_1: '', node_type_2: '', has_inspection_file: false },
+    };
+  };
+
+  return data.edges.length > 0 ? build(data.root_code, 1, null) : null;
+}
+
+function getAllCodes(node: TreeNode): string[] {
+  const codes = [node.code];
+  for (const child of node.children) {
+    codes.push(...getAllCodes(child));
+  }
+  return codes;
+}
+
+interface LineInfo {
+  isLast: boolean;
+  ancestorHasMore: boolean[];
+}
+
+interface VisibleRow {
+  node: TreeNode;
+  l2Index: number;
+  rowKey: string;
+  line: LineInfo;
+}
+
+function computeLineInfo(rows: { node: TreeNode; rowKey: string }[]): LineInfo[] {
+  const result: LineInfo[] = [];
+  for (let i = 0; i < rows.length; i++) {
+    const { rowKey } = rows[i];
+    const depth = rowKey.split('-').length - 1;
+    const parentPath = depth === 0 ? '' : rowKey.substring(0, rowKey.lastIndexOf('-'));
+
+    const isLast = !rows.slice(i + 1).some(r => {
+      const rp = depth === 0 ? '' : r.rowKey.substring(0, r.rowKey.lastIndexOf('-'));
+      return rp === parentPath;
+    });
+
+    const ancestorHasMore: boolean[] = [];
+    for (let d = 0; d < depth; d++) {
+      const parts = rowKey.split('-');
+      const ancestorPath = parts.slice(0, d + 1).join('-');
+      const hasMore = rows.slice(i + 1).some(r => {
+        const rParts = r.rowKey.split('-');
+        if (rParts.length <= d) return false;
+        return rParts.slice(0, d + 1).join('-') === ancestorPath;
+      });
+      ancestorHasMore.push(hasMore);
+    }
+
+    result.push({ isLast, ancestorHasMore });
+  }
+  return result;
+}
+
+interface ReverseRoot {
+  root_code: string;
+  root_name: string;
+}
+
+export const AssemblyStructureView: React.FC<AssemblyStructureModalProps> = ({ code, name, onClose }) => {
+  const [tree, setTree] = useState<TreeNode | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [printingCode, setPrintingCode] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<'forward' | 'reverse'>('forward');
+  const [reverseRoots, setReverseRoots] = useState<ReverseRoot[]>([]);
+  const [selectedRoot, setSelectedRoot] = useState<string>('');
+  const [highlightCode, setHighlightCode] = useState<string | null>(null);
+  const [viewerUrl, setViewerUrl] = useState<string | null>(null);
+  const [viewerLoading, setViewerLoading] = useState(false);
+  const [viewerError, setViewerError] = useState<string | null>(null);
+  const [zoom, setZoom] = useState(1);
+  const viewerUrlRef = React.useRef<string | null>(null);
+
+  const loadStructure = useCallback(async (rootCode: string, highlight: string | null) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/structure/?code=${encodeURIComponent(rootCode)}`);
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.message || '構成データの取得に失敗しました');
+      }
+      const data: StructureData = await res.json();
+      const t = buildTree(data);
+      setTree(t);
+      setHighlightCode(highlight);
+      if (t) {
+        setExpanded(new Set([t.code]));
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '構成データの取得に失敗しました');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const fetchStructure = async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const res = await fetch(`/api/structure/?code=${encodeURIComponent(code)}`);
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.message || '構成データの取得に失敗しました');
+        }
+        const data: StructureData = await res.json();
+        if (cancelled) return;
+        const t = buildTree(data);
+        setTree(t);
+        if (t) {
+          setExpanded(new Set([t.code]));
+        }
+      } catch (err) {
+        if (!cancelled) setError(err instanceof Error ? err.message : '構成データの取得に失敗しました');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+    fetchStructure();
+    return () => { cancelled = true; };
+  }, [code]);
+
+  const handleViewModeChange = useCallback(async (mode: 'forward' | 'reverse') => {
+    setViewMode(mode);
+    if (mode === 'forward') {
+      setReverseRoots([]);
+      setSelectedRoot('');
+      setHighlightCode(null);
+      loadStructure(code, null);
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/structure/reverse-roots/?code=${encodeURIComponent(code)}`);
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.message || '逆展開ルートの取得に失敗しました');
+      }
+      const data: { roots: ReverseRoot[] } = await res.json();
+      setReverseRoots(data.roots);
+      if (data.roots.length > 0) {
+        const first = data.roots[0].root_code;
+        setSelectedRoot(first);
+        loadStructure(first, code);
+      } else {
+        setTree(null);
+        setSelectedRoot('');
+        setHighlightCode(null);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '逆展開ルートの取得に失敗しました');
+    } finally {
+      setLoading(false);
+    }
+  }, [code, loadStructure]);
+
+  const handleRootSelect = useCallback((rootCode: string) => {
+    setSelectedRoot(rootCode);
+    if (rootCode) {
+      loadStructure(rootCode, code);
+    }
+  }, [code, loadStructure]);
+
+  const visibleRows = useMemo<VisibleRow[]>(() => {
+    if (!tree) return [];
+    const rows: { node: TreeNode; l2Index: number; rowKey: string }[] = [];
+    let nextL2 = 0;
+
+    const visit = (node: TreeNode, parentL2: number, path: string) => {
+      const l2Index = node.level === 2 ? nextL2++ : parentL2;
+      rows.push({ node, l2Index, rowKey: path });
+      if (expanded.has(node.code) && node.children.length > 0) {
+        for (let i = 0; i < node.children.length; i++) {
+          visit(node.children[i], l2Index, `${path}-${i}`);
+        }
+      }
+    };
+
+    visit(tree, 0, '0');
+
+    const lineInfos = computeLineInfo(rows);
+    return rows.map((r, i) => ({ ...r, line: lineInfos[i] }));
+  }, [tree, expanded]);
+
+  const toggleExpand = useCallback((nodeCode: string) => {
+    setExpanded(prev => {
+      const next = new Set(prev);
+      if (next.has(nodeCode)) {
+        next.delete(nodeCode);
+      } else {
+        next.add(nodeCode);
+      }
+      return next;
+    });
+  }, []);
+
+  const expandAll = useCallback(() => {
+    if (!tree) return;
+    setExpanded(new Set(getAllCodes(tree)));
+  }, [tree]);
+
+  const collapseAll = useCallback(() => {
+    if (!tree) return;
+    setExpanded(new Set([tree.code]));
+  }, [tree]);
+
+  const handleOpenFile = useCallback(async (nodeCode: string) => {
+    const popup = window.open('', '_blank');
+    if (!popup) {
+      alert('Unable to open a new tab. Check the browser popup settings.');
+      return;
+    }
+    try {
+    const res = await fetch(`/api/inspection-file/open/?code=${encodeURIComponent(nodeCode)}`);
+    const contentType = res.headers.get('Content-Type') || '';
+    if (contentType.includes('application/json')) {
+      const data = await res.json();
+      if (data.status !== 'success') alert('ファイルを開けませんでした');
+      popup.close();
+    } else if (res.ok) {
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      popup.location.href = url;
+      setTimeout(() => URL.revokeObjectURL(url), 30000);
+    } else {
+      popup.close();
+    }
+    } catch {
+      popup.close();
+      alert('Unable to open the inspection file.');
+    }
+  }, []);
+
+  const handlePrintFile = useCallback(async (nodeCode: string) => {
+    setPrintingCode(nodeCode);
+    try {
+      const res = await fetch(`/api/inspection-file/print/?code=${encodeURIComponent(nodeCode)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        alert(err.message || '印刷に失敗しました');
+      }
+    } catch {
+      alert('印刷リクエストに失敗しました');
+    } finally {
+      setPrintingCode(null);
+    }
+  }, []);
+
+  const handleViewFile = useCallback(async (nodeCode: string) => {
+    setViewerLoading(true);
+    setViewerError(null);
+    if (viewerUrlRef.current) {
+      URL.revokeObjectURL(viewerUrlRef.current);
+      viewerUrlRef.current = null;
+    }
+    setViewerUrl(null);
+    setZoom(1);
+    try {
+      const res = await fetch(`/api/inspection-file/pdf/?code=${encodeURIComponent(nodeCode)}`);
+      const contentType = res.headers.get('Content-Type') || '';
+      if (contentType.includes('application/json')) {
+        const data = await res.json();
+        throw new Error(data.message || 'PDFの取得に失敗しました');
+      }
+      if (!res.ok) {
+        throw new Error('PDFの取得に失敗しました');
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      viewerUrlRef.current = url;
+      setViewerUrl(url);
+    } catch (err) {
+      setViewerError(err instanceof Error ? err.message : 'PDFの取得に失敗しました');
+    } finally {
+      setViewerLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (viewerUrlRef.current) {
+        URL.revokeObjectURL(viewerUrlRef.current);
+      }
+    };
+  }, []);
+
+  const renderNodeType = (meta: NodeMeta): string => {
+    const parts: string[] = [];
+    if (meta.node_type_1) parts.push(meta.node_type_1);
+    if (meta.node_type_2) parts.push(meta.node_type_2);
+    return parts.join('>');
+  };
+
+  return (
+    <div className="ast-modal-content ast-view-content" onClick={e => e.stopPropagation()}>
+      <div className="modal-header">
+        <h3>
+          <Package size={18} />
+          組立構成図
+        </h3>
+        {onClose && (
+          <button className="btn btn-secondary btn-sm" onClick={onClose}>
+            <X size={16} />
+          </button>
+        )}
+      </div>
+
+        <div className="ast-modal-body">
+          <div className="ast-target-label">
+            対象：<strong>{code}</strong> {name && <span className="text-muted">({name})</span>}
+            <span className="ast-view-toggle">
+              <button
+                className={`btn btn-ghost btn-xs ${viewMode === 'forward' ? 'btn-active' : ''}`}
+                onClick={() => handleViewModeChange('forward')}
+              >
+                正展開
+              </button>
+              <button
+                className={`btn btn-ghost btn-xs ${viewMode === 'reverse' ? 'btn-active' : ''}`}
+                onClick={() => handleViewModeChange('reverse')}
+              >
+                逆展開
+              </button>
+            </span>
+            {viewMode === 'reverse' && reverseRoots.length > 0 && (
+              <select
+                className="ast-reverse-select"
+                value={selectedRoot}
+                onChange={e => handleRootSelect(e.target.value)}
+              >
+                {reverseRoots.map(r => (
+                  <option key={r.root_code} value={r.root_code}>
+                    {r.root_code} {r.root_name ? `(${r.root_name})` : ''}
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
+
+          <div className="ast-toolbar">
+            <button className="btn btn-ghost btn-xs" onClick={expandAll}>
+              <Maximize2 size={12} /> すべて展開
+            </button>
+            <button className="btn btn-ghost btn-xs" onClick={collapseAll}>
+              <Minimize2 size={12} /> すべて折りたたみ
+            </button>
+          </div>
+
+              <div className="ast-main-area">
+                <div className="ast-diagram-wrapper">
+                <div className="ast-tree-area ast-diagram-area">
+              {loading && (
+                <div className="ast-loading">構成データを読み込んでいます...</div>
+              )}
+              {error && (
+                <div className="ast-error">{error}</div>
+              )}
+              {!loading && !error && visibleRows.length === 0 && (
+                <div className="ast-empty">構成データがありません</div>
+              )}
+              {!loading && !error && visibleRows.length > 0 && (
+                <div className="ast-tree-scroll">
+                  {visibleRows.map(({ node, l2Index, rowKey, line }) => {
+                    const isExpanded = expanded.has(node.code);
+                    const hasChildren = node.children.length > 0;
+                    const isTarget = highlightCode !== null && node.code === highlightCode;
+                    const groupColorIndex = l2Index % GROUP_COLORS.length;
+                    const bgColor = !isTarget && node.level >= 2 ? GROUP_COLORS[groupColorIndex] : undefined;
+
+                    let IconComponent;
+                    if (node.level === 1) IconComponent = Crown;
+                    else if (node.level === 2) IconComponent = Folder;
+                    else IconComponent = FileText;
+
+                    const metaStr = renderNodeType(node.meta);
+
+                    return (
+                      <div
+                        key={rowKey}
+                        className={`ast-node-row${isTarget ? ' ast-target-node' : ''}`}
+                        style={{ backgroundColor: bgColor }}
+                      >
+                        <span className="ast-tree-lines" onClick={() => hasChildren && toggleExpand(node.code)}>
+                          {line.ancestorHasMore.map((hasMore, i) => (
+                            <span key={i} className="ast-line-seg">{hasMore ? '│' : ' '}</span>
+                          ))}
+                          <span className="ast-line-conn">{line.isLast ? '└' : '├'}</span>
+                          {hasChildren ? (
+                            isExpanded ? <ChevronDown size={12} className="ast-line-chevron" /> : <ChevronRight size={12} className="ast-line-chevron" />
+                          ) : (
+                            <span className="ast-line-chevron" />
+                          )}
+                        </span>
+                        <span className="ast-node-icon">
+                          <IconComponent size={13} />
+                        </span>
+                        <span className="ast-node-name">{node.name}</span>
+                        <span className="ast-node-code">{node.code}</span>
+                        {node.meta.department && (
+                          <span className="ast-node-dept">{node.meta.department}</span>
+                        )}
+                        {metaStr && (
+                          <span className="ast-node-type">{metaStr}</span>
+                        )}
+                        <span className="ast-node-spacer" />
+                        {node.meta.has_inspection_file && (
+                          <span className="ast-node-actions">
+                            <button
+                              className="ast-file-btn"
+                              title="表示"
+                              onClick={e => { e.stopPropagation(); handleViewFile(node.code); }}
+                            >
+                              <Eye size={12} />
+                            </button>
+                            <button
+                              className="ast-file-btn"
+                              title="検査書表示"
+                              onClick={e => { e.stopPropagation(); handleOpenFile(node.code); }}
+                            >
+                              <FileText size={12} />
+                            </button>
+                            <button
+                              className="ast-file-btn"
+                              title="印刷"
+                              disabled={printingCode === node.code}
+                              onClick={e => { e.stopPropagation(); handlePrintFile(node.code); }}
+                            >
+                              <Printer size={12} />
+                            </button>
+                          </span>
+                        )}
+                        {node.quantity != null && (
+                          <span className="ast-node-qty">×{node.quantity}</span>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+              <div className="ast-legend-area">
+                <div className="ast-legend-title">凡例</div>
+                <div className="ast-legend-item">
+                  <Crown size={14} className="ast-legend-icon" />
+                  <span>組立 (レベル1)</span>
+                </div>
+                <div className="ast-legend-item">
+                  <Folder size={14} className="ast-legend-icon" />
+                  <span>部品グループ (レベル2)</span>
+                </div>
+                <div className="ast-legend-item">
+                  <FileText size={14} className="ast-legend-icon" />
+                  <span>部品・材料 (レベル3+)</span>
+                </div>
+                <div className="ast-legend-divider" />
+                <div className="ast-legend-title">グループ色</div>
+                {[0, 1, 2].map(i => (
+                  <div className="ast-legend-item" key={i}>
+                    <span className={`ast-color-swatch ast-swatch-${i}`} />
+                    <span>グループ {i + 1}</span>
+                  </div>
+                ))}
+                <div className="ast-legend-divider" />
+                <div className="ast-legend-title">逆展開</div>
+                <div className="ast-legend-item">
+                  <span className="ast-color-swatch ast-swatch-target" />
+                  <span>対象ノード（{code}）</span>
+                </div>
+                <div className="ast-legend-divider" />
+                <div className="ast-legend-title">操作</div>
+                <div className="ast-legend-item">
+                  <ChevronRight size={12} /> <span>クリックで展開</span>
+                </div>
+                <div className="ast-legend-item">
+                  <ChevronDown size={12} /> <span>クリックで折りたたみ</span>
+                </div>
+              </div>
+                </div>
+              <div className="ast-viewer-area">
+                <div className="ast-viewer-header">
+                  <span className="ast-viewer-title">検査書ビューア</span>
+                  <span className="ast-viewer-toolbar">
+                    <button
+                      className="ast-file-btn"
+                      title="縮小"
+                      disabled={!viewerUrl}
+                      onClick={() => setZoom(z => Math.max(0.5, +(z - 0.2).toFixed(2)))}
+                    >
+                      <ZoomOut size={14} />
+                    </button>
+                    <span className="ast-viewer-zoom">{Math.round(zoom * 100)}%</span>
+                    <button
+                      className="ast-file-btn"
+                      title="拡大"
+                      disabled={!viewerUrl}
+                      onClick={() => setZoom(z => Math.min(3, +(z + 0.2).toFixed(2)))}
+                    >
+                      <ZoomIn size={14} />
+                    </button>
+                    <button
+                      className="ast-file-btn"
+                      title="印刷"
+                      disabled={!viewerUrl}
+                      onClick={() => { if (viewerUrl) window.open(viewerUrl, '_blank'); }}
+                    >
+                      <Printer size={14} />
+                    </button>
+                  </span>
+                </div>
+                <div className="ast-viewer-body">
+                  {viewerLoading && (
+                    <div className="ast-loading">検査書をPDF化しています...</div>
+                  )}
+                  {viewerError && (
+                    <div className="ast-error">{viewerError}</div>
+                  )}
+                  {!viewerLoading && !viewerError && !viewerUrl && (
+                    <div className="ast-empty">「表示」ボタンで検査書を表示できます</div>
+                  )}
+                  {viewerUrl && (
+                    <iframe
+                      className="ast-viewer-frame"
+                      src={viewerUrl}
+                      style={{ transform: `scale(${zoom})`, transformOrigin: 'top left', width: `${100 / zoom}%`, height: `${100 / zoom}%` }}
+                      title="検査書ビューア"
+                    />
+                  )}
+                </div>
+              </div>
+          </div>
+        </div>
+    </div>
+  );
+};
+
+export const AssemblyStructureModal: React.FC<AssemblyStructureModalProps> = ({ code, name, onClose }) => {
+  const dialogRef = React.useRef<HTMLDivElement | null>(null);
+  const onCloseRef = React.useRef(onClose);
+
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    const getFocusable = () => Array.from(dialog.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])'
+    ));
+    (getFocusable()[0] || dialog).focus();
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        onCloseRef.current?.();
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      const focusable = getFocusable();
+      if (focusable.length === 0) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && (document.activeElement === first || document.activeElement === dialog)) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
+  return createPortal(
+    <div
+      ref={dialogRef}
+      className="modal-overlay ast-modal-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-label={`組立構成図 ${code} ${name}`.trim()}
+      tabIndex={-1}
+      onClick={() => onCloseRef.current?.()}
+    >
+      <AssemblyStructureView code={code} name={name} onClose={onClose} />
+    </div>,
+    document.body
+  );
+};
