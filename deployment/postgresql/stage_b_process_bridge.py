@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -75,6 +76,11 @@ def _fail(reason: str) -> None:
 
 def _validate_artifact_path(value: object) -> str:
     if not _is_string(value) or not value.strip():
+        _fail("stage_b_bridge_request_invalid")
+    try:
+        if not Path(value).is_absolute():
+            _fail("stage_b_bridge_request_invalid")
+    except (OSError, ValueError):
         _fail("stage_b_bridge_request_invalid")
     return value
 
@@ -222,10 +228,24 @@ def run_process(
     """Run one executable with argv and an allowlisted, non-inherited env."""
 
     try:
+        process_environment: dict[str, str] = {}
+        if os.name == "nt":
+            system_root = os.environ.get("SystemRoot")
+            if not _is_string(system_root) or not system_root:
+                raise OSError("SystemRoot is unavailable")
+            process_environment["SystemRoot"] = system_root
+        for key, value in environment.items():
+            if (
+                not _is_string(key)
+                or key not in ALLOWED_ENVIRONMENT_KEYS
+                or not _is_string(value)
+            ):
+                raise ValueError("invalid process environment")
+            process_environment[key] = value
         completed = subprocess.run(
             [executable, *argv],
             shell=False,
-            env=dict(environment),
+            env=process_environment,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=timeout_seconds,

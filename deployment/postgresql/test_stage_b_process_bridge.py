@@ -2,10 +2,13 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
+from unittest.mock import patch
 
 
 SPEC = importlib.util.spec_from_file_location(
@@ -212,6 +215,54 @@ class BridgeTests(unittest.TestCase):
         )
         self.assertEqual(stale_runner.calls, [])
         self.assertEqual(stale_output.read_bytes(), b"previous successful dump")
+
+        previous_cwd = Path.cwd()
+        try:
+            os.chdir(self.root)
+            relative_option_path = Path("--help")
+            relative_option_path.write_bytes(b"not a dump")
+            option_runner = FakeRunner(bridge_module.RunnerResult(0, b"help", b""))
+            option_bridge = bridge_module.StageBProcessBridge(runner=option_runner)
+            self.assertEqual(
+                self.invoke_error(
+                    option_bridge,
+                    self.request("pg_restore_list", path=relative_option_path),
+                ),
+                "stage_b_bridge_request_invalid",
+            )
+            self.assertEqual(option_runner.calls, [])
+        finally:
+            os.chdir(previous_cwd)
+
+    def test_product_runner_adds_only_parent_systemroot_on_windows(self):
+        completed = SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+        environment = {"PGHOST": "raw-host.example", "PGUSER": "sentinel-role"}
+        with (
+            patch.object(bridge_module.os, "name", "nt"),
+            patch.dict(
+                bridge_module.os.environ,
+                {"SystemRoot": r"C:\Windows", "SENTINEL_PARENT": "must-not-inherit"},
+                clear=False,
+            ),
+            patch.object(
+                bridge_module.subprocess, "run", return_value=completed
+            ) as run,
+        ):
+            result = bridge_module.run_process(
+                "pg_dump.exe", ["--version"], environment, 17
+            )
+
+        self.assertEqual(result, bridge_module.RunnerResult(0, b"", b""))
+        passed_environment = run.call_args.kwargs["env"]
+        self.assertEqual(
+            passed_environment,
+            {
+                "SystemRoot": r"C:\Windows",
+                "PGHOST": "raw-host.example",
+                "PGUSER": "sentinel-role",
+            },
+        )
+        self.assertNotIn("SENTINEL_PARENT", passed_environment)
 
     def test_runner_failures_are_fail_closed_and_do_not_expose_diagnostics(self):
         cases = [
