@@ -384,7 +384,7 @@ Issue #17は、TODO 1の完了によって全体完了とはしない。少な�
 
 #### PR #19後のStage B実装状況（2026-08-05）
 
-PR #19の最終head（`126b5b3bbdb5d710278b9fdcd33875a93a42acad`）に対して、上記の2026-08-05訂正節を次のとおり再同期する。`744f16f`時点の訂正内容は履歴として保持するが、PR #19で完了したTODO 2のvalidator-only実装を未完了として扱わない。
+PR #19のTODO 2実装commitに対して、上記の2026-08-05訂正節を次のとおり再同期する。`744f16f`時点の訂正内容は履歴として保持するが、PR #19で完了したTODO 2のvalidator-only実装を未完了として扱わない。
 
 - **TODO 1**: PR #18による`pg_dump` Process-result validator-only実装として完了。実`pg_dump`、実DB、実service、実runtimeの受入完了を意味しない。
 - **TODO 2**: PR #19による`pg_restore --list` Process-result validator-only実装として完了。exact 4-field schema、object/field/type/boundaryのfail-closed validation、operation-specific固定reason code、provider exceptionおよびmalformed resultのprivacy検証、下流処理停止のfocused testを含む。実`pg_restore --list`、Process bridge、production runner、runtime受入は未完了である。
