@@ -165,34 +165,61 @@ $a=New-FakeAdapter $m; $a.State={param($manifest) $null}; Assert-Throws {Assert-
 
 $validDump=[pscustomobject]@{success=$true;exit_code=[int]0;size=[int64]1;hash=('a'*64)}
 Assert-StageBPgDumpResult $validDump
+$validDumpMax=[pscustomobject]@{success=$true;exit_code=[int]0;size=[int64]::MaxValue;hash=('f'*64)}
+Assert-StageBPgDumpResult $validDumpMax
 $invalidDumpResults=@(
   @{name='null';value=$null},
   @{name='non-object';value='invalid'},
-  @{name='missing-property';value=[pscustomobject]@{success=$true;exit_code=[int]0;size=[int64]1}},
+  @{name='missing-success';value=[pscustomobject]@{exit_code=[int]0;size=[int64]1;hash=('a'*64)}},
+  @{name='missing-exit-code';value=[pscustomobject]@{success=$true;size=[int64]1;hash=('a'*64)}},
+  @{name='missing-size';value=[pscustomobject]@{success=$true;exit_code=[int]0;hash=('a'*64)}},
+  @{name='missing-hash';value=[pscustomobject]@{success=$true;exit_code=[int]0;size=[int64]1}},
   @{name='extra-property';value=[pscustomobject]@{success=$true;exit_code=[int]0;size=[int64]1;hash=('a'*64);extra='x'}},
+  @{name='success-null';value=[pscustomobject]@{success=$null;exit_code=[int]0;size=[int64]1;hash=('a'*64)}},
   @{name='success-false';value=[pscustomobject]@{success=$false;exit_code=[int]0;size=[int64]1;hash=('a'*64)}},
   @{name='success-int-truthy';value=[pscustomobject]@{success=1;exit_code=[int]0;size=[int64]1;hash=('a'*64)}},
   @{name='success-string-truthy';value=[pscustomobject]@{success='true';exit_code=[int]0;size=[int64]1;hash=('a'*64)}},
+  @{name='success-float';value=[pscustomobject]@{success=[double]1;exit_code=[int]0;size=[int64]1;hash=('a'*64)}},
+  @{name='exit-negative';value=[pscustomobject]@{success=$true;exit_code=[int]-1;size=[int64]1;hash=('a'*64)}},
   @{name='exit-nonzero';value=[pscustomobject]@{success=$true;exit_code=[int]1;size=[int64]1;hash=('a'*64)}},
   @{name='exit-int64';value=[pscustomobject]@{success=$true;exit_code=[int64]0;size=[int64]1;hash=('a'*64)}},
+  @{name='exit-bool';value=[pscustomobject]@{success=$true;exit_code=$false;size=[int64]1;hash=('a'*64)}},
   @{name='exit-string';value=[pscustomobject]@{success=$true;exit_code='0';size=[int64]1;hash=('a'*64)}},
+  @{name='exit-float';value=[pscustomobject]@{success=$true;exit_code=[double]0;size=[int64]1;hash=('a'*64)}},
   @{name='size-zero';value=[pscustomobject]@{success=$true;exit_code=[int]0;size=[int64]0;hash=('a'*64)}},
   @{name='size-negative';value=[pscustomobject]@{success=$true;exit_code=[int]0;size=[int64]-1;hash=('a'*64)}},
   @{name='size-int32';value=[pscustomobject]@{success=$true;exit_code=[int]0;size=[int]1;hash=('a'*64)}},
+  @{name='size-bool';value=[pscustomobject]@{success=$true;exit_code=[int]0;size=$true;hash=('a'*64)}},
   @{name='size-string';value=[pscustomobject]@{success=$true;exit_code=[int]0;size='1';hash=('a'*64)}},
+  @{name='size-float';value=[pscustomobject]@{success=$true;exit_code=[int]0;size=[double]1;hash=('a'*64)}},
+  @{name='size-over-int64-max';value=[pscustomobject]@{success=$true;exit_code=[int]0;size=[decimal]9223372036854775808;hash=('a'*64)}},
   @{name='hash-null';value=[pscustomobject]@{success=$true;exit_code=[int]0;size=[int64]1;hash=$null}},
   @{name='hash-uppercase';value=[pscustomobject]@{success=$true;exit_code=[int]0;size=[int64]1;hash=('A'*64)}},
   @{name='hash-malformed';value=[pscustomobject]@{success=$true;exit_code=[int]0;size=[int64]1;hash='abc'}},
   @{name='hash-non-string';value=[pscustomobject]@{success=$true;exit_code=[int]0;size=[int64]1;hash=1}}
 )
 foreach($case in $invalidDumpResults) {
-  Assert-Throws {Assert-StageBPgDumpResult $case.value} "pg_dump $($case.name)"
+  try {Assert-StageBPgDumpResult $case.value; throw "pg_dump $($case.name) unexpectedly succeeded"} catch {Assert-True ($_.Exception.Message -ceq 'stage_b_pg_dump_result_invalid') "pg_dump $($case.name) privacy-safe reason"}
   $a=New-FakeAdapter $m '' $case.value
   $r=Invoke-StageBSequence $m $a
   Assert-True ($r.status -eq 'failed' -and $r.live_blocked -eq $true -and $r.criterion_8 -eq 'not_evaluable') "pg_dump $($case.name) failed safely"
   Assert-True (($script:events -join ',') -eq 'stop-worker,stop-web,pg_dump,start-web,start-worker') "pg_dump $($case.name) ordering"
   Assert-True ($script:catalogCalls -eq 0 -and $script:createCalls -eq 0 -and $script:dropCalls -eq 0) "pg_dump $($case.name) no downstream callbacks"
 }
+$dumpProviderSentinel='PG_DUMP_PROVIDER_SECRET raw-command=private-dump secret-db'
+$a=New-FakeAdapter $m
+$a.Process={param($operation,$arguments,$environment) $null=$script:events.Add($operation); throw $script:dumpProviderSentinel}
+$r=Invoke-StageBSequence $m $a
+$dumpErrorText=$r|ConvertTo-Json -Depth 10
+Assert-True ($r.status -ceq 'failed' -and $r.error_code -ceq 'stage_b_operation_failed' -and $dumpErrorText -notmatch 'PG_DUMP_PROVIDER_SECRET|raw-command|private-dump|secret-db') 'pg_dump provider exception privacy-safe failure'
+Assert-True (($script:events -join ',') -ceq 'stop-worker,stop-web,pg_dump,start-web,start-worker' -and $script:catalogCalls -eq 0 -and $script:createCalls -eq 0 -and $script:dropCalls -eq 0) 'pg_dump provider exception no downstream callbacks'
+$malformedDumpSentinel='PG_DUMP_MALFORMED_SECRET'
+$malformedDump=[pscustomobject]@{success=$true;exit_code=[int]0;size=[int64]1;hash=('a'*64);diagnostic=$malformedDumpSentinel}
+$a=New-FakeAdapter $m '' $malformedDump
+$r=Invoke-StageBSequence $m $a
+$dumpErrorText=$r|ConvertTo-Json -Depth 10
+Assert-True ($r.status -ceq 'failed' -and $r.error_code -ceq 'stage_b_operation_failed' -and $dumpErrorText -notmatch $malformedDumpSentinel) 'pg_dump malformed provider privacy-safe failure'
+Assert-True (($script:events -join ',') -ceq 'stop-worker,stop-web,pg_dump,start-web,start-worker' -and $script:catalogCalls -eq 0 -and $script:createCalls -eq 0 -and $script:dropCalls -eq 0) 'pg_dump malformed provider no downstream callbacks'
 
 $validList=[pscustomobject]@{success=$true;exit_code=[int]0;size=[int64]1;hash=('b'*64)}
 Assert-StageBPgRestoreListResult $validList

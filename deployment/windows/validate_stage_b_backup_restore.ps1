@@ -91,8 +91,12 @@ function Assert-StageBRuntimeProvider($Provider) {
 }
 function Assert-StageBResult($Value,[string[]]$Fields) { Assert-StageBPropertySet $Value $Fields; $s=$Value.success; if($s -isnot [bool] -or $s -ne $true){throw 'callback failed'} }
 function Assert-StageBPgDumpResult($Value) {
-  Assert-StageBPropertySet $Value @('success','exit_code','size','hash')
-  if($Value.success -isnot [bool] -or $Value.success -ne $true -or $Value.exit_code -isnot [int] -or $Value.exit_code -ne 0 -or $Value.size -isnot [int64] -or $Value.size -le 0 -or -not(Test-StageBHash $Value.hash)){throw 'dump failed'}
+  # Stage B TODO 1: keep the public pg_dump result exact and diagnostics out of this boundary.
+  try {
+    if($null -eq $Value -or $Value -is [System.Array] -or $Value -is [System.String] -or $Value -is [System.ValueType]){throw 'invalid process result object'}
+    Assert-StageBPropertySet $Value @('success','exit_code','size','hash')
+    if($Value.success -isnot [bool] -or $Value.success -ne $true -or $Value.exit_code -isnot [int] -or $Value.exit_code -ne 0 -or $Value.size -isnot [int64] -or $Value.size -le 0 -or -not(Test-StageBHash $Value.hash)){throw 'invalid process result values'}
+  } catch { throw 'stage_b_pg_dump_result_invalid' }
 }
 function Assert-StageBPgRestoreListResult($Value) {
   Assert-StageBPropertySet $Value @('success','exit_code','size','hash')
