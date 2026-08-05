@@ -284,6 +284,8 @@ reviewerの最新検証は、PowerShellがexit 0、focused case 20/20の後に`S
 
 #### Stage B backup/restore 現行main同期（2026-08-04）
 
+> **訂正注記（2026-08-05）**: 本節は2026-08-04時点の現行main（HEAD `fdca02d`）に対する同期記録であり、PR #18 merge commit `12c1c674b91d1bd91bbfb17916766d67c8c6913c`後の現行状態を反映していない。本節の履歴は保持するが、本文中の「TODO 1〜3相当は実装済み」とする記録および「次はruntime provider readinessから開始する」という開始地点は、PR #18後の現行状態に照らして失効した。2026-08-05の訂正を正本とする。
+
 2026-08-04の現行`main`（確認したHEAD: `fdca02d`）では、上記2026-07-29 checkpointのTODO 1〜8は履歴上の再開記録であり、現在の実装作業をTODO 1から再開する一覧ではない。現行ファイルを正として、2026-07-29以降の関連commit（snapshotの`0de70ad`、Stage B validator/testの`591af5f`、CIの`0a75137`、`87d7e32`、`f3b6be6`、`fce3ad7`）とPR #3、#10、#11の本文・差分・checkを照合した。以下では「実装済み」「test済み」「runtime済み」「承認済み」を分ける。
 
 ##### 実装済み（コード上）
@@ -317,6 +319,80 @@ reviewerの最新検証は、PowerShellがexit 0、focused case 20/20の後に`S
 PlanOnlyの前に、対象environment/actionのapproval、protected source/target separation、distinct endpoint/database/OID、owner/roleとservice identity、active Job 0、PostgreSQL client/server versionとexecutable identity、storage capacity/retention/dump policy、service pre/post stateとinvocation-local ownership、privacy-safe atomic evidence root、rollback/recovery条件をfresh read-only evidenceとして揃える。ExecuteとCleanupは同じapprovalを流用せず、それぞれexact manifestまたは成功execution evidenceへlinkしたuser decision gateを置く。
 
 この同期で`LIVE_BLOCKED=True`、`criterion_8=not_evaluable`、Stage B-only approval、no-live-approval、およびbackup/restore Critical未解消、S2-CR-08の部分実施状態は維持する。
+
+#### PR #18後のStage B実装状況訂正（2026-08-05）
+
+以下は、現行コード、現行test、およびPR #18の明示的な変更範囲を正本とした訂正である。2026-07-29 checkpointと2026-08-04同期節の記録は監査履歴として残すが、実装状況は次のとおりである。
+
+##### TODO 1: `pg_dump` Process-result contract — 実装済み（PR #18 validator-only）
+
+- PR #18によるvalidator-onlyの実装であり、exact 4-field schemaは`success`、`exit_code`、`size`、`hash`である。
+- `success`はBoolean `true`、`exit_code`はInt32の`0`、`size`はInt64の`1`から最大値、`hash`はlowercase SHA-256である。
+- `null`、non-object、field欠落・余分、型不正、境界不正、nonzero、provider例外、malformed resultは、privacy-safeな固定reason codeを使ってfail-closedで拒否する。
+- focused fake/static testはCIゲート化されている。
+- この実装済みは、実`pg_dump`、実DB、実service、実runtimeの受入が完了したことを意味しない。対応するmerge commitは`12c1c674b91d1bd91bbfb17916766d67c8c6913c`である。
+
+##### TODO 2: `pg_restore --list` Process-result contract — 部分実装
+
+現行コードには、4-field property set、Boolean `true`の`success`、Int32の`0`である`exit_code`、正数Int64の`size`、lowercase SHA-256の`hash`、およびsequence上のfail-closed停止という基本検証がある。
+
+一方、PR #18でTODO 1に追加された水準と比較して、次は未完了である。
+
+- operation固有のprivacy-safeな固定reason codeへの正規化。
+- PR #18と同水準の明示的なobject/type/boundary negative matrix。
+- provider例外およびmalformed resultについてのoperation固有privacy検証。
+- PR #18と同水準の受入条件と証跡。
+
+したがって、TODO 2は「実装済み」ではなく、上記strict contractを完了させる次の実装開始地点である。
+
+##### TODO 3: restore Process-result contract — 部分実装
+
+現行コードには、exact 2-field property set、Boolean `true`の`success`、Int32の`0`である`exit_code`、およびsequence上のfail-closed停止がある。
+
+一方、PR #18と同水準の固定reason code、完全な型・境界matrix、provider例外・malformed resultのprivacy検証、および独立した受入証跡は未完了である。TODO 3はTODO 2の独立review完了後に着手する。
+
+##### Issue #17: Process bridge — openを維持
+
+Issue #17は、TODO 1の完了によって全体完了とはしない。少なくとも次は未実装または未確認として維持する。
+
+- PowerShellから呼び出すProcess bridge。
+- 注入可能なsubprocess runner。
+- `pg_dump`および`pg_restore --list` operationの実プロセス実行。
+- spawn failure、timeout、nonzero終了、空出力および部分出力。
+- 出力とhashの整合。
+- 未対応operationの拒否。
+- production runtimeとの接続。
+
+##### 現在の開始地点と依存順
+
+2026-08-04同期節にある「次はruntime provider readinessから開始する」という記録は、TODO 2とTODO 3のstrict contractが完了していることを前提としているため、現在の開始地点としては失効した。現在は次の順序で進める。
+
+1. TODO 2: strict `pg_restore --list` Process-result contract。
+2. 独立reviewerによるTODO 2の確認。
+3. 新しいuser decision gate。
+4. TODO 3: strict restore Process-result contract。
+5. 独立reviewerによるTODO 3の確認。
+6. 新しいuser decision gate。
+7. Issue #17のProcess bridgeとsubprocess runner。
+8. それらの完了後にproduction provider readinessとruntime prerequisiteへ進む。
+
+今回の訂正はこの依存順を記録するものであり、TODO 2およびTODO 3のコード実装、Issue #17のProcess bridge実装、実runtime受入を行った記録ではない。
+
+##### 維持するStage B状態
+
+`LIVE_BLOCKED=True`、`criterion_8=not_evaluable`、Stage B-only approval、no-live-approval、backup/restore Critical未解消、S2-CR-08部分実施、実runtime未実施・未証明、および実PostgreSQL、実Windows service、実UNC、実backup/restoreの受入未完了を維持する。コード上のvalidatorの存在とproduction runtimeの完成・承認済み状態を混同しない。
+
+#### PR #19後のStage B実装状況（2026-08-05）
+
+PR #19のTODO 2実装commitに対して、上記の2026-08-05訂正節を次のとおり再同期する。`744f16f`時点の訂正内容は履歴として保持するが、PR #19で完了したTODO 2のvalidator-only実装を未完了として扱わない。
+
+- **TODO 1**: PR #18による`pg_dump` Process-result validator-only実装として完了。実`pg_dump`、実DB、実service、実runtimeの受入完了を意味しない。
+- **TODO 2**: PR #19による`pg_restore --list` Process-result validator-only実装として完了。exact 4-field schema、object/field/type/boundaryのfail-closed validation、operation-specific固定reason code、provider exceptionおよびmalformed resultのprivacy検証、下流処理停止のfocused testを含む。実`pg_restore --list`、Process bridge、production runner、runtime受入は未完了である。
+- **TODO 3**: restore Process-result contractの部分実装のまま維持する。TODO 2の独立reviewと新しいuser decision gateの後に着手する次の対象である。
+- **Issue #17**: Process bridge用としてopenを維持する。Issue全体を完了扱いにしない。
+- **実binary、production runner、runtime受入**: 未完了・未確認。実プロセス、実DB、実service、実UNC、実backup/restoreの受入も未完了である。
+
+`LIVE_BLOCKED=True`、`criterion_8=not_evaluable`、Stage B-only approval、no-live-approvalを維持する。PR #19はfake/static validator-only cycleであり、Process bridge、production runner、実binary/runtime validation、live approvalを追加しない。
 
 ### S2-CR-08 テスト方針の優先順位と暫定推奨閾値（未承認）
 
