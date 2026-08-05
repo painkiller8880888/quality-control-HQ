@@ -213,6 +213,7 @@ jobs:
         run: |
           powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File deployment/windows/test_validate_stage_b_backup_restore.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python deployment/postgresql/test_stage_b_process_bridge.py
 
   secret-scan:
     name: secret-scan

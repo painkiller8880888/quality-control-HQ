@@ -1,5 +1,6 @@
 $ErrorActionPreference='Stop'; Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot 'validate_stage_b_backup_restore.ps1')
+. (Join-Path $PSScriptRoot 'stage_b_process_bridge.ps1')
 function Assert-True($Value,[string]$Message){if(-not $Value){throw $Message}}
 function Assert-Throws($Action,[string]$Message){try {& $Action; throw $Message} catch {if($_.Exception.Message -eq $Message){throw $Message}}}
 function New-Manifest {
@@ -1069,5 +1070,56 @@ try {
   $script:PendingManifestPath=$null; $script:ApprovalPath=$null; $script:EvidenceRoot=$null; $script:CleanupEvidenceRoot=$null
   Remove-Item -LiteralPath $providerRoot -Recurse -Force
 }
+$script:bridgeMode='success'; $script:bridgeFailOperation=''; $script:bridgeRequests=[Collections.Generic.List[object]]::new(); $script:bridgeCalls=0
+$bridgeArtifactProvider={param($operation,$arguments,$environment)
+  if($operation -ceq 'pg_dump'){[pscustomobject]@{path='C:\private\stage-b\sentinel.dump';timeout_seconds=[int]17}}
+  elseif($operation -ceq 'pg_restore_list'){[pscustomobject]@{path='C:\private\stage-b\sentinel.dump';expected_sha256=('d'*64);timeout_seconds=[int]17}}
+  else {throw 'SENTINEL artifact provider'}
+}
+$bridgeInvoker={param($requestJson)
+  $script:bridgeCalls++
+  $request=$requestJson|ConvertFrom-Json
+  $null=$script:bridgeRequests.Add($request)
+  if($null -ne $script:events){$null=$script:events.Add($request.operation)}
+  if($script:bridgeMode -ne 'success' -and ($script:bridgeFailOperation -eq '' -or $script:bridgeFailOperation -ceq $request.operation)){
+    switch($script:bridgeMode){
+      'nonzero' {return [pscustomobject]@{exit_code=[int]1;stdout='';stderr='stage_b_runner_nonzero'}}
+      'stdout-none' {return [pscustomobject]@{exit_code=[int]0;stdout='';stderr=''}}
+      'malformed' {return [pscustomobject]@{exit_code=[int]0;stdout='{malformed';stderr=''}}
+      'extra' {return [pscustomobject]@{exit_code=[int]0;stdout='{"success":true,"exit_code":0,"size":1,"hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}{"extra":true}';stderr=''}}
+      'wrong-shape' {return [pscustomobject]@{exit_code=[int]0;stdout='{"success":true,"exit_code":0,"size":1,"hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","diagnostic":"SENTINEL"}';stderr=''}}
+      'provider-exception' {throw 'SENTINEL provider private path raw host credential stack'}
+    }
+  }
+  $hash=if($request.operation -ceq 'pg_dump'){('a'*64)}else{('b'*64)}
+  $response=[ordered]@{success=$true;exit_code=[int]0;size=[int64]1;hash=$hash}
+  [pscustomobject]@{exit_code=[int]0;stdout=($response|ConvertTo-Json -Compress);stderr=''}
+}
+$bridgeCallback=New-StageBProcessBridgeCallback $bridgeArtifactProvider $bridgeInvoker
+$bridgeDump=& $bridgeCallback 'pg_dump' @('--format=custom','--no-owner','--no-acl') @{}
+$bridgeList=& $bridgeCallback 'pg_restore_list' @('--list') @{}
+Assert-StageBPgDumpResult $bridgeDump; Assert-StageBPgRestoreListResult $bridgeList
+Assert-True ($bridgeDump.exit_code -is [int] -and $bridgeDump.size -is [int64] -and $bridgeList.exit_code -is [int] -and $bridgeList.size -is [int64]) 'bridge exact result types'
+Assert-True ($script:bridgeRequests.Count -eq 2 -and (@($script:bridgeRequests[0].psobject.Properties.Name|Sort-Object)-join ',') -ceq 'arguments,artifact,environment,operation') 'bridge exact request shape'
+Assert-True ($script:bridgeRequests[0].arguments -join ',' -ceq '--format=custom,--no-owner,--no-acl' -and $script:bridgeRequests[0].artifact.timeout_seconds -eq 17) 'bridge dump request values'
+Assert-True (@($script:bridgeRequests[0].environment.psobject.Properties).Count -eq 0) 'bridge limited empty environment'
+$unsupportedCalls=$script:bridgeCalls
+try {& $bridgeCallback 'pg_restore' @('--exit-on-error') @{}; throw 'bridge unsupported did not fail'} catch {Assert-True ($_.Exception.Message -ceq 'stage_b_bridge_operation_unsupported') 'bridge unsupported reason'}
+Assert-True ($script:bridgeCalls -eq $unsupportedCalls) 'bridge unsupported no invoker'
+foreach($mode in @('nonzero','stdout-none','malformed','extra','wrong-shape','provider-exception')){
+  $script:bridgeMode=$mode; $script:bridgeFailOperation=''; $before=$script:bridgeCalls
+  try {& $bridgeCallback 'pg_dump' @('--format=custom','--no-owner','--no-acl'); throw "bridge $mode did not fail"} catch {
+    Assert-True ($_.Exception.Message -ceq 'stage_b_operation_failed') "bridge $mode normalized reason"
+    Assert-True ($_.Exception.Message -notmatch 'SENTINEL|private|raw|credential|stack') "bridge $mode privacy"
+  }
+  Assert-True ($script:bridgeCalls -eq ($before+1)) "bridge $mode one invoker"
+}
+$script:bridgeMode='nonzero'; $script:bridgeFailOperation='pg_restore_list'; $bridgeAdapter=New-FakeAdapter $m; $bridgeAdapter.Process=$bridgeCallback; $bridgeSequence=Invoke-StageBSequence $m $bridgeAdapter
+Assert-True ($bridgeSequence.status -ceq 'failed' -and $bridgeSequence.live_blocked -eq $true -and $bridgeSequence.criterion_8 -ceq 'not_evaluable') 'bridge failure safe result'
+Assert-True (($script:events -join ',') -ceq 'stop-worker,stop-web,pg_dump,pg_restore_list,start-web,start-worker') 'bridge list failure recovery order'
+Assert-True ($script:createCalls -eq 0 -and $script:restoreSnapshotCalls -eq 0 -and -not($script:events -contains 'pg_restore')) 'bridge list failure stops downstream'
+$script:bridgeMode='success'; $script:bridgeFailOperation=''; $bridgeAdapter=New-FakeAdapter $m; $bridgeAdapter.Process=$bridgeCallback; $bridgeUnsupportedSequence=Invoke-StageBSequence $m $bridgeAdapter
+Assert-True ($bridgeUnsupportedSequence.status -ceq 'failed' -and ($script:events -join ',') -ceq 'stop-worker,stop-web,pg_dump,pg_restore_list,create,start-web,start-worker') 'bridge unsupported recovery order'
+Assert-True ($script:createCalls -eq 1 -and -not($script:events -contains 'pg_restore')) 'bridge unsupported stops restore callback'
 $root=Join-Path ([IO.Path]::GetTempPath()) ('stage-b-'+[guid]::NewGuid()); New-Item -ItemType Directory -Path $root|Out-Null; try {[IO.File]::WriteAllText((Join-Path $root 'z.txt'),'z');[IO.File]::WriteAllText((Join-Path $root 'a.txt'),'a');Write-StageBChecksums $root;Assert-True ((Get-Content (Join-Path $root 'checksums.sha256'))[0] -match '  a.txt$') 'checksum'} finally {Remove-Item -LiteralPath $root -Recurse -Force}
 Write-Output 'Stage B pure validation tests passed'
