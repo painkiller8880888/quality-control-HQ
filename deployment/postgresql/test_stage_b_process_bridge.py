@@ -202,6 +202,17 @@ class BridgeTests(unittest.TestCase):
             "stage_b_artifact_invalid",
         )
 
+        stale_output = self.root / "stale-output.dump"
+        stale_output.write_bytes(b"previous successful dump")
+        stale_runner = FakeRunner(bridge_module.RunnerResult(0, b"", b""))
+        stale_bridge = bridge_module.StageBProcessBridge(runner=stale_runner)
+        self.assertEqual(
+            self.invoke_error(stale_bridge, self.request(path=stale_output)),
+            "stage_b_artifact_invalid",
+        )
+        self.assertEqual(stale_runner.calls, [])
+        self.assertEqual(stale_output.read_bytes(), b"previous successful dump")
+
     def test_runner_failures_are_fail_closed_and_do_not_expose_diagnostics(self):
         cases = [
             (RuntimeError("SENTINEL raw command private path"), "stage_b_runner_failed"),
@@ -260,12 +271,18 @@ class BridgeTests(unittest.TestCase):
         self.assertTrue(partial.exists())
         self.assertEqual(partial.read_bytes(), b"partial dump")
 
+        timeout_partial = self.root / "timeout-partial.dump"
+
+        def write_timeout_partial(argv):
+            timeout_partial.write_bytes(b"partial timeout dump")
+
         timeout_runner = FakeRunner(
-            bridge_module.RunnerResult(None, b"", b"raw stderr", True), write_partial
+            bridge_module.RunnerResult(None, b"", b"raw stderr", True), write_timeout_partial
         )
         timeout_bridge = bridge_module.StageBProcessBridge(runner=timeout_runner)
-        self.assertEqual(self.invoke_error(timeout_bridge, failed_request), "stage_b_runner_timeout")
-        self.assertTrue(partial.exists())
+        timeout_request = self.request(path=timeout_partial)
+        self.assertEqual(self.invoke_error(timeout_bridge, timeout_request), "stage_b_runner_timeout")
+        self.assertTrue(timeout_partial.exists())
 
     def test_hash_failure_is_fail_closed(self):
         runner = FakeRunner(bridge_module.RunnerResult(0, b"", b""))

@@ -287,6 +287,13 @@ class StageBProcessBridge:
                 _fail("stage_b_artifact_hash_mismatch")
             argv = [*arguments, str(path)]
         else:
+            try:
+                if path.exists():
+                    _fail("stage_b_artifact_invalid")
+            except BridgeError:
+                raise
+            except Exception:
+                _fail("stage_b_artifact_invalid")
             argv = [*arguments, "--file", str(path)]
 
         try:
