@@ -2,7 +2,7 @@
 
 作成日: 2026-08-04  
 対象リポジトリ: `painkiller8880888/quality-control-HQ`  
-主な情報源: `specification/RELEASE.md`、現行mainブランチ、`AGENTS.md`、Codex開発パイプライン文書
+主な参照先: `specification/RELEASE.md`（正式リリース要件）、現行mainブランチ、`AGENTS.md`、Codex開発パイプライン文書。実施履歴・進捗・証跡はGitHubまたは凍結アーカイブを参照する。
 
 ## tl;dr
 
@@ -10,7 +10,7 @@
 
 疑似本番配信、PostgreSQL分離、WaitressとworkerのWindowsサービス化、永続ジョブキュー、排他・冪等性、主要な停止復旧試験、登録経路別分類のコード、PR用CIはかなり進んでいる。一方で、正式リリースを止めるCriticalとして、実バックアップ／復元、DB移行失敗からの復旧、分類ゴールデンデータ承認、自己登録方針、異常応答と情報漏洩、Excel・印刷の無人運用、共有PC上の本番TLS配信が残っている。
 
-最初に行うべきことは、`RELEASE.md`の実施記録と現行コードを同期することである。文書上のStage B再開地点は古く、現行コードにはTODO 1～6相当の検証、実行証跡、Cleanup、production adapter境界がすでに存在する。ただし、deployment固有のruntime providerと、承認済み環境でのPlanOnly／Execute／Cleanupは完了していない。したがって、次の実装起点は「TODO 1」ではなく、「現行差分の再確認後、production runtime providerを小さな単位で接続すること」とする。
+本書は2026-08-04時点の計画・履歴であり、現在状態や次回作業の正本ではない。正式リリース要件は`RELEASE.md`、実施履歴・進捗・証跡はGitHubまたは凍結アーカイブを参照する。
 
 正式リリースまでのCritical pathは次の順番とする。
 
@@ -60,7 +60,7 @@
 - 対象ファイルまたは責任領域が計画の2倍以上に広がった。
 - DB schema、認証、権限、サービスアカウント、破壊的操作へ想定外に波及した。
 - 既存試験の失敗原因が特定できない。
-- 現行コードと`RELEASE.md`、承認済み方針、Issue受入条件が矛盾する。
+- 現行コードと`RELEASE.md`の正式要件、承認済み方針、Issue受入条件が矛盾する。
 - 実runtime、サービス停止、DB作成・削除、印刷、共有アクセスが必要になったが、当該Issueに明示承認がない。
 
 ---
@@ -69,7 +69,7 @@
 
 | フェーズ | 目的 | 初心者向けの説明 | 完了条件 |
 |---|---|---|---|
-| R0. 正本同期 | 文書とコードの現在地を一致させる | 地図が古い状態では、完成済みの作業を再実装したり、未完了を完了と誤認したりする。最初に現在地を固定する。 | `RELEASE.md`の状態、残課題、承認、コード参照が現行mainと一致する。 |
+| R0. 正本同期 | 正式要件とGitHub上の実施記録の参照先を分離する | 要件と履歴が混在すると、過去の状態を現行要件や次回作業と誤認する。 | `RELEASE.md`が正式要件・受入基準の正本であり、実施結果・進捗・証跡がGitHubまたは凍結アーカイブにある。 |
 | R1. バックアップ／復元 | データを失っても戻せることを実証する | バックアップファイルを作っただけでは不十分で、別DBへ戻してアプリが使えることを確認して初めて復旧手段になる。 | 承認済みPlanOnly、Execute、Cleanup、整合確認、criterion 8評価が完了する。 |
 | R2. 業務・認証・エラー | 誤分類、無断登録、越権、情報漏洩を防ぐ | 正しい利用者が正しい検査だけを扱い、失敗時にも秘密情報を画面へ出さない状態にする。 | ゴールデンデータ、登録方針、エラー契約、RBAC、認証防御が合格する。 |
 | R3. DB移行／復旧 | 本番更新に失敗しても戻せるようにする | アプリ更新時にはDBの形も変わる。途中で止まった場合に業務データを壊さず戻せるかを事前に練習する。 | 本番相当migration、失敗注入、restore／rollback、照合が合格する。 |
@@ -87,7 +87,7 @@
 #### R0-01 `RELEASE.md`の現行main同期
 
 **何をするか**  
-現行`deployment/windows/validate_stage_b_backup_restore.ps1`、関連test、2026-07-29以降のcommit、CI PRを読み、`RELEASE.md`の実施記録を更新する。
+現行`deployment/windows/validate_stage_b_backup_restore.ps1`、関連test、commit、CI PRを読み、`RELEASE.md`の正式要件と、GitHub／凍結アーカイブにある実施記録の参照関係を確認する。
 
 **何のためか**  
 文書上はStage BのTODO 1が次作業になっているが、現行コードにはProcess result validation、execution evidence、Cleanup、production adapter境界が存在する。次のIssueが誤った開始地点を使わないようにする。
@@ -96,7 +96,7 @@
 コード変更は行わず、状態を「実装済み」「fake/static合格」「runtime未実施」「承認待ち」に分ける。`LIVE_BLOCKED=True`と`criterion_8=not_evaluable`は変更しない。
 
 **受入条件**  
-`RELEASE.md`が現行mainと矛盾せず、未検証事項を完了扱いしていない。レビュー担当者が、参照ファイル、commit、試験結果、残るruntime gapを再現できる。
+`RELEASE.md`が正式要件・受入基準の正本として安定し、実施結果・未検証事項・runtime gapはGitHubまたは凍結アーカイブから再現できる。
 
 #### R0-02 Critical承認台帳の作成
 
