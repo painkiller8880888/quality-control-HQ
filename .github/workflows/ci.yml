@@ -208,6 +208,12 @@ jobs:
           python -c "import django, psycopg, waitress, pythoncom, win32api,
           win32service, win32com.client; print('Windows-specific imports succeeded')"
 
+      - name: Run Stage B focused fake/static validation
+        shell: powershell
+        run: |
+          powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File deployment/windows/test_validate_stage_b_backup_restore.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
   secret-scan:
     name: secret-scan
     if: github.event_name == 'pull_request' || github.event_name == 'push'
