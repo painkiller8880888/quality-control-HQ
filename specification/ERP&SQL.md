@@ -23,7 +23,7 @@
 | `LayoutMaster` | `quality_layoutmaster` | layout_name unique、grid、owner_user。背景画像APIは未対応 |
 | `LayoutObjectType` | `quality_layoutobjecttype` | code は machine/wall/path/area/stairs/entrance |
 | `LayoutObject` | `quality_layoutobject` | layout/type/machine、grid位置・寸法、rotation、meta_json |
-| `Job` | `quality_job` | 文字列 job_id PK、4 job_type、queued/running/succeeded/failed、payload/result/error |
+| `Job` | `quality_job` | 文字列 job_id PK、4 job_type、queued/running/succeeded/failed、payload/result/error、resource/idempotency、依存Job、attempt/heartbeat/lease/worker/execution token、available_at/timeout |
 | `UserSetting` | `user_settings` | user one-to-one、theme/font_size/browser_settings_imported |
 | `SystemSetting` | `system_settings` | setting_key PK、value、updated_by |
 | `AuditLog` | `audit_logs` | user、operation、table/record、details_json。operation のDB CHECKはない |
@@ -84,7 +84,7 @@
 - `9`: 一般ルーチン外の特殊な検査。ユーザーが個別に設定する。同じ品番でも通常検査と特殊検査が混在することがあり、それぞれ別の検査として扱われる。
 
 - 検査書発行対象は `1`, `6`, `7`, `9`のみ。
-- クラス判定順は業務未決である。現行実装 `1/2 → 3 → 6 → 7 → 4 → 5 → 8` と旧仕様順が異なるため、`PRODUCT.md` と `RELEASE.md` の承認要件に従い、ここでは順序を確定しない。
+- クラス判定順は、`PRODUCT.md` と `RELEASE.md` に定める正式な承認・受入条件に従って確定する。
 
 ### 3.1 クラス9（特殊検査）の定義と運用ルール
 
@@ -390,7 +390,7 @@ ERP由来の品目マスタ。
 
 ### 5.11 Job / `quality_job`
 
-ジョブ状態管理。現行処理はHTTP内同期であり、非同期workerは未実装。
+PostgreSQL上の永続Jobキューと専用workerによるジョブ状態管理。APIはJobをqueuedで登録してjob_idと202を返し、workerはrow lock、resource排他、依存待機、idempotency、heartbeat、lease回収、retryを管理する。
 
 | column | type | note |
 |---|---|---|
@@ -400,6 +400,18 @@ ERP由来の品目マスタ。
 | request_payload | JSONB | 実行引数 |
 | result | JSONB | 成功結果 |
 | error_message | TEXT | 失敗理由 |
+| resource_key | VARCHAR(128) | 排他対象のresource |
+| idempotency_key | VARCHAR(64) | 重複要求の識別キー |
+| blocked_reason | VARCHAR(255) | 依存待機などの理由 |
+| depends_on_id | FK -> quality_job.job_id ON DELETE RESTRICT, nullable | 先行Job |
+| attempt_count | INTEGER NOT NULL DEFAULT 0 | 試行回数 |
+| heartbeat_at | TIMESTAMPTZ, nullable | worker heartbeat |
+| lease_until | TIMESTAMPTZ, nullable | worker lease期限 |
+| worker_id | VARCHAR(128) NOT NULL DEFAULT '' | claimしたworker |
+| execution_token | VARCHAR(64) NOT NULL DEFAULT '' | 実行所有権token |
+| available_at | TIMESTAMPTZ | 実行可能時刻 |
+| timeout_seconds | INTEGER NOT NULL DEFAULT 900 | Job timeout |
+| created_at | TIMESTAMPTZ, nullable | 作成日時 |
 | started_at | TIMESTAMPTZ, nullable | 開始日時 |
 | finished_at | TIMESTAMPTZ, nullable | 終了日時 |
 | created_by | FK -> users.user_id ON DELETE RESTRICT, nullable | 作成ユーザー |
@@ -407,6 +419,12 @@ ERP由来の品目マスタ。
 | deleted_at | TIMESTAMPTZ, nullable | 削除日時(論理削除) |
 | deleted_by | FK -> users.user_id ON DELETE RESTRICT, nullable | 削除ユーザー |
 | updated_at | TIMESTAMPTZ, nullable | 更新日時 |
+
+制約・運用
+
+- workerは`SELECT FOR UPDATE SKIP LOCKED`相当のrow lockでqueued Jobをclaimし、resourceごとのadvisory lockで同一資源の同時実行を防ぐ。
+- queuedまたはrunningの同一`resource_key`／`idempotency_key`は重複実行せず、依存Jobは先行Jobの成功まで待機する。
+- heartbeatまたはlease期限を用いてworker停止を検出し、retry可能なJobは再試行し、外部副作用を持つJobは安全に失敗させる。
 
 ### 5.12 LayoutMaster / `quality_layoutmaster`
 
@@ -427,7 +445,7 @@ ERP由来の品目マスタ。
 
 - 背景画像は現行未実装で、保存・表示しない。
 - 実際のレイアウト情報はグリッド座標で保持する。
-- 現行実装はレイアウト編集を `audit_logs` へ記録していない。正式リリース要件は `RELEASE.md` の監査項目に従う。
+- レイアウト編集の監査要件は、`RELEASE.md` の正式リリース要件・受入基準に従う。
 
 ### 5.13 LayoutObjectType / `quality_layoutobjecttype`
 
