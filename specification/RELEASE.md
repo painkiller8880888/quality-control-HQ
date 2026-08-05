@@ -382,6 +382,18 @@ Issue #17は、TODO 1の完了によって全体完了とはしない。少な�
 
 `LIVE_BLOCKED=True`、`criterion_8=not_evaluable`、Stage B-only approval、no-live-approval、backup/restore Critical未解消、S2-CR-08部分実施、実runtime未実施・未証明、および実PostgreSQL、実Windows service、実UNC、実backup/restoreの受入未完了を維持する。コード上のvalidatorの存在とproduction runtimeの完成・承認済み状態を混同しない。
 
+#### PR #19後のStage B実装状況（2026-08-05）
+
+PR #19の最終head（`126b5b3bbdb5d710278b9fdcd33875a93a42acad`）に対して、上記の2026-08-05訂正節を次のとおり再同期する。`744f16f`時点の訂正内容は履歴として保持するが、PR #19で完了したTODO 2のvalidator-only実装を未完了として扱わない。
+
+- **TODO 1**: PR #18による`pg_dump` Process-result validator-only実装として完了。実`pg_dump`、実DB、実service、実runtimeの受入完了を意味しない。
+- **TODO 2**: PR #19による`pg_restore --list` Process-result validator-only実装として完了。exact 4-field schema、object/field/type/boundaryのfail-closed validation、operation-specific固定reason code、provider exceptionおよびmalformed resultのprivacy検証、下流処理停止のfocused testを含む。実`pg_restore --list`、Process bridge、production runner、runtime受入は未完了である。
+- **TODO 3**: restore Process-result contractの部分実装のまま維持する。TODO 2の独立reviewと新しいuser decision gateの後に着手する次の対象である。
+- **Issue #17**: Process bridge用としてopenを維持する。Issue全体を完了扱いにしない。
+- **実binary、production runner、runtime受入**: 未完了・未確認。実プロセス、実DB、実service、実UNC、実backup/restoreの受入も未完了である。
+
+`LIVE_BLOCKED=True`、`criterion_8=not_evaluable`、Stage B-only approval、no-live-approvalを維持する。PR #19はfake/static validator-only cycleであり、Process bridge、production runner、実binary/runtime validation、live approvalを追加しない。
+
 ### S2-CR-08 テスト方針の優先順位と暫定推奨閾値（未承認）
 
 S2-CR-08は、既存回帰試験の件数増加よりも、測定対象の同一性、欠測時の安全停止、正式証跡の合否判定可能性を優先する。次の優先順位を崩さず、各修正とそのdirect positive/negative testを同一iterationで完了させる。後続優先度への着手は、先行優先度のreviewer PASS後とする。
