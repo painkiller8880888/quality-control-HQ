@@ -10,7 +10,7 @@
 - 対象一意キーは `(session, normalized_code, class_override)`、履歴一意キーは `(created_by, date, master, time_slot, class_override)`。いずれも `NULL` を同値として扱う。
 - 通常の検査書対象はクラス 1/6/7。明示的に登録されたクラス9は常に検査書対象である。
 - 見取り図は複数レイアウト、機械割当、種別色変更を実装済み。背景画像の保存・配信は未実装である。
-- `Job` レコードとポーリング API は実装済みだが、処理関数は HTTP リクエスト内で同期実行され、レスポンスだけが 202 となる。正式リリースでは非同期ワーカー化が必要である。
+- `Job` レコードとポーリング APIはPostgreSQL上の永続キューを使用する。APIは処理を待たずにqueued Jobの`job_id`と202を返し、専用workerが`select_for_update(skip_locked=True)`、resource単位の排他、依存Job待機、idempotency key、heartbeat／lease回収、承認済みretryで処理する。
 
 正式リリース要件、優先度、受入基準の正本は `RELEASE.md` とする。実施結果や進捗はGitHubのIssue／PR／commitを参照する。
 
@@ -131,9 +131,10 @@
 - 一括発行は `pending` だけを対象にすることで重複発行を抑制する。
 
 ## 7. 現行ジョブ方針
-- ERP更新、OCR取込、検査書一括発行、日報生成は Job レコードを作るが、処理自体はHTTPリクエスト内で同期実行する。
-- ジョブは `queued / running / succeeded / failed` の状態を持ち、APIは処理完了後に `job_id` と202を返す。
-- 永続キューとworkerによる真の非同期化は未実装であり、正式リリース要件は `RELEASE.md` に定義する。
+- ERP更新、OCR取込、検査書一括発行、日報生成は、PostgreSQLの永続Jobキューへ登録する。
+- APIは処理完了を待たず、`queued` Jobの`job_id`と202を返す。ジョブは `queued / running / succeeded / failed` の状態を持つ。
+- 専用workerはtransaction内の`select_for_update(skip_locked=True)`でJobをclaimし、resource単位のadvisory lock、依存Jobの完了待機、worker ID、heartbeat、lease、attempt count、execution tokenを管理する。
+- 同一resourceとidempotency keyの重複要求を集約し、lease失効時はJob種別に応じて承認済みretryまたは安全な失敗とする。旧workerの重複配送が復旧後の試行を上書きしないことを保証する。
 
 ## 8. MVPスコープ
 - 手動追加、Excel取込、検査対象一覧、A〜Dチェック保存、履歴再表示、日報出力

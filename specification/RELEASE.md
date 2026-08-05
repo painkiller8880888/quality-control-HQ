@@ -59,7 +59,7 @@ Highは、受入基準を満たすか、残存リスク・期限・責任者を�
 | ログ／health／監視 | 構造化ログ、相関ID、health/readiness、DB・worker・共有・印刷監視、通知と一次対応手順を実地確認する |
 | CI／品質ゲート | backend test、frontend build、lint、migration check、依存脆弱性scan、secret scanを必須化する |
 | 統合／負荷／長時間試験 | 最大日数・件数、367日集計、同時利用、ERP timeout、大容量ファイルを本番相当で合格させる |
-| マスタ更新方式 | staging→validation→swap、または同等の承認済みatomic方式で、lock時間、rollback、参照整合性を試験する。切替失敗時の復旧基準を承認する |
+| マスタ更新方式 | 現行の単一transactionによる `update_or_create` と InspectionFile 全削除再作成について、本番相当件数でlock時間・rollback・参照整合性を試験する。`staging -> validation -> swap` を採用する場合は設計、移行、切替失敗時の復旧基準を承認する |
 | dependency lock／脆弱性 | Python/Node依存を再現可能に固定し、SBOM、定期更新、重大CVEのSLAを設定する。ERP経路のimport/E2Eをクリーン環境で成功させる |
 | upload／media | 5MB、JPEG/PNG/WebP検証、保存先分離、マルウェア対策、quota、孤児ファイル清掃、backupを検証する |
 

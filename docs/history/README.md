@@ -9,3 +9,4 @@
 保存済みアーカイブ:
 
 - [`RELEASE-legacy-2026-08-05.md`](RELEASE-legacy-2026-08-05.md): 編集前の`specification/RELEASE.md`を内容変更せず保存したもの。
+- [`QCHQ_release_roadmap_2026-08-04.md`](QCHQ_release_roadmap_2026-08-04.md): 2026-08-04時点の計画・履歴を内容変更せず保存したもの。
