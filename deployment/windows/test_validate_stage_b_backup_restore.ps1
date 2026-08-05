@@ -223,35 +223,77 @@ Assert-True (($script:events -join ',') -ceq 'stop-worker,stop-web,pg_dump,start
 
 $validList=[pscustomobject]@{success=$true;exit_code=[int]0;size=[int64]1;hash=('b'*64)}
 Assert-StageBPgRestoreListResult $validList
+$validListMax=[pscustomobject]@{success=$true;exit_code=[int]0;size=[int64]::MaxValue;hash=('f'*64)}
+Assert-StageBPgRestoreListResult $validListMax
+$a=New-FakeAdapter $m -ListResult $validList
+$r=Invoke-StageBSequence $m $a
+$successListProperties=@($r.Keys|ForEach-Object {[string]$_}|Sort-Object)-join ','
+Assert-True ($r.status -ceq 'success' -and $r.dump_hash -ceq (Get-StageBTextHash 'dump') -and $successListProperties -ceq 'criterion_8,dump_hash,live_blocked,stages,status') 'pg_restore_list valid provider success and safe result fields'
+Assert-True (($script:events -join ',') -ceq 'stop-worker,stop-web,pg_dump,pg_restore_list,create,pg_restore,start-web,start-worker') 'pg_restore_list valid provider downstream order'
 $invalidListResults=@(
   @{name='null';value=$null},
-  @{name='non-object';value='invalid'},
-  @{name='missing-property';value=[pscustomobject]@{success=$true;exit_code=[int]0;size=[int64]1}},
+  @{name='non-object-string';value='invalid'},
+  @{name='non-object-array';value=@([pscustomobject]@{success=$true;exit_code=[int]0;size=[int64]1;hash=('b'*64)},[pscustomobject]@{success=$true;exit_code=[int]0;size=[int64]1;hash=('b'*64)})},
+  @{name='non-object-scalar';value=[int]1},
+  @{name='missing-success';value=[pscustomobject]@{exit_code=[int]0;size=[int64]1;hash=('b'*64)}},
+  @{name='missing-exit-code';value=[pscustomobject]@{success=$true;size=[int64]1;hash=('b'*64)}},
+  @{name='missing-size';value=[pscustomobject]@{success=$true;exit_code=[int]0;hash=('b'*64)}},
+  @{name='missing-hash';value=[pscustomobject]@{success=$true;exit_code=[int]0;size=[int64]1}},
   @{name='extra-property';value=[pscustomobject]@{success=$true;exit_code=[int]0;size=[int64]1;hash=('b'*64);extra='x'}},
+  @{name='extra-diagnostic';value=[pscustomobject]@{success=$true;exit_code=[int]0;size=[int64]1;hash=('b'*64);diagnostic='diagnostic-sentinel'}},
+  @{name='extra-raw-output';value=[pscustomobject]@{success=$true;exit_code=[int]0;size=[int64]1;hash=('b'*64);raw_output='raw-output-sentinel'}},
+  @{name='success-null';value=[pscustomobject]@{success=$null;exit_code=[int]0;size=[int64]1;hash=('b'*64)}},
   @{name='success-false';value=[pscustomobject]@{success=$false;exit_code=[int]0;size=[int64]1;hash=('b'*64)}},
   @{name='success-int-truthy';value=[pscustomobject]@{success=1;exit_code=[int]0;size=[int64]1;hash=('b'*64)}},
   @{name='success-string-truthy';value=[pscustomobject]@{success='true';exit_code=[int]0;size=[int64]1;hash=('b'*64)}},
-  @{name='exit-nonzero';value=[pscustomobject]@{success=$true;exit_code=[int]1;size=[int64]1;hash=('b'*64)}},
+  @{name='success-float';value=[pscustomobject]@{success=[double]1.0;exit_code=[int]0;size=[int64]1;hash=('b'*64)}},
+  @{name='exit-positive-nonzero';value=[pscustomobject]@{success=$true;exit_code=[int]1;size=[int64]1;hash=('b'*64)}},
+  @{name='exit-negative-nonzero';value=[pscustomobject]@{success=$true;exit_code=[int]-1;size=[int64]1;hash=('b'*64)}},
   @{name='exit-int64';value=[pscustomobject]@{success=$true;exit_code=[int64]0;size=[int64]1;hash=('b'*64)}},
+  @{name='exit-bool';value=[pscustomobject]@{success=$true;exit_code=$false;size=[int64]1;hash=('b'*64)}},
   @{name='exit-string';value=[pscustomobject]@{success=$true;exit_code='0';size=[int64]1;hash=('b'*64)}},
+  @{name='exit-float';value=[pscustomobject]@{success=$true;exit_code=[double]0.0;size=[int64]1;hash=('b'*64)}},
+  @{name='exit-null';value=[pscustomobject]@{success=$true;exit_code=$null;size=[int64]1;hash=('b'*64)}},
   @{name='size-zero';value=[pscustomobject]@{success=$true;exit_code=[int]0;size=[int64]0;hash=('b'*64)}},
   @{name='size-negative';value=[pscustomobject]@{success=$true;exit_code=[int]0;size=[int64]-1;hash=('b'*64)}},
   @{name='size-int32';value=[pscustomobject]@{success=$true;exit_code=[int]0;size=[int]1;hash=('b'*64)}},
+  @{name='size-bool';value=[pscustomobject]@{success=$true;exit_code=[int]0;size=$true;hash=('b'*64)}},
   @{name='size-string';value=[pscustomobject]@{success=$true;exit_code=[int]0;size='1';hash=('b'*64)}},
+  @{name='size-float';value=[pscustomobject]@{success=$true;exit_code=[int]0;size=[double]1.0;hash=('b'*64)}},
+  @{name='size-null';value=[pscustomobject]@{success=$true;exit_code=[int]0;size=$null;hash=('b'*64)}},
+  @{name='size-over-int64-max';value=[pscustomobject]@{success=$true;exit_code=[int]0;size=[decimal]9223372036854775808;hash=('b'*64)}},
   @{name='hash-null';value=[pscustomobject]@{success=$true;exit_code=[int]0;size=[int64]1;hash=$null}},
+  @{name='hash-empty';value=[pscustomobject]@{success=$true;exit_code=[int]0;size=[int64]1;hash=''}},
+  @{name='hash-short';value=[pscustomobject]@{success=$true;exit_code=[int]0;size=[int64]1;hash=('b'*63)}},
+  @{name='hash-long';value=[pscustomobject]@{success=$true;exit_code=[int]0;size=[int64]1;hash=('b'*65)}},
   @{name='hash-uppercase';value=[pscustomobject]@{success=$true;exit_code=[int]0;size=[int64]1;hash=('B'*64)}},
-  @{name='hash-malformed';value=[pscustomobject]@{success=$true;exit_code=[int]0;size=[int64]1;hash='abc'}},
+  @{name='hash-nonhex';value=[pscustomobject]@{success=$true;exit_code=[int]0;size=[int64]1;hash=('g'*64)}},
   @{name='hash-non-string';value=[pscustomobject]@{success=$true;exit_code=[int]0;size=[int64]1;hash=1}}
 )
 foreach($case in $invalidListResults) {
-  Assert-Throws {Assert-StageBPgRestoreListResult $case.value} "pg_restore_list $($case.name)"
+  try {Assert-StageBPgRestoreListResult $case.value; throw "pg_restore_list $($case.name) unexpectedly succeeded"} catch {Assert-True ($_.Exception.Message -ceq 'stage_b_pg_restore_list_result_invalid') "pg_restore_list $($case.name) privacy-safe reason"}
   $a=New-FakeAdapter $m -ListResult $case.value
   $r=Invoke-StageBSequence $m $a
-  Assert-True ($r.status -eq 'failed' -and $r.live_blocked -eq $true -and $r.criterion_8 -eq 'not_evaluable') "pg_restore_list $($case.name) failed safely"
+  $listErrorText=$r|ConvertTo-Json -Depth 10
+  Assert-True ($r.status -ceq 'failed' -and $r.error_code -ceq 'stage_b_operation_failed' -and $r.live_blocked -is [System.Boolean] -and $r.live_blocked -ceq $true -and $r.criterion_8 -ceq 'not_evaluable' -and $listErrorText -notmatch 'diagnostic-sentinel|raw-output-sentinel') "pg_restore_list $($case.name) failed safely"
   Assert-True ($r.dump_hash -ceq (Get-StageBTextHash 'dump')) "pg_restore_list $($case.name) retains dump hash"
   Assert-True (($script:events -join ',') -eq 'stop-worker,stop-web,pg_dump,pg_restore_list,start-web,start-worker') "pg_restore_list $($case.name) ordering"
-  Assert-True ($script:catalogCalls -eq 0 -and $script:createCalls -eq 0 -and $script:restoreSnapshotCalls -eq 0 -and $script:dropCalls -eq 0) "pg_restore_list $($case.name) no downstream callbacks"
+  Assert-True ($script:catalogCalls -eq 0 -and $script:createCalls -eq 0 -and $script:restoreSnapshotCalls -eq 0 -and $script:dropCalls -eq 0 -and -not($script:events -contains 'pg_restore') -and @($r.stages|Where-Object {$_.stage -ceq 'pg_restore_list' -and $_.state -ceq 'succeeded'}).Count -eq 0) "pg_restore_list $($case.name) no downstream callbacks or succeeded stage"
 }
+$listProviderSentinel='PG_RESTORE_LIST_PROVIDER_SECRET raw-command=private-list secret-db'; $script:listProviderSentinel=$listProviderSentinel
+$a=New-FakeAdapter $m
+$a.Process={param($operation,$arguments,$environment) $null=$script:events.Add($operation); if($operation -ceq 'pg_dump'){return [pscustomobject]@{success=$true;exit_code=[int]0;size=[int64]1;hash=(Get-StageBTextHash 'dump')}}; if($operation -ceq 'pg_restore_list'){throw $script:listProviderSentinel}; [pscustomobject]@{success=$true;exit_code=[int]0}}
+$r=Invoke-StageBSequence $m $a
+$listErrorText=$r|ConvertTo-Json -Depth 10
+Assert-True ($r.status -ceq 'failed' -and $r.error_code -ceq 'stage_b_operation_failed' -and $r.live_blocked -is [System.Boolean] -and $r.live_blocked -ceq $true -and $r.criterion_8 -ceq 'not_evaluable' -and $r.dump_hash -ceq (Get-StageBTextHash 'dump') -and $listErrorText -notmatch 'PG_RESTORE_LIST_PROVIDER_SECRET|raw-command|private-list|secret-db') 'pg_restore_list provider exception privacy-safe failure'
+Assert-True (($script:events -join ',') -ceq 'stop-worker,stop-web,pg_dump,pg_restore_list,start-web,start-worker' -and $script:catalogCalls -eq 0 -and $script:createCalls -eq 0 -and $script:restoreSnapshotCalls -eq 0 -and $script:dropCalls -eq 0 -and @($r.stages|Where-Object {$_.stage -ceq 'pg_restore_list' -and $_.state -ceq 'succeeded'}).Count -eq 0) 'pg_restore_list provider exception no downstream callbacks or succeeded stage'
+$listMalformedSentinel='PG_RESTORE_LIST_MALFORMED_SECRET'
+$malformedList=[pscustomobject]@{success=$true;exit_code=[int]0;size=[int64]1;hash=('b'*64);diagnostic=$listMalformedSentinel}
+$a=New-FakeAdapter $m -ListResult $malformedList
+$r=Invoke-StageBSequence $m $a
+$listErrorText=$r|ConvertTo-Json -Depth 10
+Assert-True ($r.status -ceq 'failed' -and $r.error_code -ceq 'stage_b_operation_failed' -and $r.live_blocked -is [System.Boolean] -and $r.live_blocked -ceq $true -and $r.criterion_8 -ceq 'not_evaluable' -and $r.dump_hash -ceq (Get-StageBTextHash 'dump') -and $listErrorText -notmatch $listMalformedSentinel) 'pg_restore_list malformed provider privacy-safe failure'
+Assert-True (($script:events -join ',') -ceq 'stop-worker,stop-web,pg_dump,pg_restore_list,start-web,start-worker' -and $script:catalogCalls -eq 0 -and $script:createCalls -eq 0 -and $script:restoreSnapshotCalls -eq 0 -and $script:dropCalls -eq 0 -and @($r.stages|Where-Object {$_.stage -ceq 'pg_restore_list' -and $_.state -ceq 'succeeded'}).Count -eq 0) 'pg_restore_list malformed provider no downstream callbacks or succeeded stage'
 
 $validRestore=[pscustomobject]@{success=$true;exit_code=[int]0}
 Assert-StageBPgRestoreResult $validRestore
