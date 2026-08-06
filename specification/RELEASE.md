@@ -33,11 +33,11 @@ Criticalが1件でも受入基準を満たさない場合、正式リリース�
 | 自己登録方針 | 匿名登録による不正利用、権限付与、監査不能 | 許可・招待・管理者作成のいずれかを責任者が承認し、選択外経路をUI/APIとも利用不可にする。選択経路の監査と濫用防止試験が成功する | 方針承認、RBAC／登録試験結果、監査ログ |
 | Excel／印刷運用 | 対話型Office、マクロ、プリンタ、共有権限の失敗、lock・紙切れ・Excel残留による停止や二重発行 | Windows、Office、プリンタ、サービスアカウント、ライセンスを承認し、無人E2Eと、file lock・紙切れ・共有断・Excel残留からの復旧試験が全件成功する | 環境票、承認記録、E2E／障害試験ログ |
 
-## 3.1 R1-02b Stage B read-only callback contract
+### 3.1 R1-02b Stage B read-only callback contract
 
 Stage BのSnapshot、Catalog、Jobs、StateおよびPowerShell／Python helper境界は、以下のread-only契約に従う。公開結果、hash、manifest、evidenceは、ここで定義したexact field setとfail-closed条件から外れてはならない。
 
-### 3.1.1 Snapshot hash contract
+#### 3.1.1 Snapshot hash contract
 
 Snapshotのcanonicalizationは、既存`deployment/postgresql/stage_b_snapshot.py`の`digest()`、`canonical_json_bytes()`および既存golden testを正本とする。別のJSON encoding、key ordering、row orderingを導入しない。
 
@@ -83,7 +83,7 @@ semantic: semantic_payload
 
 restore modeでは、観測した`oid_hash`が`expectedSourceOidHash`と同じ場合を成功扱いせず、fail-closedとする。
 
-### 3.1.2 Catalog三state contract
+#### 3.1.2 Catalog三state contract
 
 Catalogは対象database名についてPostgreSQL catalogをread-onlyで照会し、候補が0件または1件であることを要求する。`connections`は対象DBへの他backend数であり、probe自身のbackendを除外する。
 
@@ -95,7 +95,7 @@ Catalogは対象database名についてPostgreSQL catalogをread-onlyで照会�
 
 複数候補または判定不能、OID不一致、owner不一致、他connectionが1以上、empty proofの欠測または型不正、query失敗またはtimeoutは、新しいstateへ丸めず固定reason codeでfail-closedとする。`eligible`は一般に削除してよいDBを意味せず、同一executionで作成・記録されたrestore identityに一致する場合だけCleanup guardとして使用する。
 
-### 3.1.3 Restore identity lifecycle
+#### 3.1.3 Restore identity lifecycle
 
 PostgreSQLのOIDは作成時に割り当てられるため、PlanOnlyで存在しない復元先のOIDを予測しない。
 
@@ -127,7 +127,7 @@ restore_identity:
 
 Execute approvalには`manifest_sha256`を必須とし、Cleanup approvalには`manifest_sha256`と`execution_sha256`の両方を必須とする。actionごとのexact property setをvalidatorで固定する。Cleanupは、approvalがmanifestとexecution evidenceを正確に指名し、Catalogが`eligible`で、Catalog identityがExecution evidenceの`restore_identity`と一致し、他connectionが0で、active Jobsが0である場合だけ許可する。
 
-### 3.1.4 Jobs contract
+#### 3.1.4 Jobs contract
 
 active Jobは全Jobについて次のpredicateだけで数える。
 
@@ -137,7 +137,7 @@ status IN ('queued', 'running')
 
 `resource_key`、`job_type`、追加の論理削除filterは使用しない。結果は0以上の32-bit整数とする。query失敗、timeout、負数、overflow、collection、型不正はfail-closedとする。
 
-### 3.1.5 State observation contract
+#### 3.1.5 State observation contract
 
 `State(manifest)`はmanifestをそのままechoして観測を省略してはならない。各fieldの正本は次のとおりとする。
 
@@ -156,13 +156,13 @@ status IN ('queued', 'running')
 
 service probeで許可する操作は`Get-Service`または同等のread-only CIM queryだけとする。`Start-Service`、`Stop-Service`、`Restart-Service`、設定変更、process killを含めない。service probeは内部的に`running`、`stopped`、`missing`、`unknown`を区別し、current-state guardが要求する箇所では`running`以外をfail-closedとする。restoreが`absent`の場合、Stateおよびvalidatorは`restore.oid_hash = null`を許可し、存在する場合は有効なhashを必須とする。
 
-### 3.1.6 DB timeout and injection boundary
+#### 3.1.6 DB timeout and injection boundary
 
 すべての外部観測に有限timeoutを設定する。既定値はPostgreSQL connect 5秒、PostgreSQL statement/query 15秒、lock 1秒、helper process transport 60秒とする。production値は設定可能だが、無制限値を許可しない。
 
 testおよびprovider境界では、connection factory、query runner、clock／timeout source、helper invokerを注入可能とする。DB接続はread-only transaction／sessionとして構成し、少なくとも`default_transaction_read_only=on`を維持する。read-only providerからDDL／DML、advisory lock取得、service mutationを実行しない。
 
-### 3.1.7 Helper transport schema
+#### 3.1.7 Helper transport schema
 
 PowerShell 5.1とPython helper間はstdin／stdoutの単一JSON envelopeを使用する。Requestの共通shapeは次のとおりとする。
 
