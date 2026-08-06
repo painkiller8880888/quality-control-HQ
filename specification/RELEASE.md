@@ -33,6 +33,165 @@ Criticalが1件でも受入基準を満たさない場合、正式リリース�
 | 自己登録方針 | 匿名登録による不正利用、権限付与、監査不能 | 許可・招待・管理者作成のいずれかを責任者が承認し、選択外経路をUI/APIとも利用不可にする。選択経路の監査と濫用防止試験が成功する | 方針承認、RBAC／登録試験結果、監査ログ |
 | Excel／印刷運用 | 対話型Office、マクロ、プリンタ、共有権限の失敗、lock・紙切れ・Excel残留による停止や二重発行 | Windows、Office、プリンタ、サービスアカウント、ライセンスを承認し、無人E2Eと、file lock・紙切れ・共有断・Excel残留からの復旧試験が全件成功する | 環境票、承認記録、E2E／障害試験ログ |
 
+## 3.1 R1-02b Stage B read-only callback contract
+
+Stage BのSnapshot、Catalog、Jobs、StateおよびPowerShell／Python helper境界は、以下のread-only契約に従う。公開結果、hash、manifest、evidenceは、ここで定義したexact field setとfail-closed条件から外れてはならない。
+
+### 3.1.1 Snapshot hash contract
+
+Snapshotのcanonicalizationは、既存`deployment/postgresql/stage_b_snapshot.py`の`digest()`、`canonical_json_bytes()`および既存golden testを正本とする。別のJSON encoding、key ordering、row orderingを導入しない。
+
+Snapshotは、復元内容の同値比較に使う`semantic_payload`と、sourceの同一DB・同一内容を確認する`baseline_payload`を別々に構成する。
+
+`semantic_payload`のexact key setは次のとおりとする。
+
+```text
+empty_proof
+schema_inventory
+migrations
+quality_master
+quality_masterclass
+quality_structure
+quality_inspectionfile
+quality_appsetting
+inspection_file_path_set_hash
+```
+
+`semantic_hash = digest(semantic_payload)`とする。`baseline_payload`のexact key setは、次の`identity`と、上記semantic payloadそのものを持つ`semantic`とする。
+
+```text
+identity:
+  endpoint_hash
+  database_hash
+  oid_hash
+  role_hash
+  server_version_num_hash
+semantic: semantic_payload
+```
+
+`baseline_hash = digest(baseline_payload)`とする。`host_hash`と`port_hash`は内部互換のために存在してもよいが、baseline payloadおよび公開callback resultへ含めない。日時、接続PID、backend PID、実行時刻、query durationその他のvolatile valueを公開結果またはhashへ追加しない。
+
+公開Snapshot callback resultは次のshapeに固定する。
+
+```text
+{
+  identity: { oid_hash },
+  baseline_hash,
+  semantic_hash
+}
+```
+
+restore modeでは、観測した`oid_hash`が`expectedSourceOidHash`と同じ場合を成功扱いせず、fail-closedとする。
+
+### 3.1.2 Catalog三state contract
+
+Catalogは対象database名についてPostgreSQL catalogをread-onlyで照会し、候補が0件または1件であることを要求する。`connections`は対象DBへの他backend数であり、probe自身のbackendを除外する。
+
+| state | 固定条件 |
+|---|---|
+| `absent` | 対象databaseが存在しない。`oid_hash = null`、`owner_hash = null`、`connections = 0`。 |
+| `existing_empty` | 対象databaseが存在し、OIDとownerが期待値に一致し、他connectionが0で、Snapshotの`empty_proof.is_empty = true`。`oid_hash`と`owner_hash`を返す。 |
+| `eligible` | 対象databaseが存在し、OIDとownerが作成後に固定されたrestore identityに一致し、他connectionが0で、Snapshotの`empty_proof.is_empty = false`。`oid_hash`と`owner_hash`を返す。 |
+
+複数候補または判定不能、OID不一致、owner不一致、他connectionが1以上、empty proofの欠測または型不正、query失敗またはtimeoutは、新しいstateへ丸めず固定reason codeでfail-closedとする。`eligible`は一般に削除してよいDBを意味せず、同一executionで作成・記録されたrestore identityに一致する場合だけCleanup guardとして使用する。
+
+### 3.1.3 Restore identity lifecycle
+
+PostgreSQLのOIDは作成時に割り当てられるため、PlanOnlyで存在しない復元先のOIDを予測しない。
+
+- `restore.state = "absent"`のPending manifestでは、`restore.oid_hash = null`を必須とする。`restore.owner_hash`は、作成前でも期待するrestore ownerのhashとして保持する。
+- `restore.state = "existing_empty"`では、有効な`restore.oid_hash`を必須とする。
+- sourceまたはprotected targetとの衝突判定は、利用可能なendpoint、database、OID identityを用いてfail-closedで行う。
+
+CreateRestoreの成功結果は次のexact shapeとする。
+
+```text
+{
+  success: true,
+  oid_hash,
+  owner_hash
+}
+```
+
+作成直後にCatalogを再観測し、CreateRestore result、Catalog result、manifestのendpoint、database、expected ownerがすべて一致した場合だけ、restore identityをinvocation-localに固定する。OIDまたはownerの欠測、不一致、複数候補、timeoutは作成成功として先へ進めない。
+
+Execute evidenceには、実際に使用した次のexact `restore_identity`を保存し、manifest hashへ結び付ける。
+
+```text
+restore_identity:
+  endpoint_hash
+  database_hash
+  oid_hash
+  owner_hash
+```
+
+Execute approvalには`manifest_sha256`を必須とし、Cleanup approvalには`manifest_sha256`と`execution_sha256`の両方を必須とする。actionごとのexact property setをvalidatorで固定する。Cleanupは、approvalがmanifestとexecution evidenceを正確に指名し、Catalogが`eligible`で、Catalog identityがExecution evidenceの`restore_identity`と一致し、他connectionが0で、active Jobsが0である場合だけ許可する。
+
+### 3.1.4 Jobs contract
+
+active Jobは全Jobについて次のpredicateだけで数える。
+
+```sql
+status IN ('queued', 'running')
+```
+
+`resource_key`、`job_type`、追加の論理削除filterは使用しない。結果は0以上の32-bit整数とする。query失敗、timeout、負数、overflow、collection、型不正はfail-closedとする。
+
+### 3.1.5 State observation contract
+
+`State(manifest)`はmanifestをそのままechoして観測を省略してはならない。各fieldの正本は次のとおりとする。
+
+| field | 観測元 |
+|---|---|
+| `jobs` | Jobs providerによるDB再照会 |
+| `source` | source Snapshotと接続identityの再観測 |
+| `source_baseline_hash` | source Snapshotの再計算値 |
+| `restore` | Catalog。存在する場合は必要に応じてrestore Snapshotも使用 |
+| `clients` | 許可されたread-only binary/version probe |
+| `storage.capacity_bytes` | 許可されたread-only filesystem capacity probe |
+| `storage.root_hash` | probe対象として正規化したrootのhash |
+| `storage.required_bytes`／`retention_days` | manifestに固定されたpolicy値を比較用に保持 |
+| `owners` | PostgreSQL catalogと固定されたrestore identity |
+| `services` | Windows serviceのread-only state probe |
+
+service probeで許可する操作は`Get-Service`または同等のread-only CIM queryだけとする。`Start-Service`、`Stop-Service`、`Restart-Service`、設定変更、process killを含めない。service probeは内部的に`running`、`stopped`、`missing`、`unknown`を区別し、current-state guardが要求する箇所では`running`以外をfail-closedとする。restoreが`absent`の場合、Stateおよびvalidatorは`restore.oid_hash = null`を許可し、存在する場合は有効なhashを必須とする。
+
+### 3.1.6 DB timeout and injection boundary
+
+すべての外部観測に有限timeoutを設定する。既定値はPostgreSQL connect 5秒、PostgreSQL statement/query 15秒、lock 1秒、helper process transport 60秒とする。production値は設定可能だが、無制限値を許可しない。
+
+testおよびprovider境界では、connection factory、query runner、clock／timeout source、helper invokerを注入可能とする。DB接続はread-only transaction／sessionとして構成し、少なくとも`default_transaction_read_only=on`を維持する。read-only providerからDDL／DML、advisory lock取得、service mutationを実行しない。
+
+### 3.1.7 Helper transport schema
+
+PowerShell 5.1とPython helper間はstdin／stdoutの単一JSON envelopeを使用する。Requestの共通shapeは次のとおりとする。
+
+```text
+{
+  schema_version: 1,
+  operation: "snapshot" | "catalog" | "jobs" | "state",
+  payload: { ...operation-specific exact payload... },
+  timeouts: {
+    connect_seconds,
+    query_seconds,
+    lock_seconds
+  }
+}
+```
+
+Responseの共通shapeは次のとおりとする。
+
+```text
+{
+  schema_version: 1,
+  success: true | false,
+  result: object | null,
+  reason: null | fixed_reason_code
+}
+```
+
+成功時は`result`を各callbackのexact validatorへ渡す。失敗時は`result = null`とし、raw exception、SQL、connection string、host、database、path、stdout／stderrを公開しない。extra／missing field、複数JSON、非JSON、型不正、timeoutはすべてfail-closedとする。
+
 ## 4. High要求
 
 Highは、受入基準を満たすか、残存リスク・期限・責任者を明記した期限付き受容をリリース判定会で承認する。
